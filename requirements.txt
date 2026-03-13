@@ -1,19 +1,28 @@
 # AI Trader — Python Dependencies
-# Install with: pip install -r requirements.txt
+# Install: pip install -r requirements.txt
 
 # ── Core ──────────────────────────────────────────────────────────────────────
-requests>=2.31.0          # HTTP client for all API calls
-pandas>=2.0.0             # Data manipulation and time series analysis
-numpy>=1.24.0             # Numerical computations for indicators
+requests>=2.31.0            # HTTP client for all API calls
+pandas>=2.0.0               # Data manipulation and time series analysis
+numpy>=1.24.0               # Numerical computations for indicators
+python-dotenv>=1.0.0        # Load API keys from .env file
 
-# ── Optional (enhanced features) ─────────────────────────────────────────────
-yfinance>=0.2.18          # Yahoo Finance: stock & ETF data (unofficial API)
-python-dotenv>=1.0.0      # Load API keys from .env file
+# ── Stock & ETF Data ─────────────────────────────────────────────────────────
+yfinance>=0.2.18            # Yahoo Finance (stocks, ETFs, indices)
 
-# ── Live Trading (optional, only needed for live mode) ────────────────────────
-# ccxt>=4.0.0             # Unified crypto exchange API (Binance, Coinbase, etc.)
-#                         # Uncomment and install for live trading
+# ── Solana / Phantom Wallet ───────────────────────────────────────────────────
+# Required for live Solana trading via Phantom wallet + Jupiter DEX
+solana>=0.30.2              # Solana Python SDK (RPC client)
+solders>=0.18.1             # Rust-based Solana types (Keypair, Pubkey, etc.)
 
-# ── Development / Testing ────────────────────────────────────────────────────
+# ── Polymarket ────────────────────────────────────────────────────────────────
+# Required for live Polymarket prediction market trading
+py-clob-client>=0.12.0      # Official Polymarket CLOB client
+
+# ── CEX Live Trading (optional) ───────────────────────────────────────────────
+# Uncomment to enable live trading on Binance, Coinbase, etc.
+# ccxt>=4.0.0               # Unified crypto exchange API
+
+# ── Development ───────────────────────────────────────────────────────────────
 # pytest>=7.0.0
 # pytest-mock>=3.0.0

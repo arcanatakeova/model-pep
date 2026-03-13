@@ -6,11 +6,11 @@ import os
 
 # ─── Trading Mode ─────────────────────────────────────────────────────────────
 PAPER_TRADING = True          # Set False to enable live trading (requires API keys)
-INITIAL_CAPITAL = 10_000.0    # Starting capital in USD
+INITIAL_CAPITAL = 10_000.0    # Starting capital in USD (overridden by wallet balance)
 
 # ─── Risk Management ──────────────────────────────────────────────────────────
 MAX_POSITION_PCT = 0.10       # Max 10% of portfolio per position
-MAX_OPEN_POSITIONS = 8        # Maximum concurrent positions
+MAX_OPEN_POSITIONS = 12       # Maximum concurrent positions (more markets = more slots)
 STOP_LOSS_PCT = 0.03          # 3% stop loss
 TAKE_PROFIT_PCT = 0.06        # 6% take profit (2:1 R/R ratio)
 RISK_PER_TRADE_PCT = 0.02     # Risk 2% of portfolio per trade (Kelly-based)
@@ -82,20 +82,48 @@ COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")
 ALPHAVANTAGE_KEY = os.getenv("ALPHAVANTAGE_KEY", "")
 FINNHUB_KEY = os.getenv("FINNHUB_KEY", "")
 
-# Exchange API keys for live trading
+# Exchange API keys for live CEX trading (optional)
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
-BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
+BINANCE_SECRET  = os.getenv("BINANCE_SECRET", "")
 COINBASE_API_KEY = os.getenv("COINBASE_API_KEY", "")
-COINBASE_SECRET = os.getenv("COINBASE_SECRET", "")
+COINBASE_SECRET  = os.getenv("COINBASE_SECRET", "")
 
 # ─── Timing ───────────────────────────────────────────────────────────────────
-SCAN_INTERVAL_SEC = 300       # Scan markets every 5 minutes
+SCAN_INTERVAL_SEC = 60        # Scan markets every 60 seconds (every minute)
 OHLCV_CANDLES = 100           # Number of candles to fetch for analysis
 CANDLE_INTERVAL = "1h"        # 1-hour candles for analysis (crypto)
-DATA_CACHE_TTL = 60           # Cache market data for 60 seconds
+DATA_CACHE_TTL = 45           # Cache market data for 45 seconds
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 LOG_LEVEL = "INFO"
 LOG_FILE = "trader.log"
 TRADE_LOG_FILE = "trades.json"
-PORTFOLIO_SNAPSHOT_INTERVAL = 3600  # Save portfolio snapshot every hour
+PORTFOLIO_SNAPSHOT_INTERVAL = 300   # Save portfolio snapshot every 5 minutes
+
+# ─── DEX / On-Chain Settings ──────────────────────────────────────────────────
+DEX_MIN_SCORE = 0.50               # Minimum DEX token score to trade
+DEX_MAX_POSITION_USD = 500.0       # Max per DEX token (volatile = small size)
+DEX_PREFERRED_CHAINS = ["solana", "base", "ethereum", "bsc", "arbitrum"]
+DEX_SCAN_INTERVAL_SEC = 60        # Scan DEX every minute for new opportunities
+NEW_PAIR_MAX_AGE_HOURS = 24        # Only consider pairs newer than 24h for new-pair strategy
+NEW_PAIR_MIN_LIQUIDITY = 30_000    # $30k minimum liquidity for new pairs
+
+# ─── Solana / Phantom Wallet ──────────────────────────────────────────────────
+PHANTOM_PRIVATE_KEY = os.getenv("PHANTOM_PRIVATE_KEY", "")
+SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+SOL_TRADE_SIZE_USD = 50.0          # Default Solana trade size in USD
+SOL_MAX_SLIPPAGE_BPS = 150         # 1.5% max slippage for Solana swaps
+SOL_PRIORITY_FEE_LAMPORTS = 10000  # Priority fee for fast execution
+
+# ─── Polymarket ───────────────────────────────────────────────────────────────
+POLYMARKET_PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY", "")  # Polygon EVM key
+POLYMARKET_MIN_EDGE = 0.04         # Minimum 4% edge to trade
+POLYMARKET_MIN_VOLUME = 5_000      # Minimum $5k/24h market volume
+POLYMARKET_MAX_POSITION_USD = 200  # Max per prediction market position
+POLYMARKET_SCAN_INTERVAL_SEC = 120 # Scan Polymarket every 2 minutes
+
+# ─── Compounding ──────────────────────────────────────────────────────────────
+COMPOUND_ALL_PROFITS = True        # Always reinvest — never withdraw
+TARGET_DAILY_RETURN_PCT = 0.5     # 0.5%/day target = ~520% APY compounded
+API_COST_MONTHLY_USD = 0.0         # Using only free APIs (no cost)
+API_10X_TARGET = True              # Ensure returns >> 10x API costs
