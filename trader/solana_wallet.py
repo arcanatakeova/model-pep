@@ -233,9 +233,93 @@ class SolanaWallet:
 
     def sell_token(self, token_mint: str, token_amount_usd: float,
                    slippage_bps: int = DEFAULT_SLIPPAGE_BPS) -> Optional[str]:
-        """Sell a token back to USDC."""
-        logger.info("SELL %s worth $%.2f", token_mint[:20], token_amount_usd)
-        return self.swap(token_mint, USDC_MINT, token_amount_usd, slippage_bps)
+        """
+        Sell a token back to USDC.
+        Fetches the actual on-chain token balance and sells it all.
+        token_amount_usd is used only for logging (not for amount calculation).
+        """
+        logger.info("SELL %s (est. $%.2f)", token_mint[:20], token_amount_usd)
+        if not self.is_connected:
+            logger.info("PAPER SELL: %s est. $%.2f", token_mint[:20], token_amount_usd)
+            return f"paper_sell_{int(time.time())}"
+
+        try:
+            # Fetch actual token balance and its raw amount (in smallest units)
+            raw_amount, decimals = self._get_token_raw_balance(token_mint)
+            if raw_amount <= 0:
+                logger.warning("No balance found for token %s", token_mint[:20])
+                return None
+
+            logger.info("Selling %s raw units of %s (decimals=%d)",
+                        raw_amount, token_mint[:20], decimals)
+
+            # Get quote using raw token amount
+            quote = self.get_quote(token_mint, USDC_MINT, raw_amount, slippage_bps)
+            if not quote:
+                logger.error("No Jupiter quote for selling %s", token_mint[:20])
+                return None
+
+            out_usdc = int(quote.get("outAmount", 0)) / 1e6
+            price_impact = float(quote.get("priceImpactPct", 0))
+            if price_impact > 5.0:
+                logger.warning("Sell price impact too high: %.2f%%", price_impact)
+                return None
+
+            logger.info("Sell quote: ~$%.2f USDC (impact %.2f%%)", out_usdc, price_impact)
+
+            swap_payload = {
+                "quoteResponse": quote,
+                "userPublicKey": self._pubkey,
+                "wrapAndUnwrapSol": True,
+                "prioritizationFeeLamports": 10000,
+                "dynamicComputeUnitLimit": True,
+            }
+            resp = requests.post(JUPITER_SWAP_URL, json=swap_payload, timeout=15)
+            if not resp.ok:
+                logger.error("Jupiter sell build failed: %s", resp.text[:200])
+                return None
+
+            tx_b64 = resp.json().get("swapTransaction")
+            if not tx_b64:
+                return None
+
+            sig = self._sign_and_send(tx_b64)
+            if sig:
+                logger.info("SELL executed: %s → $%.2f USDC | tx: %s",
+                            token_mint[:12], out_usdc, sig[:16])
+            return sig
+
+        except Exception as e:
+            logger.error("Sell token error: %s", e)
+            return None
+
+    def _get_token_raw_balance(self, mint_address: str) -> tuple[int, int]:
+        """
+        Returns (raw_amount_in_smallest_units, decimals) for an SPL token.
+        raw_amount is what Jupiter needs for the quote (integer lamports/micro-units).
+        """
+        if not self.is_connected:
+            return 0, 6
+        try:
+            from solders.pubkey import Pubkey
+            resp = self._client.get_token_accounts_by_owner(
+                self._keypair.pubkey(),
+                {"mint": Pubkey.from_string(mint_address)},
+                commitment="confirmed",
+            )
+            if not resp.value:
+                return 0, 6
+            for acc in resp.value:
+                info = acc.account.data.parsed
+                token_amount = info.get("info", {}).get("tokenAmount", {})
+                raw = int(token_amount.get("amount", 0))
+                decimals = int(token_amount.get("decimals", 6))
+                if raw > 0:
+                    return raw, decimals
+            return 0, 6
+        except Exception as e:
+            logger.debug("Token raw balance error: %s", e)
+            return 0, 6
 
     def buy_with_sol(self, token_mint: str, sol_amount: float,
                      slippage_bps: int = DEFAULT_SLIPPAGE_BPS) -> Optional[str]:

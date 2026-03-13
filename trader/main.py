@@ -101,11 +101,13 @@ class AITrader:
         self._last_save    = time.time()
         self._last_poly    = 0.0
         self._last_dex     = 0.0
+        self._last_day     = datetime.now(timezone.utc).date()
         self._equity_curve = []
         self._dex_positions: dict = {}  # addr → {buy_price, qty, chain, symbol}
 
         # Load saved state
         self.portfolio.load()
+        self._load_dex_positions()
         self.risk_mgr.reset_daily_loss_tracker()
 
         # Sync initial capital with Phantom wallet if connected
@@ -152,10 +154,22 @@ class AITrader:
     def _run_cycle(self):
         self._cycle += 1
         t0 = time.time()
-        now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        now_dt = datetime.now(timezone.utc)
+        now    = now_dt.strftime("%H:%M:%S UTC")
         equity = self.portfolio.equity()
         logger.info("━━━ Cycle #%d  %s  Equity: $%.2f ━━━",
                     self._cycle, now, equity)
+
+        # ── Midnight reset: daily loss tracker + optional wallet sync ─────
+        today = now_dt.date()
+        if today != self._last_day:
+            self._last_day = today
+            self.risk_mgr.reset_daily_loss_tracker()
+            logger.info("Daily reset: new day %s, loss tracker cleared", today)
+            if self.solana.is_connected and self.live:
+                wallet_value = self.solana.get_portfolio_value_usd()
+                if wallet_value > 10:
+                    logger.info("Midnight wallet sync: $%.2f", wallet_value)
 
         # ── 1. Update all open positions (stops, trailing, PnL) ───────────
         self.executor.update_all_positions()
@@ -200,6 +214,7 @@ class AITrader:
         # ── 9. Periodic saves ─────────────────────────────────────────────
         if time.time() - self._last_save > config.PORTFOLIO_SNAPSHOT_INTERVAL:
             self.portfolio.save()
+            self._save_dex_positions()
             self._save_equity_curve()
             self._last_save = time.time()
 
@@ -441,9 +456,36 @@ class AITrader:
         logger.info("Saving state...")
         self.portfolio.save()
         self.compounder.save_state()
+        self._save_dex_positions()
         self._save_equity_curve()
         self._print_report()
         logger.info("Trader stopped cleanly.")
+
+    def _save_dex_positions(self):
+        """Persist open DEX positions so they survive restarts."""
+        try:
+            with open("dex_positions.json", "w") as f:
+                json.dump(self._dex_positions, f, indent=2)
+        except Exception as e:
+            logger.warning("Failed to save DEX positions: %s", e)
+
+    def _load_dex_positions(self):
+        """Reload DEX positions from disk on startup."""
+        try:
+            with open("dex_positions.json") as f:
+                self._dex_positions = json.load(f)
+            if self._dex_positions:
+                logger.info("DEX positions restored: %d open", len(self._dex_positions))
+                for pair, pos in self._dex_positions.items():
+                    logger.info("  ↳ %s/%s entry=$%.8f size=$%.2f",
+                                pos.get("chain", "?").upper(),
+                                pos.get("symbol", "?"),
+                                pos.get("entry_price", 0),
+                                pos.get("size_usd", 0))
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning("Failed to load DEX positions: %s", e)
 
     def _save_equity_curve(self):
         try:
@@ -548,11 +590,27 @@ def cmd_status():
 
     positions = portfolio.open_positions_summary()
     if positions:
-        print(f"\n  Open positions ({len(positions)}):")
+        print(f"\n  Open CEX positions ({len(positions)}):")
         for p in positions:
             print(f"    {p['symbol']:<12} {p['side']:<5} "
                   f"entry=${p['entry_price']:.4f} now=${p['current_price']:.4f} "
                   f"pnl={p['unrealized_pnl_pct']:>+.1f}%")
+
+    # Show on-chain DEX positions
+    try:
+        with open("dex_positions.json") as f:
+            dex_pos = json.load(f)
+        if dex_pos:
+            print(f"\n  Open DEX positions ({len(dex_pos)}):")
+            for pair, pos in dex_pos.items():
+                print(f"    [{pos.get('chain','?').upper():<8}] "
+                      f"{pos.get('symbol','?'):<10} "
+                      f"entry=${pos.get('entry_price',0):.8f} "
+                      f"size=${pos.get('size_usd',0):.2f}  "
+                      f"opened={pos.get('opened_at','?')[:10]}")
+    except FileNotFoundError:
+        pass
+
     print(f"{'═'*70}\n")
 
 
