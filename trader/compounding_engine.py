@@ -16,6 +16,7 @@ Philosophy:
 - Rotate capital into highest-performing market types
 - Scale aggression as the system proves itself
 """
+from __future__ import annotations
 import json
 import logging
 import os

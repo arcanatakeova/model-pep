@@ -10,6 +10,7 @@ Edge sources:
 - High-volume markets with inefficient pricing
 - Event-correlated position building
 """
+from __future__ import annotations
 import logging
 import time
 import requests

@@ -9,6 +9,7 @@ Strategies:
 - Breakout detection (price action + transaction velocity)
 - Liquidity safety scoring (rug-pull risk filter)
 """
+from __future__ import annotations
 import logging
 import time
 import requests

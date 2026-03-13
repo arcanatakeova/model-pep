@@ -8,6 +8,7 @@ Implements:
 - Daily loss circuit breaker
 - Volatility-adjusted position sizing
 """
+from __future__ import annotations
 import logging
 import math
 from typing import Optional
