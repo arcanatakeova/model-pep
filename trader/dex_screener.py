@@ -23,15 +23,15 @@ logger = logging.getLogger(__name__)
 DEXSCREENER_BASE = "https://api.dexscreener.com"
 
 # ── Filters ────────────────────────────────────────────────────────────────────
-MIN_LIQUIDITY_USD    = 25_000      # At least $25k liquidity (rug safety)
-MIN_VOLUME_H1_USD    = 5_000       # At least $5k/hr volume
-MIN_VOLUME_H24_USD   = 50_000      # At least $50k/24h volume
-MAX_PAIR_AGE_HOURS   = 72          # For new pair scanner (3 days max)
-MIN_BUY_SELL_RATIO   = 1.2         # Buys must exceed sells by 20%
-MIN_MARKET_CAP       = 100_000     # At least $100k mcap
+MIN_LIQUIDITY_USD    = 10_000      # $10k liquidity (lower for Solana memecoins)
+MIN_VOLUME_H1_USD    = 2_000       # $2k/hr volume (memecoins move fast)
+MIN_VOLUME_H24_USD   = 20_000      # $20k/24h volume
+MAX_PAIR_AGE_HOURS   = 96          # Up to 4 days old
+MIN_BUY_SELL_RATIO   = 1.1         # Buys exceed sells by 10%
+MIN_MARKET_CAP       = 50_000      # $50k mcap minimum
 MAX_MARKET_CAP       = 500_000_000 # Under $500M (room to run)
-MIN_PRICE_CHANGE_H1  = 3.0         # At least +3% last hour for momentum
-PREFERRED_CHAINS     = ["solana", "base", "ethereum", "bsc", "arbitrum", "polygon"]
+MIN_PRICE_CHANGE_H1  = 2.0         # At least +2% last hour
+PREFERRED_CHAINS     = ["solana"]  # Solana only
 
 
 @dataclass

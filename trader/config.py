@@ -14,34 +14,23 @@ MAX_OPEN_POSITIONS = 12       # Maximum concurrent positions (more markets = mor
 STOP_LOSS_PCT = 0.03          # 3% stop loss
 TAKE_PROFIT_PCT = 0.06        # 6% take profit (2:1 R/R ratio)
 RISK_PER_TRADE_PCT = 0.02     # Risk 2% of portfolio per trade (Kelly-based)
-MIN_SIGNAL_STRENGTH = 0.45    # Minimum ensemble score to trigger trade
+MIN_SIGNAL_STRENGTH = 0.38    # Minimum ensemble score to trigger trade
 TRAILING_STOP_PCT = 0.025     # 2.5% trailing stop
 
 # ─── Market Coverage ──────────────────────────────────────────────────────────
-CRYPTO_TOP_N = 50             # Watch top N cryptocurrencies by market cap
-CRYPTO_MIN_VOLUME_USD = 5_000_000   # Minimum 24h volume to consider
+CRYPTO_TOP_N = 5              # Only top few coins (SOL focus, CEX scanner minimal)
+CRYPTO_MIN_VOLUME_USD = 1_000_000   # Minimum 24h volume to consider
 
 # Target crypto assets (overrides top-N if set)
 CRYPTO_WATCHLIST = [
-    "bitcoin", "ethereum", "solana", "binancecoin", "avalanche-2",
-    "chainlink", "polkadot", "cardano", "matic-network", "arbitrum",
-    "optimism", "uniswap", "aave", "maker", "dogecoin",
+    "solana",
 ]
 
-# Major forex pairs (base/quote)
-FOREX_PAIRS = [
-    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD",
-    "USD/CAD", "USD/CHF", "NZD/USD",
-]
+# Major forex pairs — disabled (Solana focus)
+FOREX_PAIRS = []
 
-# Stock/ETF symbols (via Yahoo Finance unofficial)
-STOCK_WATCHLIST = [
-    "SPY", "QQQ", "IWM",       # Major index ETFs
-    "AAPL", "MSFT", "GOOGL",   # Tech megacaps
-    "NVDA", "AMD", "TSM",       # Semiconductors
-    "GLD", "SLV", "USO",        # Commodities ETFs
-    "TLT", "HYG",               # Bond ETFs
-]
+# Stock/ETF symbols — disabled (Solana focus)
+STOCK_WATCHLIST = []
 
 # ─── Strategy Weights ─────────────────────────────────────────────────────────
 STRATEGY_WEIGHTS = {
@@ -101,12 +90,12 @@ TRADE_LOG_FILE = "trades.json"
 PORTFOLIO_SNAPSHOT_INTERVAL = 300   # Save portfolio snapshot every 5 minutes
 
 # ─── DEX / On-Chain Settings ──────────────────────────────────────────────────
-DEX_MIN_SCORE = 0.50               # Minimum DEX token score to trade
+DEX_MIN_SCORE = 0.35               # Lower threshold to catch more Solana memecoins
 DEX_MAX_POSITION_USD = 500.0       # Max per DEX token (volatile = small size)
-DEX_PREFERRED_CHAINS = ["solana", "base", "ethereum", "bsc", "arbitrum"]
-DEX_SCAN_INTERVAL_SEC = 60        # Scan DEX every minute for new opportunities
-NEW_PAIR_MAX_AGE_HOURS = 24        # Only consider pairs newer than 24h for new-pair strategy
-NEW_PAIR_MIN_LIQUIDITY = 30_000    # $30k minimum liquidity for new pairs
+DEX_PREFERRED_CHAINS = ["solana"]  # Solana only
+DEX_SCAN_INTERVAL_SEC = 45         # Scan DEX every 45s for faster memecoin catching
+NEW_PAIR_MAX_AGE_HOURS = 48        # Consider pairs up to 48h old
+NEW_PAIR_MIN_LIQUIDITY = 15_000    # $15k minimum liquidity (lower for memecoins)
 
 # ─── Solana / Phantom Wallet ──────────────────────────────────────────────────
 PHANTOM_PRIVATE_KEY = os.getenv("PHANTOM_PRIVATE_KEY", "")
