@@ -120,12 +120,15 @@ class MarketScanner:
         return None
 
     def _analyze_crypto(self, coin_id: str) -> Optional[TradeSignal]:
-        # Primary: CryptoCompare hourly OHLCV (more reliable)
+        # Use CryptoCompare exclusively for OHLCV — fast, no rate limits
         symbol = self._symbol_map.get(coin_id, coin_id.upper().split("-")[0])
+        # Handle multi-word CoinGecko IDs → CC symbol (e.g. "avalanche-2" → "AVAX")
+        CC_OVERRIDES = {
+            "avalanche-2": "AVAX", "matic-network": "MATIC", "binancecoin": "BNB",
+            "shiba-inu": "SHIB", "wrapped-bitcoin": "WBTC", "staked-ether": "STETH",
+        }
+        symbol = CC_OVERRIDES.get(coin_id, symbol)
         df = df_mod.get_crypto_ohlcv_cc(symbol, limit=config.OHLCV_CANDLES)
-        if df.empty:
-            # Fallback: CoinGecko
-            df = df_mod.get_coin_ohlcv(coin_id, days=14)
         if df.empty or len(df) < 30:
             return None
 

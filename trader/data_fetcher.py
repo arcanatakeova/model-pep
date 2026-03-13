@@ -44,16 +44,16 @@ def _get(url: str, params: dict = None, timeout: int = 10) -> Optional[dict]:
                 headers["x-cg-demo-api-key"] = config.COINGECKO_API_KEY
             resp = requests.get(url, params=params, headers=headers, timeout=timeout)
             if resp.status_code == 429:
-                wait = 2 ** attempt * 5
-                logger.warning("Rate limited by %s, waiting %ds", url, wait)
+                wait = 2 + attempt * 2   # 2s, 4s, 6s — fast backoff for 60s cycles
+                logger.debug("Rate limited by %s, waiting %ds", url, wait)
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as e:
-            logger.warning("Request failed (%s): %s", url, e)
+            logger.debug("Request failed (%s): %s", url, e)
             if attempt < 2:
-                time.sleep(2 ** attempt)
+                time.sleep(1)
     return None
 
 
@@ -103,9 +103,11 @@ def get_coin_ohlcv(coin_id: str, days: int = 30, interval: str = "hourly") -> pd
     df = df.sort_values("timestamp").reset_index(drop=True)
 
     # CoinGecko OHLC doesn't include volume — fetch it separately
+    # NOTE: `interval` param requires a paid CoinGecko plan; omit for free tier.
+    # Auto-granularity: 1-2 days → 5min, 3-89 days → hourly, 90+ → daily
     vol_data = _get(
         f"{config.COINGECKO_BASE}/coins/{coin_id}/market_chart",
-        params={"vs_currency": "usd", "days": days, "interval": interval},
+        params={"vs_currency": "usd", "days": days},
     )
     if vol_data and "total_volumes" in vol_data:
         vdf = pd.DataFrame(vol_data["total_volumes"], columns=["timestamp", "volume"])

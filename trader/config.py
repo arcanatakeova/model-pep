@@ -23,9 +23,9 @@ CRYPTO_MIN_VOLUME_USD = 5_000_000   # Minimum 24h volume to consider
 
 # Target crypto assets (overrides top-N if set)
 CRYPTO_WATCHLIST = [
-    "bitcoin", "ethereum", "solana", "bnb", "avalanche-2",
-    "chainlink", "polkadot", "cardano", "polygon", "arbitrum",
-    "optimism", "uniswap", "aave", "maker", "compound-governance-token",
+    "bitcoin", "ethereum", "solana", "binancecoin", "avalanche-2",
+    "chainlink", "polkadot", "cardano", "matic-network", "arbitrum",
+    "optimism", "uniswap", "aave", "maker", "dogecoin",
 ]
 
 # Major forex pairs (base/quote)
