@@ -401,22 +401,32 @@ class AITrader:
     def _write_bot_state(self, equity: float, elapsed_ms: float):
         """Write lightweight state file for the dashboard to read."""
         try:
+            daily_pnl = round(equity - self._day_start_eq, 2)
             state = {
                 "cycle": self._cycle,
                 "last_cycle_ts": time.time(),
                 "last_cycle_ms": round(elapsed_ms, 1),
                 "equity": round(equity, 2),
+                "cash": round(self.portfolio.cash, 2),
+                "initial_capital": self.portfolio.initial_capital,
                 "mode": "live" if self.live else "paper",
-                "daily_pnl_usd": round(equity - self._day_start_eq, 2),
-                "daily_pnl_pct": round((equity - self._day_start_eq) / self._day_start_eq * 100, 2)
+                "daily_pnl_usd": daily_pnl,
+                "daily_pnl_pct": round(daily_pnl / self._day_start_eq * 100, 2)
                     if self._day_start_eq > 0 else 0,
                 "ws_connected": self._ws_feed.connected if self._ws_feed else False,
                 "futures_enabled": config.FUTURES_ENABLED,
                 "open_positions": len(self.portfolio.open_positions),
                 "dex_positions": len(self._dex_positions),
+                "peak_equity": round(self.portfolio.peak_equity, 2),
+                "total_trades": len(self.portfolio.closed_trades),
             }
             with open("bot_state.json", "w") as f:
                 json.dump(state, f)
+            # Write equity curve every cycle so chart stays live (not just every 5 min)
+            self._save_equity_curve()
+            # Write portfolio + DEX positions every cycle for live position cards
+            self.portfolio.save()
+            self._save_dex_positions()
         except Exception:
             pass   # Non-critical — dashboard will show stale data
 
@@ -501,10 +511,10 @@ class AITrader:
     def _run_dex_scan(self):
         """DEX Screener scan with safety checks, vol-adjusted sizing, concentration limits."""
         try:
-            # Circuit breaker: respect daily loss limit before opening any new DEX trades
-            allowed, cb_reason = self.risk_mgr.can_open_position("_dex_check", size_usd=1)
-            if not allowed and "circuit breaker" in cb_reason.lower():
-                logger.info("DEX scan skipped: %s", cb_reason)
+            # Skip DEX scan only if max drawdown guard fired (portfolio protection),
+            # NOT on daily loss — bot should always recover and keep trading
+            if self.risk_mgr._max_drawdown_triggered():
+                logger.info("DEX scan skipped: max drawdown guard active")
                 return
 
             tokens = self.dex_screener.get_multi_chain_opportunities()

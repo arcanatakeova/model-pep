@@ -27,7 +27,7 @@ FUTURES_SYMBOLS = [                       # USDT-M perpetual pairs to trade with
     "SOL/USDT:USDT",
 ]
 FUTURES_RISK_PCT = 0.01                   # 1% of equity at risk per futures trade
-FUTURES_DAILY_LOSS_LIMIT = 0.03           # 3% daily loss limit (tighter — leverage amplifies losses)
+FUTURES_DAILY_LOSS_LIMIT = 0.20           # 20% daily loss — bot always keeps trading and recovering
 # Maps (min_conviction_threshold, leverage_multiplier) — highest conviction first
 # BUG FIX: was (0.00, 2) — any signal got 2x. Now requires 0.40 minimum.
 LEVERAGE_BY_CONVICTION = [

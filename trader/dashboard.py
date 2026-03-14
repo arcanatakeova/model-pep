@@ -1,50 +1,28 @@
 """
-AI Trader v3.0 — Real-Time Trading Dashboard
-=============================================
+AI Trader v3.0 — Live Visual Dashboard
+=======================================
 Run with:
     cd trader
     streamlit run dashboard.py
 
-Opens in browser at http://localhost:8501
-Auto-refreshes every 15 seconds.
-Reads live data from trader JSON files — zero impact on bot performance.
-
-Features:
-  • Live equity curve with Plotly (interactive zoom/pan)
-  • Open positions table with unrealized P&L, leverage, liq price
-  • Signal feed — last signals that fired and why
-  • Performance analytics — win rate, Sharpe, profit factor, max DD
-  • Market heatmap — 24h performance by asset
-  • Risk gauges — daily loss, drawdown, cash utilization
-  • Funding arb tracker
-  • Grid trading positions
-  • Bot health — last cycle time, API status
-  • One-click controls — pause/resume bot
+Refreshes every 5 seconds. Reads JSON files written by the bot every cycle.
 """
 import json
-import os
-import sys
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional
+import sys
 
-# ── Graceful import of streamlit/plotly ───────────────────────────────────────
 try:
     import streamlit as st
     import plotly.graph_objects as go
-    import plotly.express as px
     import pandas as pd
 except ImportError as e:
-    print(f"Missing dependency: {e}")
-    print("Install with: pip install streamlit plotly pandas")
+    print(f"Missing: {e}. Run: pip3 install streamlit plotly pandas")
     sys.exit(1)
 
-# ── Path setup ─────────────────────────────────────────────────────────────────
 TRADER_DIR = Path(__file__).parent
-sys.path.insert(0, str(TRADER_DIR))
 
-# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="AI Trader v3.0",
     page_icon="📈",
@@ -52,587 +30,517 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── Custom CSS for dark professional look ─────────────────────────────────────
 st.markdown("""
 <style>
-    .main { background-color: #0e1117; }
-    .stApp { background-color: #0e1117; }
+    /* Dark base */
+    .stApp, .main, section[data-testid="stSidebar"] {
+        background-color: #0a0e1a !important;
+    }
+    .block-container { padding-top: 1rem !important; }
 
-    /* Metric card */
+    /* KPI cards */
     div[data-testid="metric-container"] {
-        background: linear-gradient(135deg, #1a1f2e 0%, #16213e 100%);
-        border: 1px solid #2a3550;
-        border-radius: 10px;
-        padding: 16px 20px;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        background: linear-gradient(135deg, #111827 0%, #0f172a 100%);
+        border: 1px solid #1e3a5f;
+        border-radius: 12px;
+        padding: 18px 20px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.4);
     }
     div[data-testid="metric-container"] label {
-        color: #7b8cb5 !important;
-        font-size: 12px;
+        color: #64748b !important;
+        font-size: 11px !important;
         text-transform: uppercase;
-        letter-spacing: 1px;
+        letter-spacing: 1.5px;
+        font-weight: 600;
     }
     div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
-        color: #e8eaf0 !important;
-        font-size: 26px;
-        font-weight: 700;
+        color: #f1f5f9 !important;
+        font-size: 28px !important;
+        font-weight: 800 !important;
     }
+    div[data-testid="stMetricDelta"] svg { display: none; }
+    div[data-testid="stMetricDelta"] > div { font-size: 13px !important; font-weight: 600; }
 
-    /* Section headers */
-    .section-header {
-        color: #7b8cb5;
-        font-size: 11px;
+    /* Section labels */
+    .section-label {
+        color: #475569;
+        font-size: 10px;
         text-transform: uppercase;
-        letter-spacing: 2px;
-        font-weight: 600;
-        margin: 24px 0 12px 0;
-        padding-bottom: 6px;
-        border-bottom: 1px solid #1e2740;
+        letter-spacing: 2.5px;
+        font-weight: 700;
+        margin: 20px 0 10px 0;
+        padding-bottom: 8px;
+        border-bottom: 1px solid #1e2d45;
     }
 
-    /* Position table rows */
-    .pos-row-profit { background-color: rgba(0, 200, 83, 0.08) !important; }
-    .pos-row-loss   { background-color: rgba(239, 68, 68, 0.08) !important; }
+    /* Trade cards */
+    .trade-card {
+        border-radius: 12px;
+        padding: 16px 18px;
+        margin-bottom: 10px;
+        transition: all 0.2s;
+    }
 
-    /* Status badge */
-    .badge-live   { background:#0d4f1c; color:#34d058; padding:3px 10px; border-radius:12px; font-size:12px; font-weight:700; }
-    .badge-paper  { background:#4a3000; color:#f5a623; padding:3px 10px; border-radius:12px; font-size:12px; font-weight:700; }
-    .badge-paused { background:#3d0000; color:#ef4444; padding:3px 10px; border-radius:12px; font-size:12px; font-weight:700; }
-
-    /* Override Streamlit dataframe styles */
-    .stDataFrame { border-radius: 8px; overflow: hidden; }
-
-    /* Scrollable signal feed */
-    .signal-feed {
-        max-height: 350px;
+    /* Signal feed */
+    .feed {
+        height: 340px;
         overflow-y: auto;
-        font-family: 'Courier New', monospace;
-        font-size: 12px;
-        background: #0d1117;
-        border: 1px solid #1e2740;
-        border-radius: 8px;
-        padding: 12px;
-        color: #c9d1d9;
+        font-family: 'JetBrains Mono', 'Courier New', monospace;
+        font-size: 11.5px;
+        background: #070b14;
+        border: 1px solid #1e2d45;
+        border-radius: 10px;
+        padding: 12px 14px;
+        color: #94a3b8;
     }
+    .feed-line { padding: 3px 0; border-bottom: 1px solid #0d1526; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #0a0e1a; }
+    ::-webkit-scrollbar-thumb { background: #1e3a5f; border-radius: 2px; }
+
+    /* Hide streamlit branding */
+    #MainMenu, footer, header { visibility: hidden; }
+    .stDeployButton { display: none; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ─── Data Loading ──────────────────────────────────────────────────────────────
+# ─── Data Loading (no caching — always fresh) ─────────────────────────────────
 
-@st.cache_data(ttl=5)
-def load_portfolio() -> dict:
-    path = TRADER_DIR / "trades.json"
+def load(filename: str, default):
     try:
-        with open(path) as f:
+        with open(TRADER_DIR / filename) as f:
             return json.load(f)
     except Exception:
-        return {}
+        return default
 
-@st.cache_data(ttl=5)
-def load_equity_curve() -> list[dict]:
-    path = TRADER_DIR / "equity_curve.json"
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-@st.cache_data(ttl=5)
-def load_dex_positions() -> dict:
-    path = TRADER_DIR / "dex_positions.json"
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-@st.cache_data(ttl=10)
-def load_bot_state() -> dict:
-    """Read lightweight bot health state file."""
-    path = TRADER_DIR / "bot_state.json"
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def is_bot_paused() -> bool:
+def is_paused() -> bool:
     return (TRADER_DIR / "PAUSED").exists()
 
-def pause_bot():
-    (TRADER_DIR / "PAUSED").touch()
 
-def resume_bot():
+# ─── HTML Helpers ─────────────────────────────────────────────────────────────
+
+def trade_card_html(symbol: str, market: str, side: str, pnl_pct: float,
+                    pnl_usd: float, entry: float, current: float,
+                    stop_pct: float, target_pct: float, opened: str,
+                    leverage: int = 1, size_usd: float = 0) -> str:
+    green  = "#22c55e"
+    red    = "#ef4444"
+    color  = green if pnl_usd >= 0 else red
+    border = "#14532d" if pnl_usd >= 0 else "#7f1d1d"
+    bg     = "rgba(34,197,94,0.06)" if pnl_usd >= 0 else "rgba(239,68,68,0.06)"
+    sign   = "+" if pnl_usd >= 0 else ""
+
+    # Progress bar: 0% = at stop, 50% = at entry, 100% = at target
+    # Maps price range [entry*(1-stop), entry*(1+target)] → 0-100%
+    stop_price   = entry * (1 - stop_pct)
+    target_price = entry * (1 + target_pct)
+    price_range  = target_price - stop_price
+    progress     = ((current - stop_price) / price_range * 100) if price_range > 0 else 50
+    progress     = max(2, min(98, progress))
+    bar_color    = green if progress > 50 else red
+
+    # Format prices neatly
+    def fmt_price(p):
+        if p < 0.0001:    return f"${p:.8f}"
+        if p < 0.01:      return f"${p:.6f}"
+        if p < 1:         return f"${p:.4f}"
+        if p < 10000:     return f"${p:,.2f}"
+        return f"${p:,.0f}"
+
+    time_str = ""
     try:
-        (TRADER_DIR / "PAUSED").unlink()
-    except FileNotFoundError:
-        pass
+        opened_dt = datetime.fromisoformat(opened.replace("Z", "+00:00"))
+        age = datetime.now(timezone.utc) - opened_dt
+        h, m = divmod(int(age.total_seconds() // 60), 60)
+        time_str = f"{h}h {m}m" if h > 0 else f"{m}m"
+    except Exception:
+        time_str = opened[:10] if opened else ""
+
+    lev_badge = f'<span style="background:#1e3a5f;color:#60a5fa;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;">{leverage}x</span>' if leverage > 1 else ""
+    side_badge_color = "#22c55e" if side.lower() == "long" else "#ef4444"
+    size_str = f"${size_usd:,.0f}" if size_usd >= 1 else ""
+
+    return f"""
+    <div class="trade-card" style="background:{bg};border:1px solid {border};border-left:4px solid {color};">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+            <div>
+                <span style="color:#f1f5f9;font-size:20px;font-weight:800;letter-spacing:0.5px;">{symbol}</span>
+                {lev_badge}
+                <br>
+                <span style="color:#475569;font-size:11px;">{market}</span>
+                &nbsp;
+                <span style="color:{side_badge_color};font-size:11px;font-weight:600;">{side.upper()}</span>
+                &nbsp;·&nbsp;
+                <span style="color:#475569;font-size:11px;">⏱ {time_str}</span>
+                {f'&nbsp;·&nbsp;<span style="color:#475569;font-size:11px;">{size_str}</span>' if size_str else ''}
+            </div>
+            <div style="text-align:right;">
+                <div style="color:{color};font-size:30px;font-weight:900;line-height:1;">{sign}{pnl_pct:.1f}%</div>
+                <div style="color:{color};font-size:13px;font-weight:600;margin-top:2px;">{sign}${abs(pnl_usd):.2f}</div>
+            </div>
+        </div>
+        <div style="margin:12px 0 6px 0;display:flex;justify-content:space-between;font-size:11px;">
+            <span style="color:#64748b;">Entry <span style="color:#94a3b8;">{fmt_price(entry)}</span></span>
+            <span style="color:#64748b;">Now <span style="color:#f1f5f9;font-weight:600;">{fmt_price(current)}</span></span>
+            <span style="color:#ef4444;">⬇ Stop {stop_pct*100:.0f}%</span>
+            <span style="color:#22c55e;">⬆ Target {target_pct*100:.0f}%</span>
+        </div>
+        <div style="background:#0d1526;border-radius:6px;height:5px;overflow:hidden;">
+            <div style="background:{bar_color};width:{progress:.1f}%;height:5px;border-radius:6px;transition:width 0.5s;"></div>
+        </div>
+    </div>"""
 
 
-# ─── Derived Analytics ────────────────────────────────────────────────────────
-
-def compute_sharpe(equity_curve: list[dict], risk_free_daily: float = 0.00013) -> float:
-    """Annualised Sharpe ratio from daily equity curve."""
-    if len(equity_curve) < 10:
-        return 0.0
-    df = pd.DataFrame(equity_curve)
-    df["ts"] = pd.to_datetime(df["ts"])
-    df = df.set_index("ts").resample("1D")["equity"].last().dropna()
-    if len(df) < 3:
-        return 0.0
-    rets = df.pct_change().dropna()
-    excess = rets - risk_free_daily
-    std = excess.std()
-    if std == 0:
-        return 0.0
-    return float((excess.mean() / std) * (252 ** 0.5))
-
-def compute_sortino(equity_curve: list[dict]) -> float:
-    if len(equity_curve) < 10:
-        return 0.0
-    df = pd.DataFrame(equity_curve)
-    df["ts"] = pd.to_datetime(df["ts"])
-    df = df.set_index("ts").resample("1D")["equity"].last().dropna()
-    if len(df) < 3:
-        return 0.0
-    rets = df.pct_change().dropna()
-    downside = rets[rets < 0]
-    down_std = downside.std()
-    if down_std == 0 or pd.isna(down_std):
-        return float("inf")
-    return float((rets.mean() / down_std) * (252 ** 0.5))
-
-def compute_max_drawdown(equity_curve: list[dict]) -> float:
-    if not equity_curve:
-        return 0.0
-    equities = [e["equity"] for e in equity_curve]
-    peak = equities[0]
-    max_dd = 0.0
-    for e in equities:
-        peak = max(peak, e)
-        dd = (peak - e) / peak
-        max_dd = max(max_dd, dd)
-    return max_dd * 100
-
-def pnl_color(val: float) -> str:
-    return "#34d058" if val >= 0 else "#ef4444"
-
-def fmt_usd(val: float) -> str:
-    sign = "+" if val >= 0 else ""
-    return f"{sign}${val:,.2f}"
-
-def fmt_pct(val: float) -> str:
-    sign = "+" if val >= 0 else ""
-    return f"{sign}{val:.2f}%"
-
-
-# ─── Main Layout ──────────────────────────────────────────────────────────────
+# ─── Main Render ──────────────────────────────────────────────────────────────
 
 def render():
-    portfolio  = load_portfolio()
-    eq_curve   = load_equity_curve()
-    dex_pos    = load_dex_positions()
-    bot_state  = load_bot_state()
-    paused     = is_bot_paused()
+    state     = load("bot_state.json", {})
+    portfolio = load("trades.json", {})
+    eq_curve  = load("equity_curve.json", [])
+    dex_pos   = load("dex_positions.json", {})
+    paused    = is_paused()
 
-    if not portfolio:
-        st.warning("⚠️  No portfolio data yet. Start the bot with: `python main.py`")
-        st.stop()
+    if not state and not portfolio:
+        st.markdown("""
+        <div style="text-align:center;margin-top:120px;">
+            <div style="font-size:48px;">📈</div>
+            <h2 style="color:#f1f5f9;">AI Trader Dashboard</h2>
+            <p style="color:#64748b;font-size:16px;">Waiting for bot to start...</p>
+            <code style="background:#111827;color:#60a5fa;padding:8px 16px;border-radius:6px;">
+                cd ~/model-pep/trader && python3 main.py
+            </code>
+        </div>
+        """, unsafe_allow_html=True)
+        time.sleep(3)
+        st.rerun()
 
-    # ── Extract core values ────────────────────────────────────────────────────
-    cash         = portfolio.get("cash", 0)
-    open_pos     = portfolio.get("open_positions", {})
-    closed       = portfolio.get("closed_trades", [])
-    initial_cap  = portfolio.get("initial_capital", 10000)
-    peak_equity  = portfolio.get("peak_equity", initial_cap)
+    # ── Core values ───────────────────────────────────────────────────────────
+    equity      = state.get("equity",         portfolio.get("cash", 10000))
+    cash        = state.get("cash",           portfolio.get("cash", equity))
+    initial_cap = state.get("initial_capital",portfolio.get("initial_capital", 10000))
+    peak_equity = state.get("peak_equity",    portfolio.get("peak_equity", initial_cap))
+    daily_pnl   = state.get("daily_pnl_usd", 0)
+    daily_pct   = state.get("daily_pnl_pct", 0)
+    total_ret   = (equity - initial_cap) / initial_cap * 100 if initial_cap else 0
+    drawdown    = (peak_equity - equity) / peak_equity * 100 if peak_equity > 0 else 0
+    open_pos    = portfolio.get("open_positions", {})
+    closed      = portfolio.get("closed_trades", [])
+    mode        = state.get("mode", "paper")
+    cycle       = state.get("cycle", 0)
+    total_open  = len(open_pos) + len(dex_pos)
 
-    # Calculate equity (cash + unrealized P&L of open positions)
-    unrealized = sum(
-        (p.get("current_price", p.get("entry_price", 0)) - p.get("entry_price", 0))
-        * p.get("qty", 0)
-        for p in open_pos.values()
-        if p.get("side") == "long"
-    )
-    equity  = cash + unrealized
-    ret_pct = (equity - initial_cap) / initial_cap * 100 if initial_cap > 0 else 0
+    wins   = [t for t in closed if t.get("pnl_usd", 0) > 0]
+    losses = [t for t in closed if t.get("pnl_usd", 0) <= 0]
+    wr     = len(wins) / len(closed) * 100 if closed else 0
+    total_pnl = sum(t.get("pnl_usd", 0) for t in closed)
 
-    # ── Header row ────────────────────────────────────────────────────────────
-    col_title, col_mode, col_refresh = st.columns([4, 1, 1])
-    with col_title:
-        st.markdown("## 📈 AI Trader v3.0 — Live Dashboard")
-    with col_mode:
-        mode = bot_state.get("mode", "paper")
-        badge = "badge-paused" if paused else ("badge-live" if mode == "live" else "badge-paper")
-        label = "PAUSED" if paused else mode.upper()
-        st.markdown(f'<span class="{badge}">{label}</span>', unsafe_allow_html=True)
-        st.caption(f"Cycle #{bot_state.get('cycle', '—')}")
-    with col_refresh:
-        if st.button("⟳ Refresh"):
-            st.cache_data.clear()
+    # ── Header ────────────────────────────────────────────────────────────────
+    h1, h2, h3, h4 = st.columns([3, 1, 1, 1])
+    with h1:
+        st.markdown("## 📈 AI Trader v3.0")
+    with h2:
+        if paused:
+            st.markdown('<div style="background:#450a0a;color:#f87171;padding:6px 14px;border-radius:8px;font-weight:700;text-align:center;">⏸ PAUSED</div>', unsafe_allow_html=True)
+        elif mode == "live":
+            st.markdown('<div style="background:#052e16;color:#4ade80;padding:6px 14px;border-radius:8px;font-weight:700;text-align:center;">🟢 LIVE</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div style="background:#1c1917;color:#fb923c;padding:6px 14px;border-radius:8px;font-weight:700;text-align:center;">📄 PAPER</div>', unsafe_allow_html=True)
+    with h3:
+        last_cycle = state.get("last_cycle_ts", 0)
+        age = time.time() - last_cycle if last_cycle else 999
+        status_color = "#4ade80" if age < 60 else "#fbbf24" if age < 120 else "#ef4444"
+        st.markdown(f'<div style="color:{status_color};font-size:13px;margin-top:8px;">● Cycle #{cycle} · {age:.0f}s ago</div>', unsafe_allow_html=True)
+    with h4:
+        if st.button("⟳ Refresh Now"):
             st.rerun()
 
-    # ── Top KPI metrics ───────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">Portfolio Overview</div>', unsafe_allow_html=True)
-
-    kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
-
-    with kpi1:
+    # ── KPI Row ───────────────────────────────────────────────────────────────
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    with k1:
         st.metric("Total Equity", f"${equity:,.2f}",
-                  delta=fmt_pct(ret_pct),
-                  delta_color="normal")
-    with kpi2:
-        daily_pnl = bot_state.get("daily_pnl_usd", 0)
-        daily_pct = bot_state.get("daily_pnl_pct", 0)
-        st.metric("Today's P&L", fmt_usd(daily_pnl), delta=fmt_pct(daily_pct))
-    with kpi3:
-        st.metric("Open Positions", len(open_pos) + len(dex_pos))
-    with kpi4:
-        total_pnl = sum(t.get("pnl_usd", 0) for t in closed)
-        wins = sum(1 for t in closed if t.get("pnl_usd", 0) > 0)
-        wr   = wins / len(closed) * 100 if closed else 0
-        st.metric("Win Rate", f"{wr:.1f}%", delta=f"{len(closed)} trades")
-    with kpi5:
-        dd = (peak_equity - equity) / peak_equity * 100 if peak_equity > 0 else 0
-        st.metric("Drawdown", f"{dd:.2f}%", delta=f"peak ${peak_equity:,.0f}")
-    with kpi6:
+                  delta=f"{total_ret:+.2f}% all time",
+                  delta_color="normal" if total_ret >= 0 else "inverse")
+    with k2:
+        st.metric("Today's P&L",
+                  f"{'+'if daily_pnl>=0 else ''}${daily_pnl:,.2f}",
+                  delta=f"{daily_pct:+.2f}%",
+                  delta_color="normal" if daily_pnl >= 0 else "inverse")
+    with k3:
+        st.metric("Open Positions", str(total_open),
+                  delta=f"{len(open_pos)} CEX · {len(dex_pos)} DEX")
+    with k4:
+        st.metric("Win Rate", f"{wr:.1f}%",
+                  delta=f"{len(closed)} trades closed")
+    with k5:
+        st.metric("Drawdown", f"{drawdown:.2f}%",
+                  delta=f"peak ${peak_equity:,.0f}",
+                  delta_color="inverse" if drawdown > 0 else "off")
+    with k6:
         cash_pct = cash / equity * 100 if equity > 0 else 0
-        st.metric("Free Cash", f"${cash:,.2f}", delta=f"{cash_pct:.0f}% of equity")
-
-    st.divider()
+        st.metric("Free Cash", f"${cash:,.2f}",
+                  delta=f"{cash_pct:.0f}% deployed")
 
     # ── Equity Curve ──────────────────────────────────────────────────────────
-    left, right = st.columns([3, 1])
+    st.markdown('<div class="section-label">Equity Curve</div>', unsafe_allow_html=True)
 
-    with left:
-        st.markdown('<div class="section-header">Equity Curve</div>', unsafe_allow_html=True)
+    if eq_curve and len(eq_curve) > 1:
+        tf_col, _ = st.columns([2, 5])
+        with tf_col:
+            tf = st.radio("", ["1H", "6H", "1D", "ALL"], horizontal=True,
+                          index=3, label_visibility="collapsed")
 
-        if eq_curve:
-            df_eq = pd.DataFrame(eq_curve)
-            df_eq["ts"] = pd.to_datetime(df_eq["ts"])
+        df_eq = pd.DataFrame(eq_curve)
+        df_eq["ts"] = pd.to_datetime(df_eq["ts"])
+        now_utc = pd.Timestamp.now(tz="UTC")
+        cuts = {"1H": now_utc - timedelta(hours=1),
+                "6H": now_utc - timedelta(hours=6),
+                "1D": now_utc - timedelta(days=1),
+                "ALL": pd.Timestamp.min.tz_localize("UTC")}
+        df_plot = df_eq[df_eq["ts"] >= cuts[tf]]
+        if len(df_plot) < 2:
+            df_plot = df_eq
 
-            # Timeframe selector
-            tf = st.radio("Timeframe", ["1H", "6H", "1D", "7D", "ALL"],
-                          horizontal=True, index=4, label_visibility="collapsed")
-            now = pd.Timestamp.now(tz="UTC")
-            cutoffs = {"1H": now - timedelta(hours=1),
-                       "6H": now - timedelta(hours=6),
-                       "1D": now - timedelta(days=1),
-                       "7D": now - timedelta(days=7),
-                       "ALL": pd.Timestamp.min.tz_localize("UTC")}
-            df_plot = df_eq[df_eq["ts"] >= cutoffs[tf]]
+        first_val = df_plot["equity"].iloc[0]
+        last_val  = df_plot["equity"].iloc[-1]
+        up        = last_val >= first_val
+        line_col  = "#22c55e" if up else "#ef4444"
+        fill_col  = "rgba(34,197,94,0.07)" if up else "rgba(239,68,68,0.07)"
 
-            fig = go.Figure()
-            is_profit = df_plot["equity"].iloc[-1] >= df_plot["equity"].iloc[0] \
-                        if len(df_plot) > 1 else True
-            line_color = "#34d058" if is_profit else "#ef4444"
-            fill_color = "rgba(52,208,88,0.08)" if is_profit else "rgba(239,68,68,0.08)"
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df_plot["ts"], y=df_plot["equity"],
+            mode="lines",
+            line=dict(color=line_col, width=2.5),
+            fill="tozeroy", fillcolor=fill_col,
+            hovertemplate="<b>$%{y:,.2f}</b><br>%{x|%b %d %H:%M}<extra></extra>",
+        ))
+        fig.add_hline(y=initial_cap, line_dash="dot", line_color="#1e3a5f",
+                      annotation_text=f"Start ${initial_cap:,.0f}",
+                      annotation_font_color="#475569",
+                      annotation_position="bottom right")
+        fig.update_layout(
+            paper_bgcolor="#0a0e1a", plot_bgcolor="#0a0e1a",
+            margin=dict(l=0, r=0, t=8, b=0), height=260,
+            xaxis=dict(gridcolor="#0d1526", color="#475569", showgrid=True,
+                       zeroline=False),
+            yaxis=dict(gridcolor="#0d1526", color="#475569", showgrid=True,
+                       tickprefix="$", tickformat=",.0f", zeroline=False),
+            showlegend=False, hovermode="x unified",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.markdown("""
+        <div style="background:#0d1526;border:1px dashed #1e3a5f;border-radius:10px;
+                    padding:32px;text-align:center;color:#475569;">
+            📊 Equity curve populates after first bot cycle completes
+        </div>""", unsafe_allow_html=True)
 
-            fig.add_trace(go.Scatter(
-                x=df_plot["ts"], y=df_plot["equity"],
-                mode="lines",
-                line=dict(color=line_color, width=2),
-                fill="tozeroy", fillcolor=fill_color,
-                name="Equity",
-                hovertemplate="<b>$%{y:,.2f}</b><br>%{x|%b %d %H:%M}<extra></extra>",
-            ))
+    # ── Open Positions — Visual Cards ─────────────────────────────────────────
+    st.markdown('<div class="section-label">Open Positions</div>', unsafe_allow_html=True)
 
-            # Mark initial capital as reference line
-            fig.add_hline(y=initial_cap, line_dash="dot",
-                          line_color="#3a4556", annotation_text=f"Initial ${initial_cap:,.0f}",
-                          annotation_position="bottom right")
+    all_cards = []
 
-            fig.update_layout(
-                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
-                margin=dict(l=0, r=0, t=10, b=0),
-                height=320,
-                xaxis=dict(gridcolor="#1e2740", color="#7b8cb5", showgrid=True),
-                yaxis=dict(gridcolor="#1e2740", color="#7b8cb5", showgrid=True,
-                           tickprefix="$", tickformat=",.0f"),
-                showlegend=False,
-                hovermode="x unified",
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Equity curve will appear after the first bot cycle.")
-
-    with right:
-        st.markdown('<div class="section-header">Performance</div>', unsafe_allow_html=True)
-
-        sharpe  = compute_sharpe(eq_curve)
-        sortino = compute_sortino(eq_curve)
-        max_dd  = compute_max_drawdown(eq_curve)
-
-        wins    = [t for t in closed if t.get("pnl_usd", 0) > 0]
-        losses  = [t for t in closed if t.get("pnl_usd", 0) <= 0]
-        avg_win = sum(t["pnl_pct"] for t in wins) / len(wins) if wins else 0
-        avg_loss= sum(t["pnl_pct"] for t in losses) / len(losses) if losses else 0
-        gross_w = sum(t["pnl_usd"] for t in wins)
-        gross_l = abs(sum(t["pnl_usd"] for t in losses))
-        pf      = gross_w / gross_l if gross_l > 0 else float("inf")
-
-        st.metric("Sharpe Ratio",  f"{sharpe:.2f}")
-        st.metric("Sortino Ratio", f"{sortino:.2f}" if sortino != float("inf") else "∞")
-        st.metric("Max Drawdown",  f"{max_dd:.2f}%")
-        st.metric("Profit Factor", f"{min(pf, 99):.2f}" if pf != float("inf") else "∞")
-        st.metric("Avg Win",  fmt_pct(avg_win))
-        st.metric("Avg Loss", fmt_pct(avg_loss))
-        total_pnl = sum(t.get("pnl_usd", 0) for t in closed)
-        st.metric("Total Realised", fmt_usd(total_pnl))
-
-    st.divider()
-
-    # ── Open Positions ────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">Open Positions</div>', unsafe_allow_html=True)
-
-    all_positions = []
-
-    # CEX / Futures positions
+    # CEX / Futures
     for pid, pos in open_pos.items():
         entry   = pos.get("entry_price", 0)
         current = pos.get("current_price", entry)
         side    = pos.get("side", "long")
-        if side == "long":
-            pnl_pct = (current - entry) / entry * 100 if entry > 0 else 0
-        else:
-            pnl_pct = (entry - current) / entry * 100 if entry > 0 else 0
+        pnl_pct = ((current - entry) / entry * 100 if side == "long"
+                   else (entry - current) / entry * 100) if entry > 0 else 0
+        size_usd = pos.get("position_usd", pos.get("qty", 0) * entry)
+        pnl_usd  = size_usd * pnl_pct / 100
+        market   = "⚡ Futures" if pos.get("is_futures") else "📊 CEX"
+        all_cards.append(dict(
+            symbol   = pos.get("symbol", pid),
+            market   = market,
+            side     = side,
+            pnl_pct  = pnl_pct,
+            pnl_usd  = pnl_usd,
+            entry    = entry,
+            current  = current,
+            stop_pct = pos.get("stop_pct", 0.03),
+            target_pct = pos.get("take_profit_pct", 0.06),
+            opened   = pos.get("opened_at", ""),
+            leverage = pos.get("leverage", 1),
+            size_usd = size_usd,
+        ))
 
-        lev     = pos.get("leverage", 1)
-        liq     = pos.get("liq_price")
-        is_fut  = pos.get("is_futures", False)
-        market  = ("⚡ Futures" if is_fut else "📊 CEX") + f" {pos.get('market','')}"
-
-        all_positions.append({
-            "Symbol": pos.get("symbol", pid),
-            "Market": market,
-            "Side": "🟢 LONG" if side == "long" else "🔴 SHORT",
-            "Leverage": f"{lev}x" if lev > 1 else "—",
-            "Entry": f"${entry:,.4f}",
-            "Current": f"${current:,.4f}",
-            "P&L %": fmt_pct(pnl_pct),
-            "Liq Price": f"${liq:,.4f}" if liq else "—",
-            "Opened": pos.get("opened_at", "")[:16].replace("T", " "),
-        })
-
-    # DEX positions
+    # DEX
     for pair_addr, pos in dex_pos.items():
         entry   = pos.get("entry_price", 0)
         current = pos.get("current_price", entry)
         pnl_pct = (current - entry) / entry * 100 if entry > 0 else 0
-        all_positions.append({
-            "Symbol": pos.get("symbol", pair_addr[:8]),
-            "Market": f"🌊 DEX {pos.get('chain','').upper()}",
-            "Side": "🟢 LONG",
-            "Leverage": "—",
-            "Entry": f"${entry:.8f}",
-            "Current": f"${current:.8f}",
-            "P&L %": fmt_pct(pnl_pct),
-            "Liq Price": "—",
-            "Opened": pos.get("opened_at", "")[:16].replace("T", " "),
-        })
+        size_usd = pos.get("size_usd", 0)
+        pnl_usd  = size_usd * pnl_pct / 100
+        all_cards.append(dict(
+            symbol   = pos.get("symbol", pair_addr[:8]),
+            market   = f"🌊 DEX {pos.get('chain','').upper()}",
+            side     = "long",
+            pnl_pct  = pnl_pct,
+            pnl_usd  = pnl_usd,
+            entry    = entry,
+            current  = current,
+            stop_pct = pos.get("stop_pct", 0.20),
+            target_pct = pos.get("target_pct", 0.40),
+            opened   = pos.get("opened_at", ""),
+            leverage = 1,
+            size_usd = size_usd,
+        ))
 
-    if all_positions:
-        df_pos = pd.DataFrame(all_positions)
-        st.dataframe(df_pos, use_container_width=True, hide_index=True,
-                     column_config={
-                         "P&L %": st.column_config.TextColumn("P&L %"),
-                     })
+    if all_cards:
+        # Sort: biggest winners first, then biggest losers
+        all_cards.sort(key=lambda c: c["pnl_pct"], reverse=True)
+        cols = st.columns(min(len(all_cards), 3))
+        for i, card in enumerate(all_cards):
+            with cols[i % 3]:
+                st.markdown(trade_card_html(**card), unsafe_allow_html=True)
     else:
-        st.info("No open positions. Bot is scanning for opportunities...")
+        st.markdown("""
+        <div style="background:#0d1526;border:1px dashed #1e3a5f;border-radius:10px;
+                    padding:32px;text-align:center;color:#475569;">
+            No open positions — bot is scanning for opportunities
+        </div>""", unsafe_allow_html=True)
 
     st.divider()
 
-    # ── Bottom row: Trade History | Market Breakdown | Grid/Arb | Controls ────
-    col_hist, col_mkt, col_special, col_ctrl = st.columns([2, 1, 1, 1])
+    # ── Bottom Row ────────────────────────────────────────────────────────────
+    left, right = st.columns([2, 1])
 
-    # Trade History
-    with col_hist:
-        st.markdown('<div class="section-header">Recent Trades</div>', unsafe_allow_html=True)
+    with left:
+        # Recent trades
+        st.markdown('<div class="section-label">Recent Trades</div>', unsafe_allow_html=True)
         if closed:
-            recent = closed[-20:][::-1]  # Last 20 trades, newest first
             rows = []
-            for t in recent:
+            for t in reversed(closed[-25:]):
                 pnl = t.get("pnl_usd", 0)
+                pct = t.get("pnl_pct", 0)
+                emoji = "✅" if pnl > 0 else "❌"
                 rows.append({
-                    "Time": t.get("closed_at", "")[:16].replace("T", " "),
+                    " ": emoji,
                     "Symbol": t.get("symbol", "—"),
-                    "Side": t.get("side", "—").upper(),
-                    "P&L $": fmt_usd(pnl),
-                    "P&L %": fmt_pct(t.get("pnl_pct", 0)),
-                    "Reason": t.get("close_reason", "—")[:30],
+                    "Market": t.get("market", "—").upper(),
+                    "P&L": f"{'+'if pnl>=0 else ''}${pnl:,.2f}",
+                    "%": f"{'+'if pct>=0 else ''}{pct:.1f}%",
+                    "Reason": t.get("close_reason", "—")[:28],
+                    "Closed": t.get("closed_at", "")[:16].replace("T", " "),
                 })
-            df_trades = pd.DataFrame(rows)
-            st.dataframe(df_trades, use_container_width=True, hide_index=True, height=300)
+            df = pd.DataFrame(rows)
+            st.dataframe(df, use_container_width=True, hide_index=True, height=280)
+
+            # Win/loss summary bar
+            w_pnl = sum(t.get("pnl_usd",0) for t in wins)
+            l_pnl = abs(sum(t.get("pnl_usd",0) for t in losses))
+            pf    = w_pnl / l_pnl if l_pnl > 0 else float("inf")
+            st.markdown(
+                f'<div style="display:flex;gap:24px;font-size:12px;color:#64748b;margin-top:6px;">'
+                f'<span>✅ {len(wins)} wins · <span style="color:#22c55e;">+${w_pnl:,.2f}</span></span>'
+                f'<span>❌ {len(losses)} losses · <span style="color:#ef4444;">-${l_pnl:,.2f}</span></span>'
+                f'<span>Profit factor: <span style="color:#f1f5f9;font-weight:700;">'
+                f'{"∞" if pf == float("inf") else f"{pf:.2f}"}</span></span>'
+                f'<span>Total: <span style="color:{"#22c55e" if total_pnl>=0 else "#ef4444"};font-weight:700;">'
+                f'{"+"if total_pnl>=0 else ""}${total_pnl:,.2f}</span></span>'
+                f'</div>', unsafe_allow_html=True)
         else:
-            st.info("No closed trades yet.")
+            st.markdown('<div style="color:#475569;padding:20px;text-align:center;">No closed trades yet</div>',
+                        unsafe_allow_html=True)
 
-    # Market Breakdown
-    with col_mkt:
-        st.markdown('<div class="section-header">By Market</div>', unsafe_allow_html=True)
-        if closed:
-            by_market = {}
-            for t in closed:
-                m = t.get("market", "unknown")
-                if m not in by_market:
-                    by_market[m] = {"pnl": 0, "trades": 0, "wins": 0}
-                by_market[m]["pnl"]    += t.get("pnl_usd", 0)
-                by_market[m]["trades"] += 1
-                if t.get("pnl_usd", 0) > 0:
-                    by_market[m]["wins"] += 1
+    with right:
+        # Bot health + controls
+        st.markdown('<div class="section-label">Bot Status</div>', unsafe_allow_html=True)
 
-            rows = []
-            for m, stats in sorted(by_market.items(), key=lambda x: -x[1]["pnl"]):
-                wr = stats["wins"] / stats["trades"] * 100 if stats["trades"] > 0 else 0
-                rows.append({
-                    "Market": m.upper(),
-                    "Trades": stats["trades"],
-                    "Win %": f"{wr:.0f}%",
-                    "P&L": fmt_usd(stats["pnl"]),
-                })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True,
-                         hide_index=True, height=300)
+        cycle_ms = state.get("last_cycle_ms", 0)
+        ws_ok    = state.get("ws_connected", False)
+        fut_on   = state.get("futures_enabled", False)
 
-            # Mini pie chart
-            fig_pie = px.pie(
-                pd.DataFrame([{"Market": k, "PnL": max(v["pnl"], 0)}
-                               for k, v in by_market.items() if v["pnl"] > 0]),
-                names="Market", values="PnL",
-                color_discrete_sequence=px.colors.qualitative.Dark24,
-            )
-            fig_pie.update_layout(
-                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
-                margin=dict(l=0, r=0, t=10, b=0), height=180,
-                legend=dict(font=dict(color="#7b8cb5"), bgcolor="rgba(0,0,0,0)"),
-                showlegend=True,
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
+        def status_row(icon, label, value, val_color="#94a3b8"):
+            return (f'<div style="display:flex;justify-content:space-between;'
+                    f'padding:7px 0;border-bottom:1px solid #0d1526;">'
+                    f'<span style="color:#64748b;">{icon} {label}</span>'
+                    f'<span style="color:{val_color};font-weight:600;">{value}</span></div>')
 
-    # Grid + Arb status
-    with col_special:
-        st.markdown('<div class="section-header">Grid & Arb</div>', unsafe_allow_html=True)
+        age_color = "#4ade80" if age < 60 else "#fbbf24" if age < 120 else "#ef4444"
+        html  = status_row("⏱", "Last cycle",  f"{age:.0f}s ago", age_color)
+        html += status_row("🔄", "Cycle #",     str(cycle))
+        html += status_row("⚡", "Cycle time",  f"{cycle_ms:.0f}ms")
+        html += status_row("📡", "WebSocket",   "connected" if ws_ok else "REST fallback",
+                           "#4ade80" if ws_ok else "#fbbf24")
+        html += status_row("📈", "Futures",     "enabled" if fut_on else "disabled",
+                           "#60a5fa" if fut_on else "#475569")
+        html += status_row("💰", "Deployed",    f"${equity - cash:,.0f} ({100-cash/equity*100:.0f}%)" if equity > 0 else "—")
+        st.markdown(f'<div style="font-size:13px;">{html}</div>', unsafe_allow_html=True)
 
-        # Load grid/arb state if available
-        grid_state_path = TRADER_DIR / "grid_state.json"
-        arb_state_path  = TRADER_DIR / "arb_state.json"
-
-        try:
-            with open(grid_state_path) as f:
-                grid_state = json.load(f)
-            st.caption("📊 Grid Trading")
-            st.metric("Active Grids",   grid_state.get("active_grids", 0))
-            st.metric("Grid Fills",     grid_state.get("total_fills", 0))
-            st.metric("Grid P&L",       fmt_usd(grid_state.get("total_pnl_usd", 0)))
-        except Exception:
-            st.caption("📊 Grid Trading")
-            st.info("No grid data yet.")
-
-        st.divider()
-
-        try:
-            with open(arb_state_path) as f:
-                arb_state = json.load(f)
-            st.caption("⚡ Funding Arb")
-            st.metric("Open Arbs",      arb_state.get("open_arbs", 0))
-            collected = arb_state.get("total_funding_collected_usd", 0)
-            st.metric("Collected",      fmt_usd(collected))
-        except Exception:
-            st.caption("⚡ Funding Arb")
-            st.info("No arb data yet.")
-
-    # Controls
-    with col_ctrl:
-        st.markdown('<div class="section-header">Bot Controls</div>', unsafe_allow_html=True)
-
+        st.markdown("")
         if paused:
-            st.error("🔴 Bot is PAUSED")
             if st.button("▶ Resume Bot", use_container_width=True, type="primary"):
-                resume_bot()
-                st.success("Bot resumed!")
-                time.sleep(1)
+                try: (TRADER_DIR / "PAUSED").unlink()
+                except: pass
                 st.rerun()
         else:
-            st.success("🟢 Bot is RUNNING")
             if st.button("⏸ Pause Bot", use_container_width=True):
-                pause_bot()
-                st.warning("Bot will pause after current cycle.")
-                time.sleep(1)
+                (TRADER_DIR / "PAUSED").touch()
                 st.rerun()
 
-        st.divider()
-
-        # Health
-        last_cycle = bot_state.get("last_cycle_ts", 0)
-        if last_cycle:
-            age = time.time() - last_cycle
-            color = "🟢" if age < 60 else "🟡" if age < 120 else "🔴"
-            st.caption(f"{color} Last cycle: {age:.0f}s ago")
-        else:
-            st.caption("⚪ Bot not running")
-
-        cycle_ms = bot_state.get("last_cycle_ms", 0)
-        if cycle_ms:
-            st.caption(f"⏱ Cycle time: {cycle_ms:.0f}ms")
-
-        ws_connected = bot_state.get("ws_connected", False)
-        st.caption(f"{'🟢' if ws_connected else '🔴'} WebSocket: {'connected' if ws_connected else 'offline'}")
-
-        futures_on = bot_state.get("futures_enabled", False)
-        st.caption(f"{'⚡' if futures_on else '⚫'} Futures: {'on' if futures_on else 'off'}")
-
-        st.divider()
-        if st.button("📋 Full Report (JSON)", use_container_width=True):
-            try:
-                import config as cfg
-                perf = {"equity": equity, "cash": cash, "initial_capital": initial_cap,
-                        "total_return_pct": ret_pct, "total_trades": len(closed),
-                        "win_rate_pct": wr if closed else 0}
-                st.json(perf)
-            except Exception:
-                st.error("Load bot first")
-
-    st.divider()
+        # Grid/Arb quick stats
+        grid_state = load("grid_state.json", {})
+        arb_state  = load("arb_state.json", {})
+        if grid_state or arb_state:
+            st.markdown('<div class="section-label" style="margin-top:16px;">Grid & Arb</div>',
+                        unsafe_allow_html=True)
+            if grid_state.get("active_grids", 0) > 0:
+                st.markdown(
+                    f'<div style="font-size:12px;color:#64748b;">📊 {grid_state["active_grids"]} grids · '
+                    f'{grid_state.get("total_fills",0)} fills · '
+                    f'<span style="color:#22c55e;">+${grid_state.get("total_pnl_usd",0):.2f}</span></div>',
+                    unsafe_allow_html=True)
+            if arb_state.get("open_arbs", 0) > 0:
+                st.markdown(
+                    f'<div style="font-size:12px;color:#64748b;">⚡ {arb_state["open_arbs"]} arbs · '
+                    f'collected <span style="color:#22c55e;">+${arb_state.get("total_funding_collected_usd",0):.2f}</span></div>',
+                    unsafe_allow_html=True)
 
     # ── Signal Feed ───────────────────────────────────────────────────────────
-    st.markdown('<div class="section-header">Signal Log (last 50 events)</div>',
-                unsafe_allow_html=True)
+    st.markdown('<div class="section-label">Live Activity Feed</div>', unsafe_allow_html=True)
 
     log_path = TRADER_DIR / "trader.log"
     if log_path.exists():
         try:
             with open(log_path, encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
-            # Filter to signal/trade lines
-            keywords = ["EXECUTED", "CLOSED", "FUTURES", "SCALP", "GRID", "ARB",
-                        "DEX BUY", "DEX CLOSE", "PARTIAL", "PYRAMID", "CIRCUIT", "WARNING"]
-            signal_lines = [
-                l.rstrip() for l in lines
-                if any(k in l for k in keywords)
-            ][-50:]
+            keywords = ["DEX BUY", "DEX CLOSE", "EXECUTED", "CLOSED", "FUTURES",
+                        "SCALP", "GRID", "ARB", "PARTIAL", "PYRAMID",
+                        "CIRCUIT BREAKER", "WARNING", "Stop loss", "Take profit"]
+            filtered = [l.rstrip() for l in lines if any(k in l for k in keywords)][-60:]
 
-            feed_html = '<div class="signal-feed">'
-            for line in reversed(signal_lines):
-                color = "#34d058" if any(w in line for w in ["EXECUTED BUY", "FUTURES LONG", "SCALP", "ARB OPEN", "GRID OPEN", "DEX BUY"]) \
-                    else "#ef4444" if any(w in line for w in ["STOP LOSS", "CIRCUIT", "LIQUIDATION", "WARNING"]) \
-                    else "#c9d1d9"
-                escaped = line.replace("<", "&lt;").replace(">", "&gt;")
-                feed_html += f'<div style="color:{color}; margin:2px 0">{escaped}</div>'
-            feed_html += "</div>"
-            st.markdown(feed_html, unsafe_allow_html=True)
+            def line_color(l):
+                if any(k in l for k in ["DEX BUY", "EXECUTED BUY", "GRID OPEN", "ARB OPEN", "FUTURES LONG"]):
+                    return "#4ade80"
+                if any(k in l for k in ["Take profit", "CLOSE", "PARTIAL"]):
+                    return "#60a5fa"
+                if any(k in l for k in ["Stop loss", "CIRCUIT", "WARNING", "LIQUIDATION"]):
+                    return "#f87171"
+                return "#64748b"
+
+            html = '<div class="feed">'
+            for line in reversed(filtered):
+                c = line_color(line)
+                esc = line.replace("<", "&lt;").replace(">", "&gt;")
+                html += f'<div class="feed-line" style="color:{c};">{esc}</div>'
+            html += "</div>"
+            st.markdown(html, unsafe_allow_html=True)
         except Exception as e:
-            st.caption(f"Could not load log: {e}")
-    else:
-        st.info("Log file not found. Start the bot to see signals here.")
+            st.caption(f"Log error: {e}")
 
-    # ── Auto-refresh ──────────────────────────────────────────────────────────
-    st.markdown("---")
-    st.caption(f"⟳ Auto-refreshing every 15s | Last update: {datetime.now().strftime('%H:%M:%S')}")
-    time.sleep(15)
+    # ── Footer + auto-refresh ─────────────────────────────────────────────────
+    st.markdown(
+        f'<div style="text-align:right;color:#1e3a5f;font-size:11px;margin-top:8px;">'
+        f'⟳ refreshing every 5s · {datetime.now().strftime("%H:%M:%S")}'
+        f'</div>', unsafe_allow_html=True)
+
+    time.sleep(5)
     st.rerun()
 
 
-# ─── Entry Point ──────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    render()
-else:
-    # Called by streamlit run dashboard.py
-    render()
+render()
