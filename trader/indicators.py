@@ -60,8 +60,6 @@ def rsi_signal(close: pd.Series) -> float:
         return 0.5 + 0.5 * (config.RSI_OVERSOLD - latest) / (config.RSI_OVERSOLD - 20)
     elif latest <= 50:
         return 0.5 * (50 - latest) / (50 - config.RSI_OVERSOLD)
-    elif latest < 50:
-        return 0.5 * (50 - latest) / (50 - config.RSI_OVERSOLD)
     elif latest < config.RSI_OVERBOUGHT:
         return -0.5 * (latest - 50) / (config.RSI_OVERBOUGHT - 50)
     elif latest < 80:

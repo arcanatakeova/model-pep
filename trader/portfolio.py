@@ -33,14 +33,19 @@ class Portfolio:
     # ─────────────────────────────────────────────────────────────────────────
 
     def equity(self) -> float:
-        """Total equity = cash + value of open positions."""
+        """Total equity = cash + long position values + short unrealized PnL."""
         with self._lock:
-            pos_value = sum(
-                p["qty"] * p["current_price"]
-                for p in self.open_positions.values()
-                if p["side"] == "long"
-            )
-            return self.cash + pos_value
+            pos_value = 0.0
+            for p in self.open_positions.values():
+                if p["side"] == "long":
+                    pos_value += p["qty"] * p["current_price"]
+                else:
+                    # Short: cash not deducted on open, so only add unrealized PnL
+                    pos_value += p.get("unrealized_pnl", 0.0)
+            eq = self.cash + pos_value
+            if eq > self.peak_equity:
+                self.peak_equity = eq
+            return eq
 
     def has_position(self, asset_id: str) -> bool:
         return asset_id in self.open_positions
@@ -131,11 +136,11 @@ class Portfolio:
                         emoji, side.upper(), asset_id, price,
                         pnl, pnl_pct, reason)
 
-            # Update peak equity
-            eq = self.cash
-            if eq > self.peak_equity:
-                self.peak_equity = eq
             return trade
+        # Update peak equity using full equity (outside lock — equity() acquires lock)
+        eq = self.equity()
+        if eq > self.peak_equity:
+            self.peak_equity = eq
 
     # ─────────────────────────────────────────────────────────────────────────
     # Analytics

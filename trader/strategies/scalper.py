@@ -102,8 +102,10 @@ class ScalpingScanner:
         if candles is None or len(candles) < 30:
             return None
 
-        closes  = [c["close"] for c in candles]
-        volumes = [c["volumeto"] for c in candles]
+        closes  = [c.get("close", 0) for c in candles if c.get("close", 0) > 0]
+        if len(closes) < 30:
+            return None
+        volumes = [c.get("volumeto", c.get("volumefrom", 0)) for c in candles if c.get("close", 0) > 0]
         price   = closes[-1]
 
         # ── Indicators ───────────────────────────────────────────────────────

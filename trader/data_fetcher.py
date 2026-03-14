@@ -420,44 +420,6 @@ def get_open_interest(symbol: str) -> dict:
     }
     return _store(key, result)
 
-# ─── Simple in-memory cache ────────────────────────────────────────────────────
-_cache: dict = {}
-
-def _cached(key: str, ttl: int = config.DATA_CACHE_TTL):
-    """Return cached value if fresh, else None."""
-    if key in _cache:
-        value, ts = _cache[key]
-        if time.time() - ts < ttl:
-            return value
-    return None
-
-def _store(key: str, value):
-    _cache[key] = (value, time.time())
-    return value
-
-
-def _get(url: str, params: dict = None, timeout: int = 10) -> Optional[dict]:
-    """HTTP GET with basic error handling and rate-limit backoff."""
-    for attempt in range(3):
-        try:
-            headers = {"Accept": "application/json", "User-Agent": "ai-trader/1.0"}
-            if config.COINGECKO_API_KEY and "coingecko" in url:
-                headers["x-cg-demo-api-key"] = config.COINGECKO_API_KEY
-            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
-            if resp.status_code == 429:
-                wait = 2 + attempt * 2   # 2s, 4s, 6s — fast backoff for 60s cycles
-                logger.debug("Rate limited by %s, waiting %ds", url, wait)
-                time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            return resp.json()
-        except requests.RequestException as e:
-            logger.debug("Request failed (%s): %s", url, e)
-            if attempt < 2:
-                time.sleep(1)
-    return None
-
-
 # ─── CoinGecko ────────────────────────────────────────────────────────────────
 
 def get_top_coins(n: int = config.CRYPTO_TOP_N) -> list[dict]:

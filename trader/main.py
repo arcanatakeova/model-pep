@@ -200,7 +200,15 @@ class AITrader:
         if today != self._last_day:
             self._last_day = today
             self.risk_mgr.reset_daily_loss_tracker()
-            logger.info("Daily reset: new day %s, loss tracker cleared", today)
+            # Reset daily P&L baseline with true equity (CEX + DEX)
+            dex_val = sum(
+                p.get("size_usd", 0) * p.get("remaining_fraction", 1.0)
+                * (1 + p.get("current_pnl_pct", 0))
+                for p in self._dex_positions.values()
+            )
+            self._day_start_eq = self.portfolio.equity() + dex_val
+            logger.info("Daily reset: new day %s, equity=$%.2f, loss tracker cleared",
+                        today, self._day_start_eq)
             if self.solana.is_connected and self.live:
                 wallet_value = self.solana.get_portfolio_value_usd()
                 if wallet_value > 10:
@@ -408,6 +416,9 @@ class AITrader:
                 for pos in self._dex_positions.values()
             )
             true_equity = equity + dex_value
+            # Keep peak_equity in sync with true equity (includes DEX)
+            if true_equity > self.portfolio.peak_equity:
+                self.portfolio.peak_equity = true_equity
             daily_pnl = round(true_equity - self._day_start_eq, 2)
             state = {
                 "cycle": self._cycle,

@@ -130,12 +130,11 @@ class TradeExecutor:
         price   = signal.current_price
         stop_pct = abs(price - signal.stop_loss) / price if price > 0 else config.STOP_LOSS_PCT
 
-        # Use thread-local risk override if set (avoids mutating global config)
-        risk_pct_backup = config.RISK_PER_TRADE_PCT
-        if self._risk_override is not None:
-            config.RISK_PER_TRADE_PCT = self._risk_override
-        size_usd = self.risk.position_size_usd(signal.score, signal.conviction, stop_pct, price)
-        config.RISK_PER_TRADE_PCT = risk_pct_backup
+        # Pass risk override directly — no global config mutation (thread-safe)
+        size_usd = self.risk.position_size_usd(
+            signal.score, signal.conviction, stop_pct, price,
+            risk_pct_override=self._risk_override,
+        )
 
         if size_usd < 1.0:
             logger.debug("Position size too small ($%.2f) for %s", size_usd, signal.asset_id)
@@ -367,8 +366,12 @@ class TradeExecutor:
                 logger.error("Futures order failed for %s: %s", signal.symbol, e)
                 return None
 
-        # Deduct margin + commission from cash
+        # Deduct only margin + commission (NOT the full notional).
+        # portfolio.open_position() deducts qty*price (notional) for longs — we temporarily
+        # pre-fund that amount so its internal check passes, then the net deduction is correct.
         self.portfolio.cash -= (margin_usd + commission)
+        if side == "long":
+            self.portfolio.cash += notional_usd  # temp pre-fund for open_position's check
 
         # Record as a portfolio position with futures metadata
         sig_dict = signal.to_dict() if hasattr(signal, "to_dict") else {}
@@ -376,6 +379,12 @@ class TradeExecutor:
             fut_asset_id, side, qty, fill_price,
             signal.stop_loss, signal.take_profit, sig_dict,
         )
+        if not pos:
+            # open_position failed — restore cash
+            self.portfolio.cash += (margin_usd + commission)
+            if side == "long":
+                self.portfolio.cash -= notional_usd
+            return None
         if pos:
             pos["is_futures"] = True
             pos["leverage"]   = leverage

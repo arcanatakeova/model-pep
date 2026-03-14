@@ -35,7 +35,8 @@ class RiskManager:
     # ─────────────────────────────────────────────────────────────────────────
 
     def position_size_usd(self, signal_score: float, conviction: float,
-                          stop_pct: float, current_price: float) -> float:
+                          stop_pct: float, current_price: float,
+                          risk_pct_override: float = None) -> float:
         """
         Calculate position size in USD using a hybrid approach:
         1. Fixed-fractional risk (2% of equity per trade)
@@ -55,8 +56,9 @@ class RiskManager:
         if equity <= 0 or stop_pct <= 0:
             return 0.0
 
-        # Base risk: 2% of equity
-        base_risk_usd = equity * config.RISK_PER_TRADE_PCT
+        # Base risk: 2% of equity (or override passed by executor)
+        risk_pct = risk_pct_override if risk_pct_override is not None else config.RISK_PER_TRADE_PCT
+        base_risk_usd = equity * risk_pct
 
         # Position size = risk / stop_distance
         # stop_pct is the fraction of price we're willing to lose
@@ -102,13 +104,9 @@ class RiskManager:
         Check if a new position can be opened.
         Returns (allowed: bool, reason: str).
         """
-        # Circuit breaker: daily loss limit
-        if self._daily_loss_triggered():
-            return False, "Daily loss limit reached — circuit breaker active"
-
-        # Max drawdown guard
+        # Max drawdown guard (50% hard stop — catastrophic protection only)
         if self._max_drawdown_triggered():
-            return False, "Maximum drawdown limit reached"
+            return False, "Maximum drawdown limit reached (50%)"
 
         # Already in this position
         if self.portfolio.has_position(asset_id):
