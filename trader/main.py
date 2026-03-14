@@ -118,7 +118,7 @@ class AITrader:
 
         # ── State ─────────────────────────────────────────────────────────
         self._cycle          = 0
-        self._last_save      = time.time()
+        self._last_save      = 0   # 0 = save immediately on first cycle
         self._last_state     = time.time()
         self._last_poly      = 0.0
         self._last_dex       = 0.0
