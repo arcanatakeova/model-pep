@@ -41,6 +41,9 @@ JUPITER_SWAP_URL     = "https://quote-api.jup.ag/v6/swap"
 RAYDIUM_COMPUTE_URL  = "https://transaction-v1.raydium.io/compute/swap-base-in"
 RAYDIUM_TX_URL       = "https://transaction-v1.raydium.io/transaction/swap-base-in"
 
+# PumpPortal — builds Pump.fun bonding-curve buy txs; 3rd fallback for pre-graduation tokens
+PUMPFUN_TRADE_URL    = "https://pumpportal.fun/api/trade-local"
+
 # Jito Block Engine — bundles are MEV-protected and tip-prioritised
 JITO_BUNDLE_URL      = "https://mainnet.block-engine.jito.labs.io/api/v1/bundles"
 JITO_TIP_ACCOUNTS    = [
@@ -405,7 +408,7 @@ class SolanaWallet:
         4. Wait for FINALIZED confirmation
         5. Retry once with 2× fee if transaction expires
         """
-        # 1. Get quote + build tx — try Jupiter first, fall back to Raydium
+        # 1. Get quote + build tx — Jupiter → Raydium → Pump.fun (cascade)
         tx_b64, out_amount, price_impact = self._quote_and_build_jupiter(
             input_mint, output_mint, raw_input_amount, slippage_bps)
         if tx_b64 is None:
@@ -413,13 +416,19 @@ class SolanaWallet:
             tx_b64, out_amount, price_impact = self._quote_and_build_raydium(
                 input_mint, output_mint, raw_input_amount, slippage_bps)
         if tx_b64 is None:
-            return SwapResult(success=False, error="No DEX quote available (Jupiter + Raydium both failed)")
+            logger.info("Raydium unavailable — trying Pump.fun bonding curve")
+            tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
+                output_mint, raw_input_amount, slippage_bps)
+        if tx_b64 is None:
+            return SwapResult(success=False,
+                              error="No DEX quote available (Jupiter + Raydium + Pump.fun all failed)")
 
         if price_impact > MAX_PRICE_IMPACT_PCT:
             return SwapResult(success=False,
                               error=f"Price impact too high: {price_impact:.1f}%")
-        if out_amount <= 0:
-            return SwapResult(success=False, error="Quote returned zero output")
+        # out_amount == 0 means the DEX didn't expose it upfront (Pump.fun); skip the gate
+        if out_amount < 0:
+            return SwapResult(success=False, error="Quote returned negative output")
 
         # 2. Estimate priority fee
         priority_fee = self._estimate_priority_fee()
@@ -524,7 +533,7 @@ class SolanaWallet:
                 return None, 0, 0.0
             data = resp.json()
             if not data.get("success"):
-                logger.debug("Raydium compute error: %s", data)
+                logger.warning("Raydium: no pool for this token (%s)", data.get("msg", "no route"))
                 return None, 0, 0.0
             swap_data    = data["data"]
             out_amount   = int(swap_data.get("outputAmount", 0))
@@ -556,6 +565,46 @@ class SolanaWallet:
             return tx_b64, out_amount, price_impact
         except Exception as e:
             logger.warning("Raydium quote/build exception: %s", e)
+            return None, 0, 0.0
+
+    def _quote_and_build_pumpfun(self, output_mint: str, amount_lamports: int,
+                                 slippage_bps: int
+                                 ) -> tuple[Optional[str], int, float]:
+        """Build a buy tx via PumpPortal for Pump.fun bonding-curve tokens.
+
+        PumpPortal returns raw VersionedTransaction bytes (not JSON). We base64-encode
+        them so the existing _sign_and_send_* code handles them identically to
+        Jupiter/Raydium transactions. Output amount is not exposed by the API
+        (returns 0); the caller must accept out_amount=0 as "unknown".
+        """
+        try:
+            amount_sol = amount_lamports / 1e9
+            resp = requests.post(
+                PUMPFUN_TRADE_URL,
+                headers={"Content-Type": "application/json"},
+                json={
+                    "publicKey":        self._pubkey,
+                    "action":           "buy",
+                    "mint":             output_mint,
+                    "denominatedInSol": "true",
+                    "amount":           round(amount_sol, 6),
+                    "slippage":         slippage_bps / 100,
+                    "priorityFee":      0.0001,
+                    "pool":             "pump",
+                },
+                timeout=10,
+            )
+            if not resp.ok:
+                logger.warning("PumpPortal failed: HTTP %s", resp.status_code)
+                return None, 0, 0.0
+            tx_bytes = resp.content
+            if not tx_bytes:
+                return None, 0, 0.0
+            tx_b64 = base64.b64encode(tx_bytes).decode()
+            logger.debug("PumpPortal tx built: %.6f SOL → %s", amount_sol, output_mint[:12])
+            return tx_b64, 0, 0.0  # out_amount unknown until tx lands
+        except Exception as e:
+            logger.warning("PumpPortal exception: %s", e)
             return None, 0, 0.0
 
     # ─── Jupiter ───────────────────────────────────────────────────────────────
