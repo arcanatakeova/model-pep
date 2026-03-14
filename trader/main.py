@@ -218,6 +218,11 @@ class AITrader:
         signal.signal(signal.SIGINT,  self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
 
+        # Remove stale PAUSED file on fresh start so it can't silently block trading
+        if self.live and os.path.exists("PAUSED"):
+            os.unlink("PAUSED")
+            logger.info("Removed stale PAUSED file — trading active")
+
         # Start fast price monitor thread (Birdeye multi_price every 3s for held tokens)
         if self.live and self.solana.is_connected:
             _t = threading.Thread(target=self._fast_price_monitor,
@@ -835,7 +840,7 @@ class AITrader:
         thread's _update_dex_positions() always has fresh prices.
         Triggers spike exits and stop-loss closes directly (thread-safe via dict update).
         """
-        from birdeye import _get_birdeye
+        from dex_screener import _get_birdeye
         while self.running:
             try:
                 time.sleep(3)
