@@ -194,9 +194,14 @@ class Portfolio:
             return {
                 "equity": round(eq, 2),
                 "cash": round(self.cash, 2),
+                "initial_capital": self.initial_capital,
                 "total_return_pct": round(total_return, 2),
                 "total_trades": 0,
                 "open_positions": len(self.open_positions),
+                "win_rate_pct": 0,
+                "profit_factor": 0,
+                "max_drawdown_pct": 0,
+                "total_pnl_usd": 0,
             }
 
         winning = [t for t in closed if t["pnl_usd"] > 0]
