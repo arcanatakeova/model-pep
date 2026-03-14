@@ -202,6 +202,9 @@ class TokenSafetyChecker:
         top10 = (birdeye_sec.top10_holder_pct if birdeye_sec and birdeye_sec.top10_holder_pct
                  else rc.get("top_10_holder_pct"))
         if top10 is not None:
+            # Normalize to [0, 1] — some APIs return integer percentage (e.g. 75 instead of 0.75)
+            if top10 > 1:
+                top10 = top10 / 100.0
             if top10 > 0.90:
                 score -= 0.45
                 flags.append(f"Top 10 holders own {top10:.0%} (extreme concentration)")

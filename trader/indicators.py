@@ -207,7 +207,7 @@ def momentum_signal(close: pd.Series, period: int = config.MOMENTUM_PERIOD) -> f
     if not _validate(close, period + 5):
         return 0.0
 
-    roc = (close.iloc[-1] / close.iloc[-period - 1] - 1) if close.iloc[-period - 1] != 0 else 0
+    roc = close.pct_change(periods=period).iloc[-1]  # rate-of-change over exactly `period` bars
     recent = close.tail(period)
     rng = recent.max() - recent.min()
     pos = (close.iloc[-1] - recent.min()) / rng if rng > 0 else 0.5

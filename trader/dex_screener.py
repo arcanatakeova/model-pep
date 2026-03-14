@@ -354,7 +354,9 @@ class DexScreener:
             score += 0.03   # Solana: high velocity, Phantom-tradeable
 
         # ── Token safety check (SAFETY_SCORE_WEIGHT weight) ────────────
-        if token.chain_id == "solana" and score > 0.20:
+        # Always check high-velocity tokens regardless of composite score —
+        # exactly the tokens most likely to be rugs or honeypots.
+        if token.chain_id == "solana" and (score > 0.20 or abs(token.price_change_h1) > 15):
             try:
                 safety = self._safety_checker.check_token_safety(token.base_address)
                 token.safety_report = safety

@@ -1357,7 +1357,8 @@ def main():
         description="AI Autonomous Trader — Compound wealth 24/7",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--live",    action="store_true", help="Enable real trades (needs API keys in .env)")
+    parser.add_argument("--paper",   action="store_true", help="Force paper trading mode (default: LIVE if wallet key set)")
+    parser.add_argument("--live",    action="store_true", help="[deprecated] Redundant — live is now the default")
     parser.add_argument("--scan",    action="store_true", help="Scan all markets and exit")
     parser.add_argument("--status",  action="store_true", help="Portfolio + compound status and exit")
     parser.add_argument("--report",  action="store_true", help="Full JSON report and exit")
@@ -1377,12 +1378,15 @@ def main():
     elif args.growth:
         cmd_growth()
     else:
-        if args.live:
-            if not any([config.BINANCE_API_KEY, config.PHANTOM_PRIVATE_KEY,
-                        config.POLYMARKET_PRIVATE_KEY, config.COINBASE_API_KEY]):
-                print("WARNING: --live mode but no API keys found in .env")
-                print("Running in paper mode. Set keys to enable real trades.")
-        trader = AITrader(live=args.live)
+        # Live is the default when a wallet key is configured.
+        # Pass --paper explicitly to force paper-only simulation.
+        run_live = not args.paper
+        if run_live and not any([config.BINANCE_API_KEY, config.PHANTOM_PRIVATE_KEY,
+                                  config.POLYMARKET_PRIVATE_KEY, config.COINBASE_API_KEY]):
+            print("WARNING: No API keys found in .env — running in PAPER mode.")
+            print("Set PHANTOM_PRIVATE_KEY in .env to enable real Solana trades.")
+            run_live = False
+        trader = AITrader(live=run_live)
         trader.start()
 
 

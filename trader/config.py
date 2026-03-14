@@ -153,7 +153,7 @@ COINBASE_SECRET  = os.getenv("COINBASE_SECRET", "")
 SCAN_INTERVAL_SEC = 15        # Scan markets every 15 seconds (parallel cycle = faster)
 OHLCV_CANDLES = 100           # Number of candles to fetch for analysis
 CANDLE_INTERVAL = "1h"        # 1-hour candles for swing analysis
-DATA_CACHE_TTL = 25           # Cache market data for 25 seconds (shorter = fresher data)
+DATA_CACHE_TTL = 12           # Cache market data for 12 seconds (shorter than 15s scan cycle)
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 LOG_LEVEL = "INFO"
