@@ -494,7 +494,7 @@ def mini_sparkline(values: list, color_line: str) -> go.Figure:
 
 # ── Main render ───────────────────────────────────────────────────────────────
 
-REFRESH_SEC = 5   # Dashboard auto-refresh interval in seconds
+REFRESH_SEC = 15  # Dashboard auto-refresh interval in seconds
 
 
 def render():
