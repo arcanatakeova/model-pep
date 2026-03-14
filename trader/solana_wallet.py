@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 JUPITER_QUOTE_URL    = "https://quote-api.jup.ag/v6/quote"
 JUPITER_SWAP_URL     = "https://quote-api.jup.ag/v6/swap"
 
+# Raydium swap API — used as fallback when Jupiter is geo-blocked
+RAYDIUM_COMPUTE_URL  = "https://transaction-v1.raydium.io/compute/swap-base-in"
+RAYDIUM_TX_URL       = "https://transaction-v1.raydium.io/transaction/swap-base-in"
+
 # Jito Block Engine — bundles are MEV-protected and tip-prioritised
 JITO_BUNDLE_URL      = "https://mainnet.block-engine.jito.labs.io/api/v1/bundles"
 JITO_TIP_ACCOUNTS    = [
@@ -375,42 +379,24 @@ class SolanaWallet:
         4. Wait for FINALIZED confirmation
         5. Retry once with 2× fee if transaction expires
         """
-        # 1. Get quote
-        quote = self._get_jupiter_quote(input_mint, output_mint,
-                                        raw_input_amount, slippage_bps)
-        if not quote:
-            return SwapResult(success=False, error="Jupiter quote unavailable")
+        # 1. Get quote + build tx — try Jupiter first, fall back to Raydium
+        tx_b64, out_amount, price_impact = self._quote_and_build_jupiter(
+            input_mint, output_mint, raw_input_amount, slippage_bps)
+        if tx_b64 is None:
+            logger.info("Jupiter unavailable — trying Raydium")
+            tx_b64, out_amount, price_impact = self._quote_and_build_raydium(
+                input_mint, output_mint, raw_input_amount, slippage_bps)
+        if tx_b64 is None:
+            return SwapResult(success=False, error="No DEX quote available (Jupiter + Raydium both failed)")
 
-        price_impact = float(quote.get("priceImpactPct", 0))
         if price_impact > MAX_PRICE_IMPACT_PCT:
             return SwapResult(success=False,
                               error=f"Price impact too high: {price_impact:.1f}%")
-
-        out_amount = int(quote.get("outAmount", 0))
         if out_amount <= 0:
             return SwapResult(success=False, error="Quote returned zero output")
 
         # 2. Estimate priority fee
         priority_fee = self._estimate_priority_fee()
-
-        # 3. Build swap transaction
-        swap_payload = {
-            "quoteResponse":            quote,
-            "userPublicKey":            self._pubkey,
-            "wrapAndUnwrapSol":         True,
-            "prioritizationFeeLamports": priority_fee,
-            "dynamicComputeUnitLimit":  True,
-        }
-        try:
-            resp = requests.post(JUPITER_SWAP_URL, json=swap_payload, timeout=15)
-            if not resp.ok:
-                return SwapResult(success=False,
-                                  error=f"Swap build failed: {resp.status_code}")
-            tx_b64 = resp.json().get("swapTransaction")
-            if not tx_b64:
-                return SwapResult(success=False, error="No swapTransaction in response")
-        except Exception as e:
-            return SwapResult(success=False, error=f"Swap build exception: {e}")
 
         # 4. Sign, send, confirm
         sig = self._sign_and_send_jito(tx_b64, priority_fee)
@@ -463,6 +449,88 @@ class SolanaWallet:
             price_impact_pct=price_impact,
             actual_slippage_bps=slippage_bps,
         )
+
+    # ─── Jupiter + Raydium quote/build helpers ─────────────────────────────────
+
+    def _quote_and_build_jupiter(self, input_mint: str, output_mint: str,
+                                 amount: int, slippage_bps: int
+                                 ) -> tuple[Optional[str], int, float]:
+        """Get Jupiter quote and build swap tx. Returns (tx_b64, out_amount, price_impact) or (None, 0, 0)."""
+        quote = self._get_jupiter_quote(input_mint, output_mint, amount, slippage_bps)
+        if not quote:
+            return None, 0, 0.0
+        out_amount   = int(quote.get("outAmount", 0))
+        price_impact = float(quote.get("priceImpactPct", 0))
+        priority_fee = self._estimate_priority_fee()
+        swap_payload = {
+            "quoteResponse":             quote,
+            "userPublicKey":             self._pubkey,
+            "wrapAndUnwrapSol":          True,
+            "prioritizationFeeLamports": priority_fee,
+            "dynamicComputeUnitLimit":   True,
+        }
+        try:
+            resp = requests.post(JUPITER_SWAP_URL, json=swap_payload, timeout=15)
+            if not resp.ok:
+                return None, 0, 0.0
+            tx_b64 = resp.json().get("swapTransaction")
+            if not tx_b64:
+                return None, 0, 0.0
+            return tx_b64, out_amount, price_impact
+        except Exception:
+            return None, 0, 0.0
+
+    def _quote_and_build_raydium(self, input_mint: str, output_mint: str,
+                                 amount: int, slippage_bps: int
+                                 ) -> tuple[Optional[str], int, float]:
+        """Get Raydium quote and build swap tx. Returns (tx_b64, out_amount, price_impact) or (None, 0, 0)."""
+        try:
+            # Step 1: compute quote
+            resp = requests.get(RAYDIUM_COMPUTE_URL, params={
+                "inputMint":  input_mint,
+                "outputMint": output_mint,
+                "amount":     str(amount),
+                "slippageBps": str(slippage_bps),
+                "txVersion":  "V0",
+            }, timeout=10)
+            if not resp.ok:
+                logger.debug("Raydium compute failed: %s", resp.status_code)
+                return None, 0, 0.0
+            data = resp.json()
+            if not data.get("success"):
+                logger.debug("Raydium compute error: %s", data)
+                return None, 0, 0.0
+            swap_data    = data["data"]
+            out_amount   = int(swap_data.get("outputAmount", 0))
+            price_impact = float(swap_data.get("priceImpactPct", 0))
+
+            # Step 2: build transaction
+            tx_resp = requests.post(RAYDIUM_TX_URL, json={
+                "computeUnitPriceMicroLamports": "auto",
+                "swapResponse": data,
+                "txVersion":    "V0",
+                "wallet":       self._pubkey,
+                "wrapSol":      True,
+                "unwrapSol":    True,
+            }, timeout=15)
+            if not tx_resp.ok:
+                logger.debug("Raydium tx build failed: %s", tx_resp.status_code)
+                return None, 0, 0.0
+            tx_data = tx_resp.json()
+            if not tx_data.get("success"):
+                logger.debug("Raydium tx build error: %s", tx_data)
+                return None, 0, 0.0
+            txs = tx_data.get("data", [])
+            if not txs:
+                return None, 0, 0.0
+            tx_b64 = txs[0].get("transaction")
+            if not tx_b64:
+                return None, 0, 0.0
+            logger.debug("Raydium quote ok: out=%d impact=%.2f%%", out_amount, price_impact)
+            return tx_b64, out_amount, price_impact
+        except Exception as e:
+            logger.warning("Raydium quote/build exception: %s", e)
+            return None, 0, 0.0
 
     # ─── Jupiter ───────────────────────────────────────────────────────────────
 
