@@ -691,7 +691,10 @@ def get_stock_ohlcv(symbol: str, period: str = "60d", interval: str = "1h") -> p
         # Staleness guard: if the most recent candle is > 2 days old, discard
         if not df.empty:
             last_ts = df["timestamp"].iloc[-1]
-            age_hours = (now_utc - last_ts.to_pydatetime()).total_seconds() / 3600
+            last_dt = last_ts.to_pydatetime()
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            age_hours = (now_utc - last_dt).total_seconds() / 3600
             if age_hours > 48:
                 logger.debug("Stock data for %s is %.0fh old — discarding", symbol, age_hours)
                 return _store(key, pd.DataFrame())
