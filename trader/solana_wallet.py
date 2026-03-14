@@ -415,10 +415,16 @@ class SolanaWallet:
             logger.info("Jupiter unavailable — trying Raydium")
             tx_b64, out_amount, price_impact = self._quote_and_build_raydium(
                 input_mint, output_mint, raw_input_amount, slippage_bps)
-        if tx_b64 is None:
+        if tx_b64 is None and output_mint.endswith("pump"):
             logger.info("Raydium unavailable — trying Pump.fun bonding curve")
             tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
-                output_mint, raw_input_amount, slippage_bps)
+                output_mint, raw_input_amount, slippage_bps, pool="pump")
+            if tx_b64 is None:
+                logger.info("Pump.fun bonding curve unavailable — trying PumpSwap AMM")
+                tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
+                    output_mint, raw_input_amount, slippage_bps, pool="pumpswap")
+        elif tx_b64 is None:
+            logger.info("Raydium unavailable — token is not a Pump.fun token, no further fallbacks")
         if tx_b64 is None:
             return SwapResult(success=False,
                               error="No DEX quote available (Jupiter + Raydium + Pump.fun all failed)")
@@ -568,9 +574,13 @@ class SolanaWallet:
             return None, 0, 0.0
 
     def _quote_and_build_pumpfun(self, output_mint: str, amount_lamports: int,
-                                 slippage_bps: int
+                                 slippage_bps: int,
+                                 pool: str = "pump",
                                  ) -> tuple[Optional[str], int, float]:
-        """Build a buy tx via PumpPortal for Pump.fun bonding-curve tokens.
+        """Build a buy tx via PumpPortal.
+
+        pool="pump"     → Pump.fun bonding curve (pre-graduation)
+        pool="pumpswap" → Pump.fun AMM (post-graduation, March 2025+)
 
         PumpPortal returns raw VersionedTransaction bytes (not JSON). We base64-encode
         them so the existing _sign_and_send_* code handles them identically to
@@ -580,7 +590,7 @@ class SolanaWallet:
         try:
             amount_sol = amount_lamports / 1e9
             # PumpPortal expects slippage as integer percentage (e.g. 10 = 10%)
-            # Use minimum 10% — memecoins on bonding curves need wide slippage
+            # Use minimum 10% — memecoins need wide slippage
             slippage_pct = max(10, slippage_bps // 100)
             resp = requests.post(
                 PUMPFUN_TRADE_URL,
@@ -593,19 +603,19 @@ class SolanaWallet:
                     "amount":           round(amount_sol, 6),
                     "slippage":         slippage_pct,
                     "priorityFee":      0.0001,
-                    "pool":             "pump",
+                    "pool":             pool,
                 },
                 timeout=10,
             )
             if not resp.ok:
-                logger.warning("PumpPortal failed: HTTP %s — %s",
-                               resp.status_code, resp.text[:300])
+                logger.warning("PumpPortal [pool=%s] failed: HTTP %s — %s",
+                               pool, resp.status_code, resp.text[:300])
                 return None, 0, 0.0
             tx_bytes = resp.content
             if not tx_bytes:
                 return None, 0, 0.0
             tx_b64 = base64.b64encode(tx_bytes).decode()
-            logger.debug("PumpPortal tx built: %.6f SOL → %s", amount_sol, output_mint[:12])
+            logger.debug("PumpPortal [pool=%s] tx built: %.6f SOL → %s", pool, amount_sol, output_mint[:12])
             return tx_b64, 0, 0.0  # out_amount unknown until tx lands
         except Exception as e:
             logger.warning("PumpPortal exception: %s", e)
