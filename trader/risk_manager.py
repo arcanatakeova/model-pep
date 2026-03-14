@@ -190,9 +190,12 @@ class RiskManager:
             return False
         current = self.portfolio.equity()
         daily_loss = (self._daily_loss_start_equity - current) / self._daily_loss_start_equity
-        if daily_loss >= self._daily_loss_limit:
+        # Use tighter limit when leverage/futures are active
+        limit = (config.FUTURES_DAILY_LOSS_LIMIT
+                 if getattr(config, "FUTURES_ENABLED", False) else self._daily_loss_limit)
+        if daily_loss >= limit:
             logger.warning("CIRCUIT BREAKER: Daily loss %.1f%% exceeds limit %.1f%%",
-                           daily_loss * 100, self._daily_loss_limit * 100)
+                           daily_loss * 100, limit * 100)
             return True
         return False
 
@@ -207,6 +210,67 @@ class RiskManager:
                            drawdown * 100, self._max_drawdown_limit * 100)
             return True
         return False
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Leverage / Futures Risk Controls
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def leverage_for_signal(self, score: float, conviction: float) -> int:
+        """
+        Choose leverage based on signal conviction.
+        Higher conviction → higher leverage (capped at MAX_LEVERAGE).
+        """
+        for min_conv, lev in config.LEVERAGE_BY_CONVICTION:
+            if conviction >= min_conv:
+                return min(lev, config.MAX_LEVERAGE)
+        return 2
+
+    def leveraged_position_size_usd(self, signal_score: float, conviction: float,
+                                     stop_pct: float, price: float,
+                                     leverage: int) -> float:
+        """
+        Calculate margin (collateral) required for a leveraged futures position.
+
+        Logic:
+          - Risk the same USD per trade as spot (FUTURES_RISK_PCT of equity)
+          - margin = risk_usd / stop_pct  (how much collateral covers the stop)
+          - Notional = margin * leverage  (exchange controls the larger position)
+          - Caps: MAX_POSITION_PCT of equity, 20% of free cash
+
+        Returns margin USD to post (not notional).
+        """
+        equity = self.portfolio.equity()
+        if equity <= 0 or stop_pct <= 0 or leverage <= 0:
+            return 0.0
+
+        base_risk_usd = equity * config.FUTURES_RISK_PCT
+        margin = base_risk_usd / stop_pct
+
+        # Scale by signal quality
+        scale = min(abs(signal_score), 1.0) * conviction
+        margin *= (0.5 + scale * 0.5)
+
+        # Caps
+        margin = min(margin, equity * config.MAX_POSITION_PCT)
+        margin = min(margin, self.portfolio.cash * 0.20)
+
+        return round(max(margin, 0.0), 2)
+
+    def liquidation_price(self, entry: float, side: str,
+                           leverage: int,
+                           maintenance_margin: float = 0.005) -> float:
+        """
+        Estimate isolated-margin liquidation price.
+
+        For LONG:  liq ≈ entry * (1 − 1/leverage + maintenance_margin)
+        For SHORT: liq ≈ entry * (1 + 1/leverage − maintenance_margin)
+        """
+        if leverage <= 0:
+            return 0.0
+        if side == "long":
+            return entry * (1 - (1 / leverage) + maintenance_margin)
+        else:
+            return entry * (1 + (1 / leverage) - maintenance_margin)
 
     # ─────────────────────────────────────────────────────────────────────────
     # DEX / Memecoin-Specific Risk Controls

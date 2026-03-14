@@ -1,18 +1,28 @@
 """
-AI Trader — Autonomous Multi-Market Compounding Bot
-====================================================
-Runs every 60 seconds, 24/7, trading all available markets.
+AI Trader v3.0 — Autonomous 24/7 Leveraged Pro Trading Bot
+===========================================================
+Runs every 30 seconds, non-stop, across all markets with leverage.
 
 Markets traded:
-  1. Crypto CEX      — CoinGecko / CryptoCompare signals (top 50 coins)
-  2. DEX Tokens      — DEX Screener hot tokens (Solana, Base, BSC, etc.)
-  3. Solana On-Chain — Phantom wallet + Jupiter DEX swaps
-  4. Polymarket      — Prediction market edge trading
-  5. Stocks / ETFs   — Yahoo Finance (QQQ, SPY, NVDA, etc.)
-  6. Forex           — Major currency pairs
+  1. Crypto CEX      — CoinGecko / CryptoCompare 1h signals (BTC, ETH, SOL)
+  2. Crypto Scalps   — 5-minute RSI/EMA signals → Binance Futures (2-8x leverage)
+  3. Futures Swings  — 1h signals → Binance USDT-M Perpetuals (leveraged)
+  4. DEX Tokens      — DEX Screener hot tokens (Solana memecoin sniping)
+  5. Solana On-Chain — Phantom wallet + Jupiter DEX swaps
+  6. Polymarket      — Prediction market edge trading
+  7. Stocks / ETFs   — Yahoo Finance (QQQ, SPY, NVDA)
+  8. Forex           — EUR/USD, GBP/USD
+
+Features:
+  - Leverage: 2-8x on high-conviction signals (Binance Futures)
+  - Scalping: 5m signals on BTC/ETH/SOL every 30s
+  - Position pyramiding: adds 25% to winning positions on confirmation
+  - Liquidation guard: emergency close if within 15% of liq price
+  - 24/7: auto-restarts on crash (use run_forever.sh or systemd)
+  - Compounding: all profits reinvested, position sizes scale with equity
 
 Usage:
-  python main.py                  # Start live paper-trading bot (default)
+  python main.py                  # Start paper-trading bot (default)
   python main.py --live           # Enable real trades (needs keys in .env)
   python main.py --scan           # One-shot scan, print all signals, exit
   python main.py --status         # Portfolio status + compound growth, exit
@@ -41,6 +51,7 @@ from risk_manager import RiskManager
 from executor import TradeExecutor
 from compounding_engine import CompoundingEngine
 from strategies import MarketScanner
+from strategies.scalper import ScalpingScanner
 from dex_screener import DexScreener
 from polymarket import PolymarketTrader
 from solana_wallet import SolanaWallet
@@ -61,11 +72,11 @@ logger = logging.getLogger("ai_trader")
 
 BANNER = """
 ╔══════════════════════════════════════════════════════════════════╗
-║          AUTONOMOUS AI TRADER  v2.0  —  ALL MARKETS              ║
+║       AUTONOMOUS AI TRADER  v3.0  —  LEVERAGED 24/7              ║
 ╠══════════════════════════════════════════════════════════════════╣
-║  Crypto CEX │ DEX Tokens │ Solana │ Polymarket │ Stocks │ Forex  ║
+║  CEX │ Futures(2-8x) │ Scalps(5m) │ DEX │ Poly │ Stocks │ Forex  ║
 ║  Mode: {mode:<8}    Capital: ${capital:<12,.0f}                  ║
-║  Scan interval: every 60 seconds, 24/7                           ║
+║  Scan: 30s cycle │ Scalp: 30s │ Futures: 60s │ DEX: 45s          ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -90,7 +101,8 @@ class AITrader:
         self.compounder = CompoundingEngine(self.portfolio, self.risk_mgr)
 
         # ── Market Scanners ───────────────────────────────────────────────
-        self.cex_scanner  = MarketScanner()                          # crypto/forex/stocks
+        self.cex_scanner  = MarketScanner()                          # crypto/forex/stocks (1h)
+        self.scalper      = ScalpingScanner()                        # 5m scalp signals
         self.dex_screener = DexScreener()                            # on-chain tokens
         self.poly_trader  = PolymarketTrader(
             private_key=config.POLYMARKET_PRIVATE_KEY)               # prediction markets
@@ -102,6 +114,8 @@ class AITrader:
         self._last_save    = time.time()
         self._last_poly    = 0.0
         self._last_dex     = 0.0
+        self._last_scalp   = 0.0
+        self._last_futures = 0.0
         self._last_day     = datetime.now(timezone.utc).date()
         self._equity_curve = []
         self._dex_positions: dict = {}  # addr → {buy_price, qty, chain, symbol}
@@ -179,40 +193,54 @@ class AITrader:
         # ── 2. Market overview ────────────────────────────────────────────
         self._log_market_snapshot()
 
-        # ── 3. CEX Scanner: Crypto + Stocks + Forex ───────────────────────
+        # ── 3. CEX Scanner: Crypto + Stocks + Forex (1h signals) ─────────
         self._run_cex_scan()
 
-        # ── 4. DEX Screener: On-chain token sniping ───────────────────────
         now_ts = time.time()
+
+        # ── 4. Scalping: 5m signals → Futures (every 30s) ────────────────
+        if config.SCALP_ENABLED and now_ts - self._last_scalp >= config.SCALP_INTERVAL_SEC:
+            self._run_scalp_scan()
+            self._last_scalp = now_ts
+
+        # ── 5. Futures Swings: 1h signals with leverage (every 60s) ──────
+        if config.FUTURES_ENABLED and now_ts - self._last_futures >= 60:
+            self._run_futures_swing_scan()
+            self._last_futures = now_ts
+
+        # ── 6. Pyramid: Add to winning positions ──────────────────────────
+        self._check_pyramiding()
+
+        # ── 7. DEX Screener: On-chain token sniping ───────────────────────
         if now_ts - self._last_dex >= config.DEX_SCAN_INTERVAL_SEC:
             self._run_dex_scan()
             self._last_dex = now_ts
 
-        # ── 5. Polymarket: Prediction market edges ────────────────────────
+        # ── 8. Polymarket: Prediction market edges ────────────────────────
         if now_ts - self._last_poly >= config.POLYMARKET_SCAN_INTERVAL_SEC:
             self._run_polymarket_scan()
             self._last_poly = now_ts
 
-        # ── 6. Compound: Reinvest + rebalance ─────────────────────────────
+        # ── 10. Compound: Reinvest + rebalance ────────────────────────────
         alloc = self.compounder.on_cycle_complete()
         logger.info("Compound allocations: " + " | ".join(
             f"{k}: ${v:.0f}" for k, v in alloc.items()))
 
-        # ── 7. Equity snapshot ────────────────────────────────────────────
+        # ── 11. Equity snapshot ───────────────────────────────────────────
         self._equity_curve.append({
             "ts": datetime.now(timezone.utc).isoformat(),
             "equity": round(equity, 2),
             "cycle": self._cycle,
         })
 
-        # ── 8. Risk report ────────────────────────────────────────────────
+        # ── 12. Risk report ───────────────────────────────────────────────
         risk = self.risk_mgr.risk_report()
         logger.info("Risk: pos=%d/%d cash=$%.0f dd=%.1f%% daily=%.1f%%",
                     risk["open_positions"], risk["max_positions"],
                     risk["cash"], risk["current_drawdown_pct"],
                     risk["daily_loss_pct"])
 
-        # ── 9. Periodic saves ─────────────────────────────────────────────
+        # ── 13. Periodic saves ────────────────────────────────────────────
         if time.time() - self._last_save > config.PORTFOLIO_SNAPSHOT_INTERVAL:
             self.portfolio.save()
             self._save_dex_positions()
@@ -256,6 +284,108 @@ class AITrader:
             self.executor.process_signal(signal)
         finally:
             config.RISK_PER_TRADE_PCT = original_risk
+
+    def _run_scalp_scan(self):
+        """5-minute scalp signals on BTC/ETH/SOL → leveraged futures trades."""
+        try:
+            signals = self.scalper.scan()
+            logger.info("Scalp scan: %d actionable 5m signals", len(signals))
+            for sig in signals[:3]:
+                pos = self.executor.open_futures_position(sig)
+                if pos:
+                    logger.info(
+                        "SCALP FUTURES %-5s %-6s x%d score=%.2f | %s",
+                        sig.signal, sig.symbol, pos.get("leverage", 1),
+                        sig.score, ", ".join(sig.reasons[:1]),
+                    )
+        except Exception as e:
+            logger.warning("Scalp scan error: %s", e)
+
+    def _run_futures_swing_scan(self):
+        """1h swing signals on major crypto pairs → leveraged futures trades."""
+        try:
+            signals = self.cex_scanner.scan_all(max_workers=4)
+            # Filter for crypto only and high conviction
+            futures_candidates = [
+                s for s in signals
+                if s.market == "crypto" and abs(s.score) > 0.45 and s.signal != "HOLD"
+            ]
+            logger.info("Futures swing scan: %d candidates", len(futures_candidates))
+            for sig in futures_candidates[:3]:
+                pos = self.executor.open_futures_position(sig)
+                if pos:
+                    logger.info(
+                        "SWING FUTURES %-5s %-12s x%d score=%.2f conv=%.2f",
+                        sig.signal, sig.symbol, pos.get("leverage", 1),
+                        sig.score, sig.conviction,
+                    )
+        except Exception as e:
+            logger.warning("Futures swing scan error: %s", e)
+
+    def _check_pyramiding(self):
+        """
+        Add 25% to open winning positions when a confirming fresh signal arrives.
+        Only pyramids once per position (avoids doubling down into losses).
+        """
+        try:
+            for asset_id, pos in list(self.portfolio.open_positions.items()):
+                # Only pyramid spot positions (not futures — different risk profile)
+                if pos.get("is_futures"):
+                    continue
+                if pos.get("pyramided"):
+                    continue
+
+                entry   = pos.get("entry_price", 0)
+                current = pos.get("current_price", entry)
+                if entry <= 0:
+                    continue
+                pnl_pct = (current - entry) / entry if pos.get("side") == "long" \
+                    else (entry - current) / entry
+
+                # Only pyramid when we're up > 3%
+                if pnl_pct < 0.03:
+                    continue
+
+                # Need enough cash for a pyramid add
+                add_size = pos.get("position_usd", self.portfolio.equity() * 0.02) * 0.25
+                if add_size < 2.0 or self.portfolio.cash < add_size:
+                    continue
+
+                # Quick check: is there a confirming fresh signal?
+                symbol = pos.get("symbol", "")
+                market = pos.get("market", "crypto")
+                if not symbol or market not in ("crypto", "stocks", "forex"):
+                    continue
+
+                confirms = self._has_confirming_signal(symbol, pos["side"])
+                if confirms:
+                    pos["pyramided"] = True
+                    # Add to position at current price
+                    fill = self.executor._fill_price(current, "buy" if pos["side"] == "long" else "sell")
+                    qty_add = self.risk_mgr.qty_from_usd(add_size, fill)
+                    pos["qty"] = pos.get("qty", 0) + qty_add
+                    self.portfolio.cash -= add_size
+                    logger.info("PYRAMID %-12s +25%% ($%.2f) @ $%.4f | pnl so far: +%.1f%%",
+                                symbol, add_size, fill, pnl_pct * 100)
+        except Exception as e:
+            logger.debug("Pyramiding check error: %s", e)
+
+    def _has_confirming_signal(self, symbol: str, side: str) -> bool:
+        """
+        Quick confirming signal check: does the 5m scalper agree with our position?
+        Returns True if scalper has a matching BUY (for long) or SELL (for short).
+        """
+        try:
+            scalp_symbol = symbol.upper().split("/")[0].replace("SOL", "SOL")
+            signals = self.scalper.scan(symbols=[scalp_symbol])
+            for sig in signals:
+                if side == "long" and sig.signal == "BUY" and sig.conviction > 0.55:
+                    return True
+                if side == "short" and sig.signal == "SELL" and sig.conviction > 0.55:
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _run_dex_scan(self):
         """DEX Screener scan with safety checks, vol-adjusted sizing, concentration limits."""

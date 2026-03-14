@@ -2,7 +2,12 @@
 Trade Executor — Bridges signals to actual (paper or live) trade execution.
 
 Paper mode: simulates fills at market price with configurable slippage.
-Live mode: routes to exchange APIs (Binance, Coinbase Pro) via ccxt.
+Live mode: routes to exchange APIs (Binance spot + Binance USDT-M Futures) via ccxt.
+
+Futures trading uses isolated margin mode. Each futures position tracks:
+  - leverage used
+  - estimated liquidation price
+  - margin posted (collateral)
 """
 import logging
 from typing import Optional
@@ -18,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 SLIPPAGE = 0.001    # 0.1% simulated slippage for paper trading
 COMMISSION = 0.001  # 0.1% commission per trade (Binance maker fee)
+FUTURES_COMMISSION = 0.0004  # 0.04% Binance futures taker fee
 
 
 class TradeExecutor:
@@ -30,10 +36,13 @@ class TradeExecutor:
     def __init__(self, portfolio: Portfolio, risk_manager: RiskManager):
         self.portfolio = portfolio
         self.risk = risk_manager
-        self._exchange = None   # ccxt exchange instance (live only)
+        self._exchange = None          # Binance spot (live only)
+        self._futures_exchange = None  # Binance USDT-M futures (live only)
 
         if not config.PAPER_TRADING:
             self._init_live_exchange()
+            if config.FUTURES_ENABLED:
+                self._init_futures_exchange()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Public API
@@ -75,6 +84,7 @@ class TradeExecutor:
     def update_all_positions(self):
         """
         Refresh prices for all open positions and trigger stop/TP checks.
+        Also runs liquidation guard for futures positions.
         Call this periodically (every scan cycle).
         """
         for asset_id in list(self.portfolio.open_positions.keys()):
@@ -85,6 +95,12 @@ class TradeExecutor:
             current_price = self._get_current_price(asset_id, pos)
             if current_price is None:
                 continue
+
+            # Futures: check liquidation distance first (emergency exit)
+            if pos.get("is_futures"):
+                self._check_liquidation_guard(asset_id, pos, current_price)
+                if asset_id not in self.portfolio.open_positions:
+                    continue  # Was closed by liquidation guard
 
             # Update trailing stop
             new_trail = self.risk.update_trailing_stop(pos, current_price)
@@ -230,7 +246,7 @@ class TradeExecutor:
         return None
 
     def _init_live_exchange(self):
-        """Initialize ccxt exchange for live trading (Binance by default)."""
+        """Initialize ccxt exchange for live spot trading (Binance)."""
         if not config.BINANCE_API_KEY:
             logger.warning("Live trading enabled but no BINANCE_API_KEY set — staying in paper mode")
             return
@@ -241,8 +257,146 @@ class TradeExecutor:
                 "secret": config.BINANCE_SECRET,
                 "enableRateLimit": True,
             })
-            logger.info("Live trading initialized: Binance")
+            logger.info("Live spot trading initialized: Binance")
         except ImportError:
             logger.error("ccxt not installed. Run: pip install ccxt")
         except Exception as e:
-            logger.error("Failed to init exchange: %s", e)
+            logger.error("Failed to init spot exchange: %s", e)
+
+    def _init_futures_exchange(self):
+        """Initialize Binance USDT-M Futures via ccxt for leveraged perpetuals."""
+        if not config.BINANCE_API_KEY:
+            logger.warning("Futures enabled but no BINANCE_API_KEY — futures in paper mode")
+            return
+        try:
+            import ccxt
+            self._futures_exchange = ccxt.binanceusdm({
+                "apiKey": config.BINANCE_API_KEY,
+                "secret": config.BINANCE_SECRET,
+                "enableRateLimit": True,
+                "options": {"defaultType": "future"},
+            })
+            logger.info("Futures trading initialized: Binance USDT-M Perpetuals")
+        except ImportError:
+            logger.error("ccxt not installed. Run: pip install ccxt")
+        except Exception as e:
+            logger.error("Failed to init futures exchange: %s", e)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Futures / Leveraged Execution
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def open_futures_position(self, signal) -> Optional[dict]:
+        """
+        Open a leveraged futures position (long or short) on Binance USDT-M.
+
+        Signal can be a TradeSignal or ScalpSignal (duck-typed: needs .signal,
+        .score, .conviction, .current_price, .stop_loss, .take_profit, .symbol,
+        .asset_id, .market).
+
+        Returns the position dict or None if skipped.
+        """
+        if not config.FUTURES_ENABLED:
+            return None
+        if signal.signal == "HOLD":
+            return None
+
+        side = "long" if signal.signal == "BUY" else "short"
+        price = signal.current_price
+        if price <= 0:
+            return None
+
+        # Use a namespaced asset_id so futures don't collide with spot positions
+        fut_asset_id = f"fut_{signal.asset_id}"
+
+        # Check if we're already in this futures position
+        if self.portfolio.has_position(fut_asset_id):
+            return None
+
+        allowed, reason = self.risk.can_open_position(
+            fut_asset_id, signal.score, signal.market)
+        if not allowed:
+            logger.debug("SKIP FUTURES %s: %s", signal.symbol, reason)
+            return None
+
+        leverage = self.risk.leverage_for_signal(signal.score, signal.conviction)
+        stop_pct  = abs(price - signal.stop_loss) / price if price > 0 else config.STOP_LOSS_PCT
+
+        margin_usd = self.risk.leveraged_position_size_usd(
+            signal.score, signal.conviction, stop_pct, price, leverage)
+        if margin_usd < 1.0:
+            logger.debug("Futures margin too small ($%.2f) for %s", margin_usd, signal.symbol)
+            return None
+
+        notional_usd = margin_usd * leverage
+        fill_price   = self._fill_price(price, "buy" if side == "long" else "sell")
+        qty          = self.risk.qty_from_usd(notional_usd, fill_price)
+        commission   = notional_usd * FUTURES_COMMISSION
+        liq_price    = self.risk.liquidation_price(fill_price, side, leverage)
+
+        if margin_usd + commission > self.portfolio.cash:
+            logger.debug("Insufficient cash for futures margin: need $%.2f, have $%.2f",
+                         margin_usd + commission, self.portfolio.cash)
+            return None
+
+        # Execute live or paper
+        if self._futures_exchange:
+            try:
+                self._futures_exchange.set_leverage(leverage, signal.symbol,
+                                                     params={"marginMode": "isolated"})
+                order_side = "buy" if side == "long" else "sell"
+                self._futures_exchange.create_market_order(
+                    signal.symbol, order_side, qty,
+                    params={"reduceOnly": False},
+                )
+            except Exception as e:
+                logger.error("Futures order failed for %s: %s", signal.symbol, e)
+                return None
+
+        # Deduct margin + commission from cash
+        self.portfolio.cash -= (margin_usd + commission)
+
+        # Record as a portfolio position with futures metadata
+        sig_dict = signal.to_dict() if hasattr(signal, "to_dict") else {}
+        pos = self.portfolio.open_position(
+            fut_asset_id, side, qty, fill_price,
+            signal.stop_loss, signal.take_profit, sig_dict,
+        )
+        if pos:
+            pos["is_futures"] = True
+            pos["leverage"]   = leverage
+            pos["liq_price"]  = round(liq_price, 6)
+            pos["margin_usd"] = round(margin_usd, 2)
+            pos["notional_usd"] = round(notional_usd, 2)
+            pos["symbol"]     = signal.symbol
+            pos["market"]     = signal.market
+            pos["timeframe"]  = getattr(signal, "timeframe", "1h")
+
+            logger.info(
+                "FUTURES %-5s %-14s x%d @ $%-12.4f | "
+                "margin=$%-8.2f notional=$%-8.2f | liq=$%.4f | %s",
+                side.upper(), signal.symbol, leverage, fill_price,
+                margin_usd, notional_usd, liq_price,
+                getattr(signal, "reasons", [""])[0] if getattr(signal, "reasons", []) else "",
+            )
+        return pos
+
+    def _check_liquidation_guard(self, asset_id: str, pos: dict, current_price: float):
+        """
+        Emit a warning and force-close a futures position if it's within
+        15% of its estimated liquidation price (emergency protection).
+        """
+        liq = pos.get("liq_price", 0)
+        if liq <= 0:
+            return
+        side = pos.get("side", "long")
+        if side == "long":
+            distance_pct = (current_price - liq) / current_price if current_price > 0 else 1.0
+        else:
+            distance_pct = (liq - current_price) / liq if liq > 0 else 1.0
+
+        if distance_pct < 0.15:
+            logger.warning(
+                "⚠️  LIQUIDATION GUARD: %s within %.1f%% of liq ($%.4f) — closing now",
+                asset_id, distance_pct * 100, liq)
+            self._execute_close(asset_id, current_price, "Liquidation guard — emergency close")

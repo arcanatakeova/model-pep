@@ -10,12 +10,41 @@ INITIAL_CAPITAL = 10_000.0    # Starting capital in USD (overridden by wallet ba
 
 # ─── Risk Management ──────────────────────────────────────────────────────────
 MAX_POSITION_PCT = 0.10       # Max 10% of portfolio per position
-MAX_OPEN_POSITIONS = 12       # Maximum concurrent positions (more markets = more slots)
+MAX_OPEN_POSITIONS = 20       # Maximum concurrent positions
 STOP_LOSS_PCT = 0.03          # 3% stop loss
 TAKE_PROFIT_PCT = 0.06        # 6% take profit (2:1 R/R ratio)
 RISK_PER_TRADE_PCT = 0.02     # Risk 2% of portfolio per trade (Kelly-based)
-MIN_SIGNAL_STRENGTH = 0.38    # Minimum ensemble score to trigger trade
+MIN_SIGNAL_STRENGTH = 0.30    # Minimum ensemble score to trigger trade (lower = more trades)
 TRAILING_STOP_PCT = 0.025     # 2.5% trailing stop
+
+# ─── Leverage / Futures (Binance USDT-M Perpetuals) ──────────────────────────
+FUTURES_ENABLED = True                    # Trade leveraged futures alongside spot
+DEFAULT_LEVERAGE = 3                      # Default leverage multiplier
+MAX_LEVERAGE = 8                          # Hard cap (safety)
+FUTURES_SYMBOLS = [                       # USDT-M perpetual pairs to trade with leverage
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "SOL/USDT:USDT",
+]
+FUTURES_RISK_PCT = 0.01                   # 1% of equity at risk per futures trade
+FUTURES_DAILY_LOSS_LIMIT = 0.03           # 3% daily loss limit (tighter — leverage amplifies losses)
+# Maps (min_conviction_threshold, leverage_multiplier) — highest conviction first
+LEVERAGE_BY_CONVICTION = [
+    (0.80, 8),
+    (0.65, 5),
+    (0.50, 3),
+    (0.00, 2),
+]
+
+# ─── Scalping (5-minute signals) ─────────────────────────────────────────────
+SCALP_ENABLED = True
+SCALP_INTERVAL_SEC = 30         # Run scalp scan every 30 seconds
+SCALP_CANDLE_INTERVAL = "5m"    # 5-minute candle timeframe
+SCALP_CANDLES = 50              # Number of 5m candles to fetch
+SCALP_RSI_OVERSOLD = 25         # Aggressive RSI threshold for scalp buys
+SCALP_RSI_OVERBOUGHT = 75       # Aggressive RSI threshold for scalp sells
+SCALP_MIN_SCORE = 0.40          # Minimum score to fire a scalp trade
+SCALP_SYMBOLS = ["BTC", "ETH", "SOL"]  # Symbols to scalp
 
 # ─── Market Coverage ──────────────────────────────────────────────────────────
 CRYPTO_TOP_N = 5              # Only top few coins (SOL focus, CEX scanner minimal)
@@ -24,13 +53,15 @@ CRYPTO_MIN_VOLUME_USD = 1_000_000   # Minimum 24h volume to consider
 # Target crypto assets (overrides top-N if set)
 CRYPTO_WATCHLIST = [
     "solana",
+    "bitcoin",
+    "ethereum",
 ]
 
-# Major forex pairs — disabled (Solana focus)
-FOREX_PAIRS = []
+# Major forex pairs — enabled for pro-trader coverage
+FOREX_PAIRS = ["EUR/USD", "GBP/USD"]
 
-# Stock/ETF symbols — disabled (Solana focus)
-STOCK_WATCHLIST = []
+# Stock/ETF symbols — enabled
+STOCK_WATCHLIST = ["SPY", "QQQ", "NVDA"]
 
 # ─── Strategy Weights ─────────────────────────────────────────────────────────
 STRATEGY_WEIGHTS = {
@@ -78,10 +109,10 @@ COINBASE_API_KEY = os.getenv("COINBASE_API_KEY", "")
 COINBASE_SECRET  = os.getenv("COINBASE_SECRET", "")
 
 # ─── Timing ───────────────────────────────────────────────────────────────────
-SCAN_INTERVAL_SEC = 60        # Scan markets every 60 seconds (every minute)
+SCAN_INTERVAL_SEC = 30        # Scan markets every 30 seconds (was 60 — more active)
 OHLCV_CANDLES = 100           # Number of candles to fetch for analysis
-CANDLE_INTERVAL = "1h"        # 1-hour candles for analysis (crypto)
-DATA_CACHE_TTL = 45           # Cache market data for 45 seconds
+CANDLE_INTERVAL = "1h"        # 1-hour candles for swing analysis
+DATA_CACHE_TTL = 25           # Cache market data for 25 seconds (shorter = fresher data)
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 LOG_LEVEL = "INFO"
