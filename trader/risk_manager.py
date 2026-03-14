@@ -267,10 +267,11 @@ class RiskManager:
         For LONG:  liq ≈ entry * (1 − 1/leverage + maintenance_margin)
         For SHORT: liq ≈ entry * (1 + 1/leverage − maintenance_margin)
         """
-        if leverage <= 0:
+        if leverage < 1:
             return 0.0
         if side == "long":
-            return entry * (1 - (1 / leverage) + maintenance_margin)
+            liq = entry * (1 - (1 / leverage) + maintenance_margin)
+            return max(liq, 0.0)
         else:
             return entry * (1 + (1 / leverage) - maintenance_margin)
 
@@ -292,9 +293,10 @@ class RiskManager:
         base_size = config.DEX_BASE_POSITION_USD
 
         # 1. Volatility adjustment (use h1/h6 changes as vol proxy)
-        vol_proxy = (abs(price_change_h1) + abs(price_change_h6) / 6) / 2
+        vol_proxy = (abs(price_change_h1) + abs(price_change_h6 / 6)) / 2
         vol_proxy = max(vol_proxy, 1.0)
-        vol_adjusted = base_size / (vol_proxy * config.POSITION_VOL_SCALAR / 10)
+        scalar = max(config.POSITION_VOL_SCALAR, 0.01)   # Never divide by zero
+        vol_adjusted = base_size / (vol_proxy * scalar / 10)
         if vol_proxy > 30:
             vol_adjusted *= 0.5  # Extra cut for extreme volatility
 
@@ -377,7 +379,11 @@ class RiskManager:
         if len(dex_positions) >= config.MAX_DEX_POSITIONS:
             return False, f"Max DEX positions reached ({config.MAX_DEX_POSITIONS})"
 
-        total_dex_usd = sum(p.get("size_usd", 0) for p in dex_positions.values())
+        # Use remaining_fraction to get actual current exposure (not original full size)
+        total_dex_usd = sum(
+            p.get("size_usd", 0) * p.get("remaining_fraction", 1.0)
+            for p in dex_positions.values()
+        )
         max_dex_total = self.portfolio.equity() * config.MAX_MEMECOIN_ALLOCATION_PCT
         if total_dex_usd >= max_dex_total:
             return False, f"Memecoin allocation cap (${total_dex_usd:.0f} >= ${max_dex_total:.0f})"
@@ -402,7 +408,8 @@ class RiskManager:
             opened_at = datetime.fromisoformat(opened_str.replace("Z", "+00:00"))
             age_hours = (datetime.now(timezone.utc) - opened_at).total_seconds() / 3600
         except (ValueError, TypeError):
-            return False, "Hold"
+            logger.warning("Corrupted opened_at '%s' — forcing exit for safety", opened_str[:40])
+            return True, "Corrupted timestamp — forcing exit"
 
         # Hard time limit
         if age_hours >= config.DEX_MAX_HOLD_HOURS:
@@ -431,9 +438,13 @@ class RiskManager:
             return None, "Hold", 0
 
         pnl_pct = (current - entry) / entry
+        if pnl_pct <= 0:
+            return None, "Hold", 0   # Never partial-sell at a loss
         already_taken = position.get("partial_profits_taken", [])
 
         for threshold_pct, sell_fraction in config.PARTIAL_PROFIT_TIERS:
+            if threshold_pct <= 0:
+                continue   # Skip any misconfigured non-positive tiers
             if pnl_pct >= threshold_pct and threshold_pct not in already_taken:
                 return sell_fraction, f"Partial TP at +{threshold_pct:.0%} (sell {sell_fraction:.0%})", threshold_pct
 

@@ -606,6 +606,9 @@ class AITrader:
                     # Add to position at current price
                     fill = self.executor._fill_price(current, "buy" if pos["side"] == "long" else "sell")
                     qty_add = self.risk_mgr.qty_from_usd(add_size, fill)
+                    if qty_add <= 0:
+                        logger.warning("Pyramid skipped %s: invalid fill price %.4f", symbol, fill)
+                        continue
                     pos["qty"] = pos.get("qty", 0) + qty_add
                     self.portfolio.cash -= add_size
                     logger.info("PYRAMID %-12s +25%% ($%.2f) @ $%.4f | pnl so far: +%.1f%%",
@@ -697,6 +700,20 @@ class AITrader:
     def _open_dex_position(self, token, size_usd: float, safety=None):
         """Open a DEX position with safety verification and MEV protection."""
         try:
+            # ── Cash gate: ensure we can actually afford this ────────────────
+            if size_usd > self.portfolio.cash * 0.99:
+                logger.warning("Insufficient cash $%.2f for DEX buy $%.2f — skipping",
+                               self.portfolio.cash, size_usd)
+                return
+
+            # ── Live wallet: verify USDC balance before attempting swap ──────
+            if token.chain_id == "solana" and self.solana.is_connected:
+                usdc_bal = self.solana.get_usdc_balance()
+                if usdc_bal < size_usd * 0.99:
+                    logger.warning("USDC balance $%.2f insufficient for $%.2f trade — skipping",
+                                   usdc_bal, size_usd)
+                    return
+
             safety_score = safety.safety_score if safety else 0.5
             # AI-computed stop and target per trade based on token's own volatility
             stop_pct   = self.risk_mgr.dynamic_dex_stop_pct(
@@ -786,15 +803,17 @@ class AITrader:
                 # 1. TIME-BASED exits
                 should_exit, time_reason = self.risk_mgr.check_time_exit(pos)
                 if should_exit:
-                    self._close_dex_position(pair_addr, pos, current, time_reason)
-                    closed.append(pair_addr)
+                    closed_ok = self._close_dex_position(pair_addr, pos, current, time_reason)
+                    if closed_ok is not False:
+                        closed.append(pair_addr)
                     continue
 
                 # 2. DUST CLEANUP — remaining fraction too small to trade meaningfully
                 remaining_now = pos.get("remaining_fraction", 1.0)
                 if remaining_now < 0.02:
-                    self._close_dex_position(pair_addr, pos, current, "Dust cleanup (<2% remaining)")
-                    closed.append(pair_addr)
+                    closed_ok = self._close_dex_position(pair_addr, pos, current, "Dust cleanup (<2% remaining)")
+                    if closed_ok is not False:
+                        closed.append(pair_addr)
                     continue
 
                 # 3. PARTIAL PROFIT-TAKING
@@ -821,8 +840,9 @@ class AITrader:
                     reason = f"Trailing stop (peak=${peak:.8f}, trail={trail_pct:.0%})"
 
                 if reason:
-                    self._close_dex_position(pair_addr, pos, current, reason)
-                    closed.append(pair_addr)
+                    closed_ok = self._close_dex_position(pair_addr, pos, current, reason)
+                    if closed_ok is not False:
+                        closed.append(pair_addr)
 
             except Exception as e:
                 logger.debug("DEX position update error: %s", e)
@@ -830,7 +850,8 @@ class AITrader:
         for addr in closed:
             self._dex_positions.pop(addr, None)
 
-    def _close_dex_position(self, pair_addr: str, pos: dict, current_price: float, reason: str):
+    def _close_dex_position(self, pair_addr: str, pos: dict, current_price: float, reason: str) -> bool:
+        """Close a DEX position. Returns False if the on-chain sell failed (position stays open)."""
         """Close a DEX position (remaining fraction only)."""
         entry     = pos["entry_price"]
         remaining = pos.get("remaining_fraction", 1.0)
@@ -839,19 +860,21 @@ class AITrader:
         pnl_usd   = size * pnl_pct
         proceeds  = size + pnl_usd
 
+        # Clamp proceeds — pnl_pct can't go below -100% (position is fully lost)
+        proceeds = max(proceeds, 0.0)
+
         liq_usd = pos.get("liquidity_usd", 0.0)
         if pos["chain"] == "solana" and self.solana.is_connected and "paper" not in pos.get("tx", ""):
             sell_tx = self.solana.sell_token(pos["address"], proceeds,
                                              liquidity_usd=liq_usd)
-            # Always credit cash — on-chain sell handles the actual transfer
             if sell_tx:
                 self.portfolio.cash += proceeds
-            # If sell fails (e.g. token already zero balance), still credit
-            # to avoid phantom cash leak — log for investigation
             else:
-                logger.warning("Sell tx failed for %s — crediting paper proceeds $%.2f",
-                               pos["symbol"], proceeds)
-                self.portfolio.cash += proceeds
+                # Sell failed — keep position open for retry next cycle
+                # DO NOT credit cash (token still in wallet) — avoids double-counting
+                logger.error("SELL FAILED %s — keeping position open for retry next cycle",
+                             pos["symbol"])
+                return   # Caller must NOT remove this position from _dex_positions
         else:
             self.portfolio.cash += proceeds
 
@@ -1125,13 +1148,29 @@ class AITrader:
             logger.warning("Failed to save DEX positions: %s", e)
 
     def _load_dex_positions(self):
-        """Reload DEX positions from disk on startup."""
+        """Reload DEX positions from disk on startup, with validation."""
         try:
             with open("dex_positions.json") as f:
-                self._dex_positions = json.load(f)
-            if self._dex_positions:
-                logger.info("DEX positions restored: %d open", len(self._dex_positions))
-                for pair, pos in self._dex_positions.items():
+                raw = json.load(f)
+            validated = {}
+            skipped = 0
+            for pair_addr, pos in raw.items():
+                if not isinstance(pos, dict):
+                    skipped += 1
+                    continue
+                entry = float(pos.get("entry_price", 0))
+                size  = float(pos.get("size_usd", 0))
+                if entry <= 0 or size <= 0:
+                    logger.warning("Skipping corrupted DEX position %s: entry=$%.8f size=$%.2f",
+                                   pair_addr[:12], entry, size)
+                    skipped += 1
+                    continue
+                validated[pair_addr] = pos
+            self._dex_positions = validated
+            if validated:
+                logger.info("DEX positions restored: %d open (%d skipped as corrupted)",
+                            len(validated), skipped)
+                for pair, pos in validated.items():
                     logger.info("  ↳ %s/%s entry=$%.8f size=$%.2f",
                                 pos.get("chain", "?").upper(),
                                 pos.get("symbol", "?"),

@@ -45,8 +45,10 @@ class Portfolio:
                 if p["side"] == "long":
                     pos_value += p["qty"] * p.get("current_price", p["entry_price"])
                 else:
-                    # Short: cash not deducted on open, so only add unrealized PnL
-                    pos_value += p.get("unrealized_pnl", 0.0)
+                    # Futures short: margin was deducted from cash as collateral.
+                    # Add it back here so equity = cash + margin + PnL (correct).
+                    # Non-futures shorts don't deduct cash, so margin_usd=0 is safe.
+                    pos_value += p.get("margin_usd", 0.0) + p.get("unrealized_pnl", 0.0)
             eq = self.cash + pos_value
             if eq > self.peak_equity:
                 self.peak_equity = eq
@@ -95,6 +97,7 @@ class Portfolio:
     def update_position_price(self, asset_id: str, current_price: float):
         """Update mark-to-market price and unrealized P&L."""
         if current_price <= 0:
+            logger.debug("Skipping price update for %s: invalid price %.8f", asset_id, current_price)
             return
         with self._lock:
             if asset_id not in self.open_positions:
@@ -203,7 +206,7 @@ class Portfolio:
         avg_loss = sum(t["pnl_pct"] for t in losing) / len(losing) if losing else 0
         gross_profit = abs(sum(t["pnl_usd"] for t in winning))
         gross_loss   = abs(sum(t["pnl_usd"] for t in losing))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+        profit_factor = gross_profit / gross_loss if gross_loss > 1e-8 else 9999.0
         total_pnl = sum(t["pnl_usd"] for t in closed)
         peak = self.peak_equity
         max_dd = (peak - eq) / peak * 100 if peak > 0 else 0
@@ -300,15 +303,25 @@ class Portfolio:
             if "cash" not in state:
                 raise ValueError("Missing 'cash' in saved state")
 
-            self.cash             = float(state["cash"])
-            self.initial_capital  = float(state.get("initial_capital", config.INITIAL_CAPITAL))
-            self.peak_equity      = float(state.get("peak_equity", self.cash))
-            self.open_positions   = state.get("open_positions", {})
-            self.closed_trades    = state.get("closed_trades", [])
+            cash = float(state["cash"])
+            if cash < 0:
+                logger.error("Corrupted state: negative cash $%.2f — resetting to INITIAL_CAPITAL", cash)
+                cash = config.INITIAL_CAPITAL
+            self.cash = cash
+
+            initial = float(state.get("initial_capital", config.INITIAL_CAPITAL))
+            self.initial_capital = max(initial, 1.0)   # Must be positive
+
+            peak = float(state.get("peak_equity", self.cash))
+            self.peak_equity = max(peak, self.cash, 1.0)  # Never below current equity
+
+            self.open_positions = state.get("open_positions", {})
+            self.closed_trades  = state.get("closed_trades", [])
 
             # Validate open positions have required fields
             bad = [k for k, v in self.open_positions.items()
-                   if not isinstance(v, dict) or "entry_price" not in v or "side" not in v]
+                   if not isinstance(v, dict) or "entry_price" not in v or "side" not in v
+                   or float(v.get("entry_price", 0)) <= 0 or float(v.get("qty", 0)) <= 0]
             if bad:
                 logger.warning("Removing %d malformed open positions: %s", len(bad), bad)
                 for k in bad:
