@@ -137,6 +137,7 @@ class AITrader:
         self._last_futures   = 0.0     # Futures runs on cycle 1 (uses CEX cache)
         self._last_arb       = now      # Stagger: arb runs after first interval
         self._last_grid      = 0.0     # Grid runs on cycle 1 (no API calls)
+        self._last_wallet_sync = 0.0   # Wallet drift check every 5 minutes
         self._day_start_eq   = self.portfolio.equity()
         self._last_day       = datetime.now(timezone.utc).date()
         self._equity_curve   = self._load_equity_curve()  # Persist chart history across restarts
@@ -355,6 +356,13 @@ class AITrader:
             self._save_equity_curve()
             self._save_strategy_states()
             self._last_save = time.time()
+
+        # ── 17. Wallet drift sync (every 5 min) ───────────────────────────
+        # Detect if user deposited more SOL externally and credit it as cash.
+        if (self.live and self.solana.is_connected
+                and time.time() - self._last_wallet_sync > 300):
+            self._sync_wallet_drift()
+            self._last_wallet_sync = time.time()
 
         logger.info("Cycle #%d done in %.0fms", self._cycle, elapsed_ms)
 
@@ -833,6 +841,24 @@ class AITrader:
                 peak = pos["peak_price"]
                 trail_pct = (peak - current) / peak if peak > 0 else 0
 
+                # 0. VOLATILITY SPIKE EXIT — sell at the top of a sudden pump
+                # If price surged ≥15% since the last cycle, we're likely at or near
+                # the peak; sell immediately before the dump reversal.
+                prev_price = pos.get("prev_price", entry)
+                if prev_price > 0 and pnl_pct > 0:
+                    cycle_surge = (current - prev_price) / prev_price
+                    if cycle_surge >= 0.15:
+                        spike_reason = (
+                            f"Spike exit: +{cycle_surge:.0%} single-cycle surge "
+                            f"(total PnL +{pnl_pct:.0%})"
+                        )
+                        closed_ok = self._close_dex_position(
+                            pair_addr, pos, current, spike_reason)
+                        if closed_ok is not False:
+                            closed.append(pair_addr)
+                        continue
+                pos["prev_price"] = current
+
                 # 1. TIME-BASED exits
                 should_exit, time_reason = self.risk_mgr.check_time_exit(pos)
                 if should_exit:
@@ -1168,6 +1194,45 @@ class AITrader:
         logger.info(
             "Paper account reset complete — starting fresh with $%.0f",
             config.INITIAL_CAPITAL)
+
+    def _sync_wallet_drift(self):
+        """
+        Compare real Phantom wallet SOL balance with portfolio.cash.
+        If the wallet holds MORE than expected (user deposited externally),
+        credit the difference so the bot can deploy it.
+        Never reduces cash — position accounting handles that.
+        """
+        try:
+            sol_usd = self.solana.get_portfolio_value_usd()
+            if sol_usd <= 0:
+                return
+            # Estimate SOL in wallet = cash + open DEX position values
+            # (CEX positions are off-chain, not in SOL wallet)
+            dex_deployed = sum(
+                pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
+                for pos in self._dex_positions.values()
+                if pos.get("chain") == "solana"
+            )
+            expected_sol_usd = self.portfolio.cash + dex_deployed
+            drift = sol_usd - expected_sol_usd
+
+            if drift > 5.0:   # >$5 more than expected = external deposit
+                logger.info(
+                    "Wallet drift +$%.2f detected — crediting to cash "
+                    "(wallet=$%.2f expected=$%.2f)",
+                    drift, sol_usd, expected_sol_usd)
+                self.portfolio.cash += drift
+                self.portfolio.initial_capital = max(
+                    self.portfolio.initial_capital,
+                    self.portfolio.cash)
+            elif drift < -10.0:
+                # Wallet has significantly less than expected — log warning only
+                logger.warning(
+                    "Wallet balance $%.2f is $%.2f below expected $%.2f "
+                    "(check for failed txs or external withdrawals)",
+                    sol_usd, abs(drift), expected_sol_usd)
+        except Exception as e:
+            logger.debug("Wallet drift check failed: %s", e)
 
     def _save_dex_positions(self):
         """Persist open DEX positions so they survive restarts."""
