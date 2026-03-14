@@ -803,6 +803,67 @@ def render():
         st.markdown(scanner_html, unsafe_allow_html=True)
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
+    # ── Market Sentiment ──────────────────────────────────────────────────────
+    mkt_sentiment  = state.get("market_sentiment", "")
+    btc_dom        = state.get("btc_dominance", 0)
+    avg_24h        = state.get("avg_24h_change", 0)
+    top_gainers    = state.get("top_gainers", [])
+    top_losers     = state.get("top_losers", [])
+
+    if mkt_sentiment or btc_dom or top_gainers:
+        st.markdown(f'<div class="tv-section">Market Sentiment</div>', unsafe_allow_html=True)
+
+        sent_color = TV["green"] if mkt_sentiment == "bullish" else TV["red"] if mkt_sentiment == "bearish" else TV["yellow"]
+        sent_icon  = "▲ Bullish" if mkt_sentiment == "bullish" else "▼ Bearish" if mkt_sentiment == "bearish" else "→ Neutral"
+        avg_color  = TV["green"] if avg_24h >= 0 else TV["red"]
+
+        def _ticker_chips(items: list, positive: bool) -> str:
+            chips = ""
+            for item in items[:5]:
+                sym = item.get("symbol", "?")
+                chg = item.get("change_pct", item.get("pct_change", 0))
+                fg = TV["green"] if positive else TV["red"]
+                sign = "+" if chg >= 0 else ""
+                chips += (
+                    f'<span style="background:{fg}22;color:{fg};padding:2px 8px;'
+                    f'border-radius:3px;font-size:11px;font-weight:600;margin-right:4px;">'
+                    f'{sym} {sign}{chg:.1f}%</span>'
+                )
+            return chips or f'<span style="color:{TV["text2"]};font-size:11px;">—</span>'
+
+        sentiment_html = (
+            f'<div style="background:{TV["bg2"]};border:1px solid {TV["border"]};'
+            f'border-radius:6px;padding:12px 16px;display:flex;gap:32px;align-items:center;flex-wrap:wrap;">'
+            # Sentiment pill
+            f'<div style="display:flex;flex-direction:column;gap:2px;min-width:100px;">'
+            f'<span style="color:{TV["text2"]};font-size:10px;text-transform:uppercase;letter-spacing:1px;font-weight:600;">Sentiment</span>'
+            f'<span style="color:{sent_color};font-size:18px;font-weight:800;">{sent_icon}</span>'
+            f'</div>'
+            # BTC dominance
+            f'<div style="display:flex;flex-direction:column;gap:2px;min-width:90px;">'
+            f'<span style="color:{TV["text2"]};font-size:10px;text-transform:uppercase;letter-spacing:1px;font-weight:600;">BTC Dom</span>'
+            f'<span style="color:{TV["text"]};font-size:18px;font-weight:800;">{btc_dom:.1f}%</span>'
+            f'</div>'
+            # Avg 24h
+            f'<div style="display:flex;flex-direction:column;gap:2px;min-width:90px;">'
+            f'<span style="color:{TV["text2"]};font-size:10px;text-transform:uppercase;letter-spacing:1px;font-weight:600;">Avg 24h</span>'
+            f'<span style="color:{avg_color};font-size:18px;font-weight:800;">{"+" if avg_24h>=0 else ""}{avg_24h:.2f}%</span>'
+            f'</div>'
+            # Gainers
+            f'<div style="display:flex;flex-direction:column;gap:4px;flex:1;min-width:180px;">'
+            f'<span style="color:{TV["text2"]};font-size:10px;text-transform:uppercase;letter-spacing:1px;font-weight:600;">Top Gainers</span>'
+            f'<div style="display:flex;flex-wrap:wrap;gap:4px;">{_ticker_chips(top_gainers, True)}</div>'
+            f'</div>'
+            # Losers
+            f'<div style="display:flex;flex-direction:column;gap:4px;flex:1;min-width:180px;">'
+            f'<span style="color:{TV["text2"]};font-size:10px;text-transform:uppercase;letter-spacing:1px;font-weight:600;">Top Losers</span>'
+            f'<div style="display:flex;flex-wrap:wrap;gap:4px;">{_ticker_chips(top_losers, False)}</div>'
+            f'</div>'
+            f'</div>'
+        )
+        st.markdown(sentiment_html, unsafe_allow_html=True)
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
     # ── Bottom section: trades + status + feed ────────────────────────────────
     left, mid, right = st.columns([5, 4, 3])
 
