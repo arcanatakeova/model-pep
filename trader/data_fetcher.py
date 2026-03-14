@@ -138,6 +138,7 @@ class BinanceWebSocketFeed:
         self._running    = False
         self._connected  = False
         self._ws: Optional[websocket.WebSocketApp] = None
+        self._geo_blocked = False  # True after a 451 → switch to binance.us
 
     def start(self):
         """Launch WebSocket listener in a daemon thread."""
@@ -188,8 +189,9 @@ class BinanceWebSocketFeed:
         """Reconnecting loop — websocket-client handles frame parsing & ping/pong."""
         backoff = 1
         while self._running:
+            host = "stream.binance.us" if self._geo_blocked else "stream.binance.com"
+            url  = f"wss://{host}:9443/stream?streams={self._stream_names()}"
             try:
-                url = f"wss://stream.binance.com:9443/stream?streams={self._stream_names()}"
                 self._ws = websocket.WebSocketApp(
                     url,
                     on_open=self._on_open,
@@ -214,7 +216,11 @@ class BinanceWebSocketFeed:
 
     def _on_error(self, ws, error):
         self._connected = False
-        logger.warning("BinanceWS disconnected: %s", error)
+        if "451" in str(error):
+            self._geo_blocked = True
+            logger.warning("BinanceWS geo-blocked (451) — switching to stream.binance.us")
+        else:
+            logger.warning("BinanceWS disconnected: %s", error)
 
     def _on_close(self, ws, close_status_code, close_msg):
         self._connected = False
