@@ -168,7 +168,7 @@ class PolymarketTrader:
         3. Volume-weighted momentum (market moving one way = follow)
         4. Near-resolution high-confidence plays
         """
-        markets = self.get_active_markets(limit=200, min_volume=min_volume)
+        markets = self.get_active_markets(limit=50, min_volume=min_volume)
         signals = []
 
         for mkt in markets:
@@ -218,8 +218,11 @@ class PolymarketTrader:
 
         # ── Strategy 2: 50/50 markets with momentum ───────────────────────
         elif 0.40 <= yes_p <= 0.60:
-            # Efficient zone — look for order book imbalance
-            book = self.get_orderbook(mkt.yes_token_id)
+            # Orderbook calls were removed here — fetching a per-market orderbook
+            # for every market in the 40-60% range caused dozens of blocking HTTP
+            # requests per scan cycle, freezing the bot for minutes.
+            # The other three strategies already cover this zone sufficiently.
+            book = None
             if book:
                 bids = book.get("bids", [])
                 asks = book.get("asks", [])
@@ -371,7 +374,7 @@ class PolymarketTrader:
                 resp = requests.get(url, params=params, timeout=10,
                                     headers={"Accept": "application/json"})
                 if resp.status_code == 429:
-                    time.sleep(5 * (attempt + 1))
+                    time.sleep(2 + attempt * 2)   # 2s, 4s, 6s — was 5/10/15s
                     continue
                 if resp.ok:
                     data = resp.json()
