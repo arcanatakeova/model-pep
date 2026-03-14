@@ -117,15 +117,16 @@ class AITrader:
         self._ws_feed = df_mod.get_ws_feed()   # Start WebSocket in background
 
         # ── State ─────────────────────────────────────────────────────────
+        now = time.time()
         self._cycle          = 0
-        self._last_save      = 0   # 0 = save immediately on first cycle
-        self._last_state     = time.time()
-        self._last_poly      = 0.0
-        self._last_dex       = 0.0
-        self._last_scalp     = 0.0
-        self._last_futures   = 0.0
-        self._last_arb       = 0.0
-        self._last_grid      = 0.0
+        self._last_save      = 0        # 0 = save immediately on first cycle
+        self._last_state     = now
+        self._last_poly      = now      # Stagger: run after first full interval
+        self._last_dex       = 0.0     # DEX runs on cycle 1 (fast API)
+        self._last_scalp     = 0.0     # Scalp runs on cycle 1 (fast API)
+        self._last_futures   = 0.0     # Futures runs on cycle 1 (uses CEX cache)
+        self._last_arb       = now      # Stagger: arb runs after first interval
+        self._last_grid      = 0.0     # Grid runs on cycle 1 (no API calls)
         self._day_start_eq   = self.portfolio.equity()
         self._last_day       = datetime.now(timezone.utc).date()
         self._equity_curve   = []
@@ -136,6 +137,8 @@ class AITrader:
         self.portfolio.load()
         self._load_dex_positions()
         self.risk_mgr.reset_daily_loss_tracker()
+        # Write portfolio immediately so dashboard has data before cycle 1 finishes
+        self.portfolio.save()
 
         # Sync initial capital with Phantom wallet if connected
         if self.solana.is_connected and live:
