@@ -97,6 +97,47 @@ DEX_SCAN_INTERVAL_SEC = 45         # Scan DEX every 45s for faster memecoin catc
 NEW_PAIR_MAX_AGE_HOURS = 48        # Consider pairs up to 48h old
 NEW_PAIR_MIN_LIQUIDITY = 15_000    # $15k minimum liquidity (lower for memecoins)
 
+# ─── Token Safety / Rug Protection (Balanced Mode) ──────────────────────────
+MIN_SAFETY_SCORE = 0.35            # Minimum safety score to trade (balanced: penalize, don't block)
+SAFETY_SCORE_WEIGHT = 0.20         # Weight of safety in overall token score
+ENABLE_SELL_SIMULATION = True      # Honeypot check via Jupiter round-trip quote
+SELL_SIM_AMOUNT_USD = 1.0          # Dollar amount for sell simulation
+MAX_ROUND_TRIP_TAX_PCT = 0.30      # Max acceptable round-trip tax (30% = balanced)
+RUGCHECK_CACHE_TTL = 300           # Cache safety results for 5 minutes
+SAFETY_CHECK_TIMEOUT = 8           # Seconds before safety check times out
+BLOCK_HONEYPOTS = True             # Hard block if sell simulation fails completely
+MAX_TOP10_HOLDER_PCT = 0.85        # Penalize heavily if top 10 holders own > 85%
+
+# ─── Volatility-Adjusted Position Sizing ────────────────────────────────────
+DEX_BASE_POSITION_USD = 50.0       # Base position for memecoin trades
+DEX_MIN_POSITION_USD = 10.0        # Minimum position size
+POSITION_VOL_SCALAR = 1.0          # Multiplier: size = base / (vol * scalar)
+MAX_MEMECOIN_ALLOCATION_PCT = 0.40 # Max 40% of equity in memecoins total
+
+# ─── Time-Based Exit Rules ──────────────────────────────────────────────────
+DEX_MAX_HOLD_HOURS = 24            # Force exit after 24 hours
+DEX_STALE_EXIT_HOURS = 6           # Exit if no momentum after 6 hours
+DEX_STALE_MIN_GAIN_PCT = 0.02     # Minimum 2% gain to avoid stale exit
+
+# ─── Partial Profit Taking ──────────────────────────────────────────────────
+PARTIAL_PROFIT_ENABLED = True
+PARTIAL_PROFIT_TIERS = [
+    (0.25, 0.25),   # At +25% gain, sell 25% of position
+    (0.50, 0.25),   # At +50% gain, sell another 25%
+    (1.00, 0.25),   # At +100% gain, sell another 25%
+    # Remaining 25% rides with trailing stop
+]
+
+# ─── MEV / Sandwich Protection ──────────────────────────────────────────────
+MEV_PROTECTION_ENABLED = True
+MEV_MAX_SLIPPAGE_BPS = 100         # Tighter slippage (1%) for MEV protection
+MEV_PRIORITY_FEE_LAMPORTS = 50000  # Higher priority fee to front-run sandwich
+
+# ─── Concentration Limits ───────────────────────────────────────────────────
+MAX_DEX_POSITIONS = 5              # Max concurrent DEX/memecoin positions
+MAX_SAME_DEX_POSITIONS = 3         # Max positions on same DEX (e.g., Raydium)
+MIN_LIQUIDITY_RATIO = 0.10         # Position must be < 10% of pool liquidity
+
 # ─── Solana / Phantom Wallet ──────────────────────────────────────────────────
 PHANTOM_PRIVATE_KEY = os.getenv("PHANTOM_PRIVATE_KEY", "")
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")

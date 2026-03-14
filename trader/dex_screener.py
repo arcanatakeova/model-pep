@@ -18,6 +18,9 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional
 
+import config
+from token_safety import TokenSafetyChecker
+
 logger = logging.getLogger(__name__)
 
 DEXSCREENER_BASE = "https://api.dexscreener.com"
@@ -60,6 +63,7 @@ class DexToken:
     url: str
     score: float = 0.0
     signals: list[str] = field(default_factory=list)
+    safety_report: Optional[object] = None  # TokenSafetyReport when available
 
     @property
     def buy_sell_ratio_h1(self) -> float:
@@ -91,6 +95,9 @@ class DexToken:
             "score": round(self.score, 3),
             "signals": self.signals,
             "url": self.url,
+            "safety_score": self.safety_report.safety_score if self.safety_report else None,
+            "risk_level": self.safety_report.risk_level if self.safety_report else None,
+            "risk_flags": self.safety_report.risk_flags if self.safety_report else [],
         }
 
 
@@ -102,6 +109,7 @@ class DexScreener:
     def __init__(self):
         self._cache: dict = {}
         self._cache_ttl = 60  # seconds
+        self._safety_checker = TokenSafetyChecker()
 
     # ─── Public API ───────────────────────────────────────────────────────────
 
@@ -307,6 +315,34 @@ class DexScreener:
         # ── Chain preference ─────────────────────────────────────────────
         if token.chain_id == "solana":
             score += 0.03   # Solana: high velocity, Phantom-tradeable
+
+        # ── Token safety check (SAFETY_SCORE_WEIGHT weight) ────────────
+        if token.chain_id == "solana" and score > 0.20:
+            try:
+                safety = self._safety_checker.check_token_safety(token.base_address)
+                token.safety_report = safety
+
+                if not safety.is_safe_to_trade:
+                    token.score = 0.0
+                    token.signals = [f"BLOCKED: {safety.risk_level} risk"
+                                     ] + safety.risk_flags[:2]
+                    return 0.0
+
+                # Blend safety into composite score
+                w = config.SAFETY_SCORE_WEIGHT
+                score = score * (1 - w) + safety.safety_score * w
+
+                if safety.risk_level in ("SAFE", "LOW"):
+                    signals.append(f"Safety: {safety.risk_level} ({safety.safety_score:.2f})")
+                elif safety.risk_level == "MEDIUM":
+                    flag = safety.risk_flags[0] if safety.risk_flags else "caution"
+                    signals.append(f"Safety: MEDIUM ({safety.safety_score:.2f}) - {flag}")
+                elif safety.risk_level == "HIGH":
+                    flag = safety.risk_flags[0] if safety.risk_flags else "risky"
+                    signals.append(f"Safety: HIGH ({safety.safety_score:.2f}) - {flag}")
+            except Exception as e:
+                logger.warning("Safety check failed for %s: %s", token.base_symbol, e)
+                score *= 0.85  # Penalize if safety check fails
 
         token.score = float(np.clip(score, 0, 1))
         token.signals = signals

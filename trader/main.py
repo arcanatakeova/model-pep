@@ -44,6 +44,7 @@ from strategies import MarketScanner
 from dex_screener import DexScreener
 from polymarket import PolymarketTrader
 from solana_wallet import SolanaWallet
+from token_safety import TokenSafetyChecker
 import data_fetcher as df_mod
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -257,7 +258,7 @@ class AITrader:
             config.RISK_PER_TRADE_PCT = original_risk
 
     def _run_dex_scan(self):
-        """DEX Screener scan for on-chain momentum tokens."""
+        """DEX Screener scan with safety checks, vol-adjusted sizing, concentration limits."""
         try:
             tokens = self.dex_screener.get_multi_chain_opportunities()
             logger.info("DEX scan: %d opportunities found", len(tokens))
@@ -265,81 +266,99 @@ class AITrader:
             budget = self.compounder.max_position_for_market("crypto_dex")
             traded = 0
 
-            for token in tokens[:5]:   # Top 5 DEX opportunities
+            for token in tokens[:8]:   # Check top 8 (some filtered by safety)
                 if token.score < config.DEX_MIN_SCORE:
                     continue
                 if token.pair_address in self._dex_positions:
                     continue
-                if traded >= 2:        # Max 2 new DEX positions per cycle
+                if traded >= 2:
                     break
 
-                size_usd = min(
-                    budget * 0.20,                 # 20% of DEX budget per token
-                    config.DEX_MAX_POSITION_USD,   # Absolute cap
-                    self.portfolio.cash * 0.05,    # Max 5% of cash
-                )
-                if size_usd < 10:
+                # Concentration check
+                allowed, reason = self.risk_mgr.check_dex_concentration(
+                    self._dex_positions, token.dex_id)
+                if not allowed:
+                    logger.info("DEX concentration: %s", reason)
+                    break
+
+                # Safety report (already computed during scoring, use cached)
+                safety = getattr(token, 'safety_report', None)
+                if safety and not safety.is_safe_to_trade:
+                    logger.warning("SKIP %s: %s - %s", token.base_symbol,
+                                   safety.risk_level, ", ".join(safety.risk_flags[:2]))
                     continue
 
-                self._open_dex_position(token, size_usd)
+                # Volatility-adjusted sizing
+                safety_score = safety.safety_score if safety else 0.5
+                size_usd = self.risk_mgr.dex_position_size_usd(
+                    token_score=token.score,
+                    safety_score=safety_score,
+                    liquidity_usd=token.liquidity_usd,
+                    price_change_h1=token.price_change_h1,
+                    price_change_h6=token.price_change_h6,
+                )
+                size_usd = min(size_usd, budget * 0.20, config.DEX_MAX_POSITION_USD)
+                if size_usd < config.DEX_MIN_POSITION_USD:
+                    continue
+
+                self._open_dex_position(token, size_usd, safety)
                 traded += 1
 
         except Exception as e:
             logger.warning("DEX scan error: %s", e)
 
-    def _open_dex_position(self, token, size_usd: float):
-        """Open a position on a DEX token via Phantom/Jupiter or paper."""
+    def _open_dex_position(self, token, size_usd: float, safety=None):
+        """Open a DEX position with safety verification and MEV protection."""
         try:
+            pos_data = {
+                "symbol": token.base_symbol,
+                "address": token.base_address,
+                "chain": token.chain_id,
+                "dex_id": token.dex_id,
+                "entry_price": token.price_usd,
+                "current_price": token.price_usd,
+                "size_usd": size_usd,
+                "remaining_fraction": 1.0,
+                "opened_at": datetime.now(timezone.utc).isoformat(),
+                "stop_pct": 0.15,
+                "target_pct": 0.40,
+                "score": token.score,
+                "safety_score": safety.safety_score if safety else None,
+                "risk_level": safety.risk_level if safety else None,
+                "signals": token.signals,
+                "partial_profits_taken": [],
+                "peak_price": token.price_usd,
+                "current_pnl_pct": 0.0,
+            }
+
             if token.chain_id == "solana" and self.solana.is_connected:
-                # Real swap via Phantom → Jupiter
-                tx = self.solana.buy_token(token.base_address, size_usd,
-                                           slippage_bps=config.SOL_MAX_SLIPPAGE_BPS)
+                tx = self.solana.safe_buy_token(
+                    token.base_address, size_usd,
+                    safety_report=safety,
+                    slippage_bps=config.SOL_MAX_SLIPPAGE_BPS)
                 if tx:
-                    self._dex_positions[token.pair_address] = {
-                        "symbol": token.base_symbol,
-                        "address": token.base_address,
-                        "chain": token.chain_id,
-                        "entry_price": token.price_usd,
-                        "size_usd": size_usd,
-                        "tx": tx,
-                        "opened_at": datetime.now(timezone.utc).isoformat(),
-                        "stop_pct": 0.15,    # 15% stop on volatile DEX tokens
-                        "target_pct": 0.40,  # 40% take-profit target
-                        "score": token.score,
-                        "signals": token.signals,
-                    }
+                    pos_data["tx"] = tx
+                    self._dex_positions[token.pair_address] = pos_data
                     self.portfolio.cash -= size_usd
-                    logger.info("DEX BUY %s/%s $%.2f @ $%.8f score=%.2f | %s",
-                                token.chain_id.upper(), token.base_symbol,
-                                size_usd, token.price_usd, token.score,
-                                ", ".join(token.signals[:2]))
+                    risk_str = safety.risk_level if safety else "?"
+                    logger.info("DEX BUY %s $%.2f @ $%.8f score=%.2f safety=%s",
+                                token.base_symbol, size_usd, token.price_usd,
+                                token.score, risk_str)
             else:
-                # Paper mode or non-Solana chain
-                self._dex_positions[token.pair_address] = {
-                    "symbol": token.base_symbol,
-                    "address": token.base_address,
-                    "chain": token.chain_id,
-                    "entry_price": token.price_usd,
-                    "size_usd": size_usd,
-                    "tx": f"paper_{int(time.time())}",
-                    "opened_at": datetime.now(timezone.utc).isoformat(),
-                    "stop_pct": 0.15,
-                    "target_pct": 0.40,
-                    "score": token.score,
-                    "signals": token.signals,
-                }
+                pos_data["tx"] = f"paper_{int(time.time())}"
+                self._dex_positions[token.pair_address] = pos_data
                 self.portfolio.cash -= size_usd
-                logger.info("PAPER DEX BUY %s/%s $%.2f @ $%.8f | %s",
-                            token.chain_id.upper(), token.base_symbol,
-                            size_usd, token.price_usd, ", ".join(token.signals[:2]))
+                logger.info("PAPER DEX BUY %s $%.2f @ $%.8f score=%.2f | %s",
+                            token.base_symbol, size_usd, token.price_usd,
+                            token.score, ", ".join(token.signals[:2]))
 
         except Exception as e:
             logger.warning("DEX position open failed (%s): %s", token.base_symbol, e)
 
     def _update_dex_positions(self):
-        """Check open DEX positions for exit conditions."""
+        """Check open DEX positions for time exits, partial profits, and stop/TP."""
         closed = []
-        for pair_addr, pos in self._dex_positions.items():
+        for pair_addr, pos in list(self._dex_positions.items()):
             try:
                 token = self.dex_screener.get_token_info(pos["address"], pos["chain"])
                 if not token or token.price_usd <= 0:
@@ -348,18 +367,38 @@ class AITrader:
                 entry   = pos["entry_price"]
                 current = token.price_usd
                 pnl_pct = (current - entry) / entry if entry > 0 else 0
+                pos["current_price"] = current
+                pos["current_pnl_pct"] = pnl_pct
 
                 # Update trailing high
                 pos["peak_price"] = max(pos.get("peak_price", entry), current)
-                trail_pct = (pos["peak_price"] - current) / pos["peak_price"] if pos["peak_price"] > 0 else 0
+                peak = pos["peak_price"]
+                trail_pct = (peak - current) / peak if peak > 0 else 0
+
+                # 1. TIME-BASED exits
+                should_exit, time_reason = self.risk_mgr.check_time_exit(pos)
+                if should_exit:
+                    self._close_dex_position(pair_addr, pos, current, time_reason)
+                    closed.append(pair_addr)
+                    continue
+
+                # 2. PARTIAL PROFIT-TAKING
+                sell_frac, partial_reason = self.risk_mgr.get_partial_profit_action(pos)
+                if sell_frac is not None:
+                    self._execute_partial_profit(pair_addr, pos, sell_frac, partial_reason)
+
+                # 3. FULL EXIT conditions
+                remaining = pos.get("remaining_fraction", 1.0)
+                # Raise target as partials are taken
+                adj_target = pos["target_pct"] * (1 + (1 - remaining) * 0.5)
 
                 reason = None
-                if pnl_pct >= pos["target_pct"]:
+                if pnl_pct >= adj_target:
                     reason = f"Take profit +{pnl_pct:.0%}"
                 elif pnl_pct <= -pos["stop_pct"]:
                     reason = f"Stop loss {pnl_pct:.0%}"
                 elif trail_pct > 0.12 and pnl_pct > 0.05:
-                    reason = f"Trailing stop (peak={pos['peak_price']:.8f})"
+                    reason = f"Trailing stop (peak=${peak:.8f})"
 
                 if reason:
                     self._close_dex_position(pair_addr, pos, current, reason)
@@ -372,12 +411,13 @@ class AITrader:
             self._dex_positions.pop(addr, None)
 
     def _close_dex_position(self, pair_addr: str, pos: dict, current_price: float, reason: str):
-        """Close a DEX position."""
-        entry   = pos["entry_price"]
-        size    = pos["size_usd"]
-        pnl_pct = (current_price - entry) / entry if entry > 0 else 0
-        pnl_usd = size * pnl_pct
-        proceeds = size + pnl_usd
+        """Close a DEX position (remaining fraction only)."""
+        entry     = pos["entry_price"]
+        remaining = pos.get("remaining_fraction", 1.0)
+        size      = pos["size_usd"] * remaining
+        pnl_pct   = (current_price - entry) / entry if entry > 0 else 0
+        pnl_usd   = size * pnl_pct
+        proceeds  = size + pnl_usd
 
         if pos["chain"] == "solana" and self.solana.is_connected and "paper" not in pos.get("tx", ""):
             self.solana.sell_token(pos["address"], proceeds)
@@ -385,11 +425,10 @@ class AITrader:
             self.portfolio.cash += proceeds
 
         sign = "+" if pnl_usd >= 0 else ""
-        logger.info("DEX CLOSE %s/%s %s%.2f%% ($%s%.2f) | %s",
-                    pos["chain"].upper(), pos["symbol"],
-                    sign, pnl_pct * 100, sign, pnl_usd, reason)
+        logger.info("DEX CLOSE %s %s%.2f%% ($%s%.2f) remaining=%.0f%% | %s",
+                    pos["symbol"], sign, pnl_pct * 100, sign, pnl_usd,
+                    remaining * 100, reason)
 
-        # Record in portfolio for stats
         self.portfolio.closed_trades.append({
             "asset_id": pair_addr,
             "symbol": pos["symbol"],
@@ -400,9 +439,37 @@ class AITrader:
             "pnl_usd": round(pnl_usd, 4),
             "pnl_pct": round(pnl_pct * 100, 2),
             "close_reason": reason,
+            "safety_score": pos.get("safety_score"),
             "opened_at": pos["opened_at"],
             "closed_at": datetime.now(timezone.utc).isoformat(),
         })
+
+    def _execute_partial_profit(self, pair_addr: str, pos: dict,
+                                 fraction: float, reason: str):
+        """Execute a partial profit-take on a DEX position."""
+        try:
+            remaining = pos.get("remaining_fraction", 1.0)
+            actual_frac = fraction * remaining
+
+            pnl_pct = pos.get("current_pnl_pct", 0)
+            proceeds = pos["size_usd"] * actual_frac * (1 + pnl_pct)
+
+            if (pos["chain"] == "solana" and self.solana.is_connected
+                    and "paper" not in pos.get("tx", "")):
+                tx = self.solana.sell_token_partial(pos["address"], fraction)
+                if not tx:
+                    return
+                self.portfolio.cash += proceeds
+            else:
+                self.portfolio.cash += proceeds
+
+            pos["remaining_fraction"] = remaining - actual_frac
+            pos["partial_profits_taken"].append(pnl_pct)
+
+            logger.info("PARTIAL TP %s: sold %.0f%% ($%.2f) | %s",
+                         pos["symbol"], fraction * 100, proceeds, reason)
+        except Exception as e:
+            logger.warning("Partial profit failed for %s: %s", pos.get("symbol", "?"), e)
 
     def _run_polymarket_scan(self):
         """Scan Polymarket for prediction market edge plays."""

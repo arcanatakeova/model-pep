@@ -208,6 +208,119 @@ class RiskManager:
             return True
         return False
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # DEX / Memecoin-Specific Risk Controls
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def dex_position_size_usd(self, token_score: float, safety_score: float,
+                               liquidity_usd: float, price_change_h1: float,
+                               price_change_h6: float) -> float:
+        """
+        Volatility-adjusted position sizing for DEX/memecoin trades.
+        Higher volatility = smaller size. Lower safety = smaller size.
+        """
+        equity = self.portfolio.equity()
+        if equity <= 0:
+            return 0.0
+
+        base_size = config.DEX_BASE_POSITION_USD
+
+        # 1. Volatility adjustment (use h1/h6 changes as vol proxy)
+        vol_proxy = (abs(price_change_h1) + abs(price_change_h6) / 6) / 2
+        vol_proxy = max(vol_proxy, 1.0)
+        vol_adjusted = base_size / (vol_proxy * config.POSITION_VOL_SCALAR / 10)
+        if vol_proxy > 30:
+            vol_adjusted *= 0.5  # Extra cut for extreme volatility
+
+        # 2. Safety scaling: riskier tokens get smaller positions
+        safety_multiplier = max(0.3, safety_score)
+
+        # 3. Score scaling: higher score = closer to full size
+        score_multiplier = 0.5 + (token_score * 0.5)
+
+        size = vol_adjusted * safety_multiplier * score_multiplier
+
+        # 4. Caps
+        size = min(size, config.DEX_MAX_POSITION_USD)
+        size = min(size, equity * config.MAX_POSITION_PCT)
+        size = min(size, liquidity_usd * config.MIN_LIQUIDITY_RATIO)
+        size = min(size, self.portfolio.cash * 0.10)
+
+        if size < config.DEX_MIN_POSITION_USD:
+            return 0.0
+        return round(size, 2)
+
+    def check_dex_concentration(self, dex_positions: dict,
+                                 token_dex_id: str = "") -> tuple[bool, str]:
+        """Check memecoin concentration limits before opening new position."""
+        if len(dex_positions) >= config.MAX_DEX_POSITIONS:
+            return False, f"Max DEX positions reached ({config.MAX_DEX_POSITIONS})"
+
+        total_dex_usd = sum(p.get("size_usd", 0) for p in dex_positions.values())
+        max_dex_total = self.portfolio.equity() * config.MAX_MEMECOIN_ALLOCATION_PCT
+        if total_dex_usd >= max_dex_total:
+            return False, f"Memecoin allocation cap (${total_dex_usd:.0f} >= ${max_dex_total:.0f})"
+
+        if token_dex_id:
+            same_dex = sum(1 for p in dex_positions.values()
+                          if p.get("dex_id", "") == token_dex_id)
+            if same_dex >= config.MAX_SAME_DEX_POSITIONS:
+                return False, f"Max positions on {token_dex_id} reached"
+
+        return True, "OK"
+
+    def check_time_exit(self, position: dict) -> tuple[bool, str]:
+        """Check if a DEX position should be closed due to time rules."""
+        from datetime import datetime, timezone
+
+        opened_str = position.get("opened_at", "")
+        if not opened_str:
+            return False, "Hold"
+
+        try:
+            opened_at = datetime.fromisoformat(opened_str.replace("Z", "+00:00"))
+            age_hours = (datetime.now(timezone.utc) - opened_at).total_seconds() / 3600
+        except (ValueError, TypeError):
+            return False, "Hold"
+
+        # Hard time limit
+        if age_hours >= config.DEX_MAX_HOLD_HOURS:
+            return True, f"Max hold time ({age_hours:.1f}h >= {config.DEX_MAX_HOLD_HOURS}h)"
+
+        # Stale position: no meaningful gain after N hours
+        if age_hours >= config.DEX_STALE_EXIT_HOURS:
+            pnl_pct = position.get("current_pnl_pct", 0)
+            if pnl_pct < config.DEX_STALE_MIN_GAIN_PCT:
+                return True, f"Stale ({age_hours:.1f}h, only {pnl_pct:.1%} gain)"
+
+        return False, "Hold"
+
+    def get_partial_profit_action(self, position: dict) -> tuple[Optional[float], str]:
+        """
+        Check if a partial profit-take is due.
+        Returns (fraction_to_sell, reason) or (None, "Hold").
+        """
+        if not config.PARTIAL_PROFIT_ENABLED:
+            return None, "Hold"
+
+        entry = position.get("entry_price", 0)
+        current = position.get("current_price", entry)
+        if entry <= 0:
+            return None, "Hold"
+
+        pnl_pct = (current - entry) / entry
+        already_taken = position.get("partial_profits_taken", [])
+
+        for threshold_pct, sell_fraction in config.PARTIAL_PROFIT_TIERS:
+            if pnl_pct >= threshold_pct and threshold_pct not in already_taken:
+                return sell_fraction, f"Partial TP at +{threshold_pct:.0%} (sell {sell_fraction:.0%})"
+
+        return None, "Hold"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Risk Reporting
+    # ─────────────────────────────────────────────────────────────────────────
+
     def risk_report(self) -> dict:
         """Return current risk metrics summary."""
         equity = self.portfolio.equity()

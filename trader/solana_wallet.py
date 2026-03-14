@@ -24,6 +24,8 @@ from typing import Optional
 
 import requests
 
+import config
+
 logger = logging.getLogger(__name__)
 
 JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
@@ -197,12 +199,15 @@ class SolanaWallet:
             logger.info("Jupiter quote: in=%d → out=%d (impact=%.2f%%)",
                         amount_lamports, out_amount, price_impact)
 
-            # 2. Build swap transaction
+            # 2. Build swap transaction (MEV-protective priority fee)
+            priority_fee = (config.MEV_PRIORITY_FEE_LAMPORTS
+                            if config.MEV_PROTECTION_ENABLED
+                            else config.SOL_PRIORITY_FEE_LAMPORTS)
             swap_payload = {
                 "quoteResponse": quote,
                 "userPublicKey": self._pubkey,
                 "wrapAndUnwrapSol": True,
-                "prioritizationFeeLamports": 10000,  # ~$0.001 priority fee
+                "prioritizationFeeLamports": priority_fee,
                 "dynamicComputeUnitLimit": True,
             }
             resp = requests.post(JUPITER_SWAP_URL, json=swap_payload, timeout=15)
@@ -268,11 +273,14 @@ class SolanaWallet:
 
             logger.info("Sell quote: ~$%.2f USDC (impact %.2f%%)", out_usdc, price_impact)
 
+            priority_fee = (config.MEV_PRIORITY_FEE_LAMPORTS
+                            if config.MEV_PROTECTION_ENABLED
+                            else config.SOL_PRIORITY_FEE_LAMPORTS)
             swap_payload = {
                 "quoteResponse": quote,
                 "userPublicKey": self._pubkey,
                 "wrapAndUnwrapSol": True,
-                "prioritizationFeeLamports": 10000,
+                "prioritizationFeeLamports": priority_fee,
                 "dynamicComputeUnitLimit": True,
             }
             resp = requests.post(JUPITER_SWAP_URL, json=swap_payload, timeout=15)
@@ -321,6 +329,94 @@ class SolanaWallet:
         except Exception as e:
             logger.debug("Token raw balance error: %s", e)
             return 0, 6
+
+    def safe_buy_token(self, token_mint: str, usdc_amount: float,
+                       safety_report=None,
+                       slippage_bps: int = None) -> Optional[str]:
+        """
+        Buy a token with safety gate and MEV protection.
+        Blocks confirmed honeypots, applies tighter slippage for MEV defense.
+        """
+        # Safety gate
+        if safety_report and not safety_report.is_safe_to_trade:
+            logger.warning("BLOCKED BUY %s: safety=%.2f (%s) - %s",
+                           token_mint[:12], safety_report.safety_score,
+                           safety_report.risk_level,
+                           ", ".join(safety_report.risk_flags[:2]))
+            return None
+
+        # MEV-protective slippage
+        if slippage_bps is None:
+            slippage_bps = (config.MEV_MAX_SLIPPAGE_BPS
+                            if config.MEV_PROTECTION_ENABLED
+                            else DEFAULT_SLIPPAGE_BPS)
+
+        safety_str = (f"safety={safety_report.safety_score:.2f}"
+                      if safety_report else "safety=?")
+        logger.info("SAFE_BUY %s $%.2f (slippage=%dbps, %s)",
+                     token_mint[:20], usdc_amount, slippage_bps, safety_str)
+        return self.swap(USDC_MINT, token_mint, usdc_amount, slippage_bps)
+
+    def sell_token_partial(self, token_mint: str, fraction: float,
+                           slippage_bps: int = HIGH_VOL_SLIPPAGE_BPS) -> Optional[str]:
+        """
+        Sell a fraction (0.0-1.0) of held token balance.
+        Used for partial profit-taking.
+        """
+        if not self.is_connected:
+            logger.info("PAPER PARTIAL SELL: %s (%.0f%%)", token_mint[:20], fraction * 100)
+            return f"paper_partial_sell_{int(time.time())}"
+
+        try:
+            raw_amount, decimals = self._get_token_raw_balance(token_mint)
+            if raw_amount <= 0:
+                logger.warning("No balance for partial sell of %s", token_mint[:20])
+                return None
+
+            sell_amount = int(raw_amount * fraction)
+            if sell_amount <= 0:
+                return None
+
+            logger.info("Partial sell %s: %d/%d raw (%.0f%%)",
+                        token_mint[:20], sell_amount, raw_amount, fraction * 100)
+
+            quote = self.get_quote(token_mint, USDC_MINT, sell_amount, slippage_bps)
+            if not quote:
+                return None
+
+            price_impact = float(quote.get("priceImpactPct", 0))
+            if price_impact > 5.0:
+                logger.warning("Partial sell impact too high: %.2f%%", price_impact)
+                return None
+
+            priority_fee = (config.MEV_PRIORITY_FEE_LAMPORTS
+                            if config.MEV_PROTECTION_ENABLED
+                            else config.SOL_PRIORITY_FEE_LAMPORTS)
+            swap_payload = {
+                "quoteResponse": quote,
+                "userPublicKey": self._pubkey,
+                "wrapAndUnwrapSol": True,
+                "prioritizationFeeLamports": priority_fee,
+                "dynamicComputeUnitLimit": True,
+            }
+            resp = requests.post(JUPITER_SWAP_URL, json=swap_payload, timeout=15)
+            if not resp.ok:
+                return None
+
+            tx_b64 = resp.json().get("swapTransaction")
+            if not tx_b64:
+                return None
+
+            out_usdc = int(quote.get("outAmount", 0)) / 1e6
+            sig = self._sign_and_send(tx_b64)
+            if sig:
+                logger.info("PARTIAL SELL %s: %.0f%% → $%.2f USDC | tx: %s",
+                            token_mint[:12], fraction * 100, out_usdc, sig[:16])
+            return sig
+
+        except Exception as e:
+            logger.error("Partial sell error: %s", e)
+            return None
 
     def buy_with_sol(self, token_mint: str, sol_amount: float,
                      slippage_bps: int = DEFAULT_SLIPPAGE_BPS) -> Optional[str]:
