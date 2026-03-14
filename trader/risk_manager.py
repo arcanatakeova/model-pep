@@ -297,8 +297,6 @@ class RiskManager:
         vol_proxy = max(vol_proxy, 1.0)
         scalar = max(config.POSITION_VOL_SCALAR, 0.01)   # Never divide by zero
         vol_adjusted = base_size / (vol_proxy * scalar / 10)
-        if vol_proxy > 30:
-            vol_adjusted *= 0.5  # Extra cut for extreme volatility
 
         # 2. Safety scaling: riskier tokens get smaller positions
         safety_multiplier = max(0.3, safety_score)
