@@ -150,7 +150,10 @@ class AITrader:
         # Load existing portfolio — but if we're starting LIVE and the saved data
         # was from a paper session, wipe it so fake money never pollutes real tracking.
         _saved_mode = self._peek_saved_mode(config.TRADE_LOG_FILE)
-        _is_paper_data = (_saved_mode == "paper")
+        # Wipe if mode is not "live" — covers both explicit paper mode and old files
+        # that predate the mode field (written before this fix was deployed).
+        _file_exists = os.path.exists(config.TRADE_LOG_FILE)
+        _is_paper_data = _file_exists and (_saved_mode != "live")
 
         if live and _is_paper_data:
             logger.warning(
@@ -214,6 +217,13 @@ class AITrader:
 
         signal.signal(signal.SIGINT,  self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
+
+        # Start fast price monitor thread (Birdeye multi_price every 3s for held tokens)
+        if self.live and self.solana.is_connected:
+            _t = threading.Thread(target=self._fast_price_monitor,
+                                  name="FastPriceMonitor", daemon=True)
+            _t.start()
+            logger.info("Fast price monitor started (3s Birdeye poll for held positions)")
 
         while self.running:
             try:
@@ -817,6 +827,76 @@ class AITrader:
 
         except Exception as e:
             logger.warning("DEX position open failed (%s): %s", token.base_symbol, e)
+
+    def _fast_price_monitor(self):
+        """
+        Background thread: polls Birdeye multi_price every 3s for all held DEX tokens.
+        Updates current_price + current_pnl_pct in _dex_positions so that the main
+        thread's _update_dex_positions() always has fresh prices.
+        Triggers spike exits and stop-loss closes directly (thread-safe via dict update).
+        """
+        from birdeye import _get_birdeye
+        while self.running:
+            try:
+                time.sleep(3)
+                if not self._dex_positions:
+                    continue
+                be = _get_birdeye()
+                if not be or not be.enabled:
+                    continue
+
+                # Batch-fetch all held Solana token prices in one API call
+                mints = [pos["address"] for pos in self._dex_positions.values()
+                         if pos.get("chain") == "solana"]
+                if not mints:
+                    continue
+
+                prices = be.get_multi_price(mints)
+
+                # Update each position with fresh price
+                to_close = []
+                for pair_addr, pos in list(self._dex_positions.items()):
+                    mint = pos.get("address")
+                    bp   = prices.get(mint)
+                    if not bp or bp.price_usd <= 0:
+                        continue
+
+                    entry   = pos["entry_price"]
+                    current = bp.price_usd
+                    pnl_pct = (current - entry) / entry if entry > 0 else 0
+                    pos["current_price"]   = current
+                    pos["current_pnl_pct"] = pnl_pct
+
+                    # Spike exit: ≥15% surge in one 3s interval while in profit
+                    prev = pos.get("fast_prev_price", entry)
+                    if prev > 0 and pnl_pct > 0:
+                        surge = (current - prev) / prev
+                        if surge >= 0.12:   # 12% in 3s = pump — capture it
+                            to_close.append(
+                                (pair_addr, pos, current,
+                                 f"FastMonitor spike: +{surge:.0%} in 3s (PnL +{pnl_pct:.0%})")
+                            )
+                            continue
+                    pos["fast_prev_price"] = current
+
+                    # Instant stop-loss check
+                    stop_pct = pos.get("stop_pct", 0.20)
+                    if pnl_pct <= -stop_pct:
+                        to_close.append(
+                            (pair_addr, pos, current,
+                             f"FastMonitor stop-loss {pnl_pct:.0%}")
+                        )
+
+                for pair_addr, pos, current, reason in to_close:
+                    if pair_addr in self._dex_positions:
+                        logger.info("FAST EXIT %s @ $%.8f | %s",
+                                    pos.get("symbol", "?"), current, reason)
+                        ok = self._close_dex_position(pair_addr, pos, current, reason)
+                        if ok is not False:
+                            self._dex_positions.pop(pair_addr, None)
+
+            except Exception as e:
+                logger.debug("FastPriceMonitor error: %s", e)
 
     def _update_dex_positions(self):
         """Check open DEX positions for time exits, partial profits, and stop/TP."""

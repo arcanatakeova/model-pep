@@ -55,7 +55,7 @@ GRID_SCAN_INTERVAL_SEC = 60       # Check grid fills every 60s
 
 # ─── Scalping (5-minute signals) ─────────────────────────────────────────────
 SCALP_ENABLED = True
-SCALP_INTERVAL_SEC = 30         # Run scalp scan every 30 seconds
+SCALP_INTERVAL_SEC = 10         # Run scalp scan every 10 seconds (short-trade focus)
 SCALP_CANDLE_INTERVAL = "5m"    # 5-minute candle timeframe
 SCALP_CANDLES = 50              # Number of 5m candles to fetch
 SCALP_RSI_OVERSOLD = 25         # Aggressive RSI threshold for scalp buys
@@ -150,10 +150,10 @@ COINBASE_API_KEY = os.getenv("COINBASE_API_KEY", "")
 COINBASE_SECRET  = os.getenv("COINBASE_SECRET", "")
 
 # ─── Timing ───────────────────────────────────────────────────────────────────
-SCAN_INTERVAL_SEC = 15        # Scan markets every 15 seconds (parallel cycle = faster)
+SCAN_INTERVAL_SEC = 5         # Scan markets every 5 seconds (short-trade focus)
 OHLCV_CANDLES = 100           # Number of candles to fetch for analysis
 CANDLE_INTERVAL = "1h"        # 1-hour candles for swing analysis
-DATA_CACHE_TTL = 12           # Cache market data for 12 seconds (shorter than 15s scan cycle)
+DATA_CACHE_TTL = 8            # Cache market data for 8 seconds (shorter than 5s cycle × 2)
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 LOG_LEVEL = "INFO"
@@ -165,7 +165,7 @@ PORTFOLIO_SNAPSHOT_INTERVAL = 300   # Save portfolio snapshot every 5 minutes
 DEX_MIN_SCORE = 0.35               # Lower threshold to catch more Solana memecoins
 DEX_MAX_POSITION_USD = 500.0       # Max per DEX token (volatile = small size)
 DEX_PREFERRED_CHAINS = ["solana"]  # Solana only
-DEX_SCAN_INTERVAL_SEC = 45         # Scan DEX every 45s for faster memecoin catching
+DEX_SCAN_INTERVAL_SEC = 15         # Scan DEX every 15s — short-trade focused
 NEW_PAIR_MAX_AGE_HOURS = 48        # Consider pairs up to 48h old
 NEW_PAIR_MIN_LIQUIDITY = 15_000    # $15k minimum liquidity (lower for memecoins)
 

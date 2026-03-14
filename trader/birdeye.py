@@ -85,7 +85,7 @@ class BirdeyeClient:
     """
 
     # Cache TTLs in seconds
-    _PRICE_TTL     = 10
+    _PRICE_TTL     = 3    # 3s for real-time price monitoring of held positions
     _SECURITY_TTL  = 600   # 10 minutes
     _OHLCV_TTL     = 30
     _TRENDING_TTL  = 60
