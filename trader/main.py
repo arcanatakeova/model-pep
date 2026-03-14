@@ -1041,9 +1041,7 @@ class AITrader:
         self._print_report()
         logger.info("Trader stopped cleanly.")
 
-    @staticmethod
-    @staticmethod
-    def _peek_saved_mode(filepath: str) -> str:
+    def _peek_saved_mode(self, filepath: str) -> str:
         """Return the 'mode' field from a saved portfolio file without fully loading it.
         Returns 'paper', 'live', or '' if the file is missing or unreadable."""
         try:
