@@ -120,10 +120,10 @@ class RiskManager:
         if abs(signal_score) < config.MIN_SIGNAL_STRENGTH:
             return False, f"Signal too weak ({signal_score:.2f} < {config.MIN_SIGNAL_STRENGTH})"
 
-        # Minimum available cash
-        min_trade_usd = self.portfolio.equity() * 0.01
-        if self.portfolio.cash < min_trade_usd:
-            return False, "Insufficient cash"
+        # Minimum available cash — use cash directly (not equity which includes
+        # unrealized positions that can't be spent).
+        if self.portfolio.cash < 10.0:
+            return False, f"Insufficient cash (${self.portfolio.cash:.2f} < $10 min)"
 
         return True, "OK"
 

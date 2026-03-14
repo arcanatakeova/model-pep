@@ -28,6 +28,7 @@ Live trading: uses Binance limit orders (POST-ONLY for maker rebates)
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -126,8 +127,8 @@ class GridTrader:
 
         if center_price <= 0:
             center_price = df_mod.get_realtime_price(symbol)
-            if not center_price:
-                logger.warning("Cannot open grid for %s: no price", symbol)
+            if not center_price or center_price <= 0:
+                logger.warning("Cannot open grid for %s: no valid price", symbol)
                 return None
 
         n       = config.GRID_LEVELS
@@ -135,25 +136,37 @@ class GridTrader:
         sz      = config.GRID_SIZE_USD_PER_LEVEL
         max_usd = config.GRID_MAX_TOTAL_USD
 
-        # Check available cash
-        total_needed = sz * n   # Buy side only (sell side from existing inventory)
-        if self.portfolio.cash < total_needed:
-            sz = self.portfolio.cash / n * 0.80   # Scale down to fit
-            if sz < 5:
-                logger.warning("Insufficient cash for grid on %s", symbol)
-                return None
+        # Validate config
+        if spacing <= 0:
+            logger.warning("GRID_SPACING_PCT must be > 0, got %s — skipping grid", spacing)
+            return None
+        if n <= 0:
+            logger.warning("GRID_LEVELS must be > 0 — skipping grid")
+            return None
+
+        # Cap by max_usd config and available cash (leave 40% for other strategies)
+        buy_budget = min(sz * n, max_usd / 2, self.portfolio.cash * 0.60)
+        sz = buy_budget / n if n > 0 else sz
+        if sz < 5.0:
+            logger.warning("Grid budget too small ($%.2f/level) for %s — skipping", sz, symbol)
+            return None
+
+        total_needed = sz * n
 
         levels: list[GridLevel] = []
 
-        # BUY levels below center
+        # BUY levels below center (determine decimal precision from price)
+        decimals = max(2, -int(math.floor(math.log10(abs(center_price)))) + 3) if center_price >= 0.001 else 8
         for i in range(1, n + 1):
             price = center_price * (1 - spacing * i)
-            levels.append(GridLevel(price=round(price, 6), side="buy", size_usd=sz))
+            if price <= 0:
+                continue
+            levels.append(GridLevel(price=round(price, decimals), side="buy", size_usd=round(sz, 2)))
 
         # SELL levels above center
         for i in range(1, n + 1):
             price = center_price * (1 + spacing * i)
-            levels.append(GridLevel(price=round(price, 6), side="sell", size_usd=sz))
+            levels.append(GridLevel(price=round(price, decimals), side="sell", size_usd=round(sz, 2)))
 
         grid = Grid(
             symbol=symbol,
@@ -229,7 +242,10 @@ class GridTrader:
 
     def _update_grid(self, symbol: str, grid: Grid):
         current_price = df_mod.get_realtime_price(symbol)
-        if not current_price:
+        if not current_price or current_price <= 0:
+            return
+        if grid.center_price <= 0:
+            self.close_grid(symbol, "Invalid center price")
             return
 
         # ── Exit condition: price moved too far from center ───────────────────

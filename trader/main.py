@@ -32,6 +32,7 @@ Usage:
 import argparse
 import json
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -60,16 +61,21 @@ from solana_wallet import SolanaWallet
 from token_safety import TokenSafetyChecker
 import data_fetcher as df_mod
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=getattr(logging, config.LOG_LEVEL, logging.INFO),
-    format="%(asctime)s [%(levelname)-8s] %(name)-20s %(message)s",
+# ─── Logging (rotating file — max 20 MB, keep 10 backups) ────────────────────
+_log_fmt = logging.Formatter(
+    "%(asctime)s [%(levelname)-8s] %(name)-20s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(config.LOG_FILE, mode="a"),
-    ],
 )
+_file_handler = logging.handlers.RotatingFileHandler(
+    config.LOG_FILE, maxBytes=20 * 1024 * 1024, backupCount=10, encoding="utf-8"
+)
+_file_handler.setFormatter(_log_fmt)
+_stream_handler = logging.StreamHandler(sys.stdout)
+_stream_handler.setFormatter(_log_fmt)
+
+logging.root.setLevel(getattr(logging, config.LOG_LEVEL, logging.INFO))
+logging.root.addHandler(_file_handler)
+logging.root.addHandler(_stream_handler)
 logger = logging.getLogger("ai_trader")
 
 BANNER = """
@@ -132,6 +138,7 @@ class AITrader:
         self._equity_curve   = []
         self._dex_positions: dict = {}  # addr → {buy_price, qty, chain, symbol}
         self._cex_signals_cache = []    # Shared between CEX scan + futures swing scan
+        self._market_snapshot: dict = {}  # Latest market overview (BTC dom, sentiment)
 
         # Load saved state
         self.portfolio.load()
@@ -217,6 +224,7 @@ class AITrader:
         # ── 1. Update all open positions (stops, trailing, PnL) ───────────
         self.executor.update_all_positions()
         self._update_dex_positions()
+        self._save_dex_positions()   # Persist DEX state after every update (crash safety)
 
         # ── 2. Market overview ────────────────────────────────────────────
         self._log_market_snapshot()
@@ -298,6 +306,18 @@ class AITrader:
             self._last_save = time.time()
 
         logger.info("Cycle #%d done in %.0fms", self._cycle, elapsed_ms)
+
+        # ── Watchdog heartbeat (external health monitors can check this file) ─
+        try:
+            with open("heartbeat.json", "w") as _hb:
+                json.dump({
+                    "ts": time.time(),
+                    "cycle": self._cycle,
+                    "equity": round(equity, 2),
+                    "alive": True,
+                }, _hb)
+        except Exception:
+            pass
 
     # ─────────────────────────────────────────────────────────────────────────
     # Market Subsystems
@@ -473,6 +493,12 @@ class AITrader:
                 # Compound engine stats
                 "allocations": self.compounder.allocations,
                 "scale_factor": round(self.compounder.get_position_scale_factor(), 3),
+                # Market overview
+                "market_sentiment": self._market_snapshot.get("market_sentiment", "neutral"),
+                "btc_dominance": round(self._market_snapshot.get("btc_dominance", 0), 2),
+                "avg_24h_change": round(self._market_snapshot.get("avg_24h_change", 0), 2),
+                "top_gainers": self._market_snapshot.get("top_gainers", [])[:5],
+                "top_losers": self._market_snapshot.get("top_losers", [])[:5],
             }
             with open("bot_state.json", "w") as f:
                 json.dump(state, f)
@@ -832,7 +858,7 @@ class AITrader:
             logger.warning("Polymarket scan error: %s", e)
 
     def _log_market_snapshot(self):
-        """Log a brief market overview."""
+        """Log a brief market overview and cache for bot_state."""
         try:
             snap = df_mod.get_market_snapshot()
             if snap:
@@ -840,6 +866,7 @@ class AITrader:
                             snap.get("market_sentiment", "?").upper(),
                             snap.get("btc_dominance", 0),
                             snap.get("avg_24h_change", 0))
+                self._market_snapshot = snap   # Cache for bot_state writer
         except Exception:
             pass
 

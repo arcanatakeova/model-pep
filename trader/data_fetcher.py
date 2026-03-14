@@ -657,7 +657,17 @@ def get_stock_ohlcv(symbol: str, period: str = "60d", interval: str = "1h") -> p
     """
     Fetch stock/ETF OHLCV using yfinance (unofficial Yahoo Finance).
     Falls back gracefully if yfinance is not installed.
+    Returns empty DataFrame on weekends / outside market hours so signals
+    don't trade on stale Friday-close data.
     """
+    # US equity markets are closed on weekends — return nothing to prevent
+    # the bot from acting on 2-day-old OHLCV as if it were live data.
+    now_utc = datetime.now(timezone.utc)
+    weekday = now_utc.weekday()   # 0=Mon … 6=Sun
+    if weekday >= 5:              # Saturday or Sunday
+        logger.debug("Stock market closed (weekend), skipping %s", symbol)
+        return pd.DataFrame()
+
     key = f"stock_{symbol}_{period}_{interval}"
     cached = _cached(key, ttl=300)
     if cached is not None:
@@ -676,7 +686,17 @@ def get_stock_ohlcv(symbol: str, period: str = "60d", interval: str = "1h") -> p
         df.index.name = "timestamp"
         df = df[["open", "high", "low", "close", "volume"]].reset_index()
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        return _store(key, df.sort_values("timestamp").reset_index(drop=True))
+        df = df.sort_values("timestamp").reset_index(drop=True)
+
+        # Staleness guard: if the most recent candle is > 2 days old, discard
+        if not df.empty:
+            last_ts = df["timestamp"].iloc[-1]
+            age_hours = (now_utc - last_ts.to_pydatetime()).total_seconds() / 3600
+            if age_hours > 48:
+                logger.debug("Stock data for %s is %.0fh old — discarding", symbol, age_hours)
+                return _store(key, pd.DataFrame())
+
+        return _store(key, df)
     except ImportError:
         logger.info("yfinance not installed, skipping stock data for %s", symbol)
         return _store(key, pd.DataFrame())

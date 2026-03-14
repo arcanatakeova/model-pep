@@ -14,6 +14,7 @@ import sys
 
 try:
     import streamlit as st
+    import streamlit.components.v1
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
     import pandas as pd
@@ -493,7 +494,18 @@ def mini_sparkline(values: list, color_line: str) -> go.Figure:
 
 # ── Main render ───────────────────────────────────────────────────────────────
 
+REFRESH_SEC = 5   # Dashboard auto-refresh interval in seconds
+
+
 def render():
+    # ── Inject JavaScript auto-refresh (browser-level, never breaks) ──────────
+    # This is more reliable than time.sleep()+st.rerun() which can break after
+    # a few cycles due to Streamlit WebSocket / session state issues.
+    st.components.v1.html(
+        f'<script>setTimeout(function(){{window.parent.location.reload();}},{REFRESH_SEC*1000});</script>',
+        height=0,
+    )
+
     state     = load("bot_state.json", {})
     portfolio = load("trades.json", {})
     eq_curve  = load("equity_curve.json", [])
@@ -515,9 +527,7 @@ def render():
           </code>
         </div>
         """, unsafe_allow_html=True)
-        time.sleep(3)
-        st.rerun()
-        return
+        return  # JS refresh already injected above — will auto-reload in 5s
 
     # ── Core values ───────────────────────────────────────────────────────────
     equity      = state.get("equity",          portfolio.get("cash", 10000))
@@ -618,7 +628,7 @@ def render():
         tf_sel_col, _ = st.columns([3, 9])
         with tf_sel_col:
             tf = st.radio(
-                "", ["5M", "15M", "1H", "4H", "1D", "ALL"],
+                "Timeframe", ["5M", "15M", "1H", "4H", "1D", "ALL"],
                 horizontal=True, index=5,
                 label_visibility="collapsed",
                 key="tf_radio",
@@ -968,12 +978,10 @@ def render():
     st.markdown(
         f'<div style="text-align:right;color:{TV["text2"]};font-size:10px;'
         f'margin-top:10px;padding-top:6px;border-top:1px solid {TV["border"]};">'
-        f'AI Trader v3.0 &nbsp;·&nbsp; {now_str} &nbsp;·&nbsp; auto-refresh 3s'
+        f'AI Trader v3.0 &nbsp;·&nbsp; {now_str} &nbsp;·&nbsp; auto-refresh {REFRESH_SEC}s'
         f'</div>',
         unsafe_allow_html=True)
-
-    time.sleep(3)
-    st.rerun()
+    # JS reload already injected at the top of render() — no sleep needed
 
 
 render()
