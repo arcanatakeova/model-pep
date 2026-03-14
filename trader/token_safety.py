@@ -213,7 +213,12 @@ class TokenSafetyChecker:
             checked_at=time.time(),
         )
 
-        self._cache[mint_address] = (report, time.time())
+        now = time.time()
+        self._cache[mint_address] = (report, now)
+        # Evict expired entries when cache grows large (prevents unbounded growth)
+        if len(self._cache) > 500:
+            self._cache = {k: v for k, v in self._cache.items()
+                           if now - v[1] < self._cache_ttl}
         return report
 
     # ─── Sub-Checks ──────────────────────────────────────────────────────

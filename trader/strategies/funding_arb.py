@@ -240,6 +240,23 @@ class FundingArbScanner:
         trade = arb.to_dict()
         trade["total_pnl_usd"] = round(total_pnl, 4)
         self.closed_arbs.append(trade)
+        if len(self.closed_arbs) > 500:
+            self.closed_arbs = self.closed_arbs[-500:]
+
+        # Record in portfolio so dashboard + win rate includes arb trades
+        self.portfolio.closed_trades.append({
+            "asset_id": symbol,
+            "symbol": arb.short_sym,
+            "market": "funding_arb",
+            "side": "neutral",
+            "entry_price": arb.spot_entry_price,
+            "exit_price": current_price,
+            "pnl_usd": round(total_pnl, 4),
+            "pnl_pct": round(total_pnl / arb.size_usd * 100, 2) if arb.size_usd > 0 else 0,
+            "close_reason": reason,
+            "opened_at": arb.opened_at,
+            "closed_at": arb.closed_at,
+        })
 
         logger.info(
             "FUNDING ARB CLOSE %-10s | funding_collected=$%.2f | periods=%d | reason=%s",
@@ -300,12 +317,14 @@ class FundingArbScanner:
                     arb.funding_collected_usd, arb.funding_periods,
                 )
 
-            # 2. Check exit conditions
-            current_rate = info.get("rate", 0)
-            if current_rate < 0.0001:   # Rate dropped below worthwhile threshold
-                self.close_arb(symbol, f"Rate dropped to {current_rate*100:.5f}%/8h")
-            elif current_rate < 0:      # Rate flipped — now shorts pay longs (adverse)
+            # 2. Check exit conditions (use last known rate if API returned nothing)
+            current_rate = info.get("rate")
+            if current_rate is None:
+                continue   # rates unavailable this cycle — don't exit on stale data
+            if current_rate < 0:
                 self.close_arb(symbol, "Funding rate turned negative — exit")
+            elif current_rate < 0.0001:   # Rate dropped below worthwhile threshold
+                self.close_arb(symbol, f"Rate dropped to {current_rate*100:.5f}%/8h")
 
     def summary(self) -> dict:
         """Return summary of arb activity."""
