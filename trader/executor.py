@@ -171,14 +171,22 @@ class TradeExecutor:
 
         price    = signal.current_price
         stop_pct = abs(signal.stop_loss - price) / price if price > 0 else config.STOP_LOSS_PCT
-        size_usd = self.risk.position_size_usd(abs(signal.score), signal.conviction, stop_pct, price)
+
+        # Thread-local risk override — consistent with _open_long
+        risk_override = getattr(self._tls, "risk_override", None)
+        size_usd = self.risk.position_size_usd(
+            abs(signal.score), signal.conviction, stop_pct, price,
+            risk_pct_override=risk_override,
+        )
 
         if size_usd < 1.0:
             return None
 
         fill_price = self._fill_price(price, "sell")
         qty        = self.risk.qty_from_usd(size_usd, fill_price)
+        commission = size_usd * COMMISSION
 
+        self.portfolio.cash -= commission   # Deduct commission for short entry
         pos = self.portfolio.open_position(
             signal.asset_id, "short", qty, fill_price,
             signal.stop_loss, signal.take_profit, signal.to_dict()
