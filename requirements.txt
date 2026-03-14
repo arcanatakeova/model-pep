@@ -16,8 +16,9 @@ solana>=0.30.2              # Solana Python SDK (RPC client)
 solders>=0.18.1             # Rust-based Solana types (Keypair, Pubkey, etc.)
 
 # ── Polymarket ────────────────────────────────────────────────────────────────
-# Required for live Polymarket prediction market trading
-py-clob-client>=0.12.0      # Official Polymarket CLOB client
+# Optional: only available on Linux x86_64. macOS users: skip or install manually.
+# pip3 install py-clob-client  (Linux only — not on PyPI for macOS/arm64)
+# py-clob-client>=0.12.0
 
 # ── CEX Live Trading (optional) ───────────────────────────────────────────────
 # Uncomment to enable live trading on Binance, Coinbase, etc.
