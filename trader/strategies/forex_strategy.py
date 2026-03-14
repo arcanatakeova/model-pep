@@ -180,7 +180,7 @@ class ForexAnalyzer:
         atr_1h = self._atr(df_1h, 14)
         if atr_1h is None or atr_1h <= 0:
             return None
-        atr_pips = atr_1h / pip_size
+        atr_pips = min(atr_1h / pip_size, 300)  # Cap 300 pips — prevents absurd stops from historical data
 
         adx_1h = self._adx(df_1h, 14)
 
@@ -290,6 +290,13 @@ class ForexAnalyzer:
                       else price + stop_pips * pip_size
         take_profit = price + target_pips * pip_size if signal == "BUY" \
                       else price - target_pips * pip_size
+
+        # Sanity: cap stop/TP within 5% of entry (guards against bad data slipping through)
+        max_dist = price * 0.05
+        if abs(take_profit - price) > max_dist:
+            take_profit = (price + max_dist) if signal == "BUY" else (price - max_dist)
+            stop_loss   = (price - max_dist / self._rr_ratio) if signal == "BUY" \
+                          else (price + max_dist / self._rr_ratio)
 
         # ── 8. Build reasons list ─────────────────────────────────────────
         reasons = []

@@ -11,6 +11,7 @@ Futures trading uses isolated margin mode. Each futures position tracks:
 """
 import logging
 import threading
+import time
 from typing import Optional
 from datetime import datetime, timezone
 
@@ -26,6 +27,64 @@ SLIPPAGE = 0.001    # 0.1% simulated slippage for paper trading
 COMMISSION = 0.001  # 0.1% commission per trade (Binance maker fee)
 FUTURES_COMMISSION = 0.0004  # 0.04% Binance futures taker fee
 
+# Cooldown between reopening the same pair after a close
+_FOREX_COOLDOWN_SEC  = 900   # 15 min — prevents whipsawing into the same trade
+_CRYPTO_COOLDOWN_SEC = 120   # 2 min for crypto
+
+
+class PositionMonitor:
+    """
+    Dedicated monitoring thread for a single open position.
+    Polls price at market-appropriate frequency and triggers
+    stop-loss / take-profit / trailing-stop at the exact right moment,
+    independent of the main scan cycle timer.
+    """
+    _INTERVALS = {"forex": 3.0, "crypto": 5.0, "stocks": 30.0}
+
+    def __init__(self, asset_id: str, executor: "TradeExecutor"):
+        self.asset_id = asset_id
+        self._ex      = executor
+        self._thread  = threading.Thread(
+            target=self._run, name=f"Mon-{asset_id[:12]}", daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        port     = self._ex.portfolio
+        pos_init = port.open_positions.get(self.asset_id, {})
+        market   = pos_init.get("market", "crypto")
+        interval = self._INTERVALS.get(market, 5.0)
+        logger.debug("PositionMonitor started for %s (%.0fs interval)", self.asset_id, interval)
+
+        while self.asset_id in port.open_positions:
+            try:
+                pos = port.open_positions.get(self.asset_id)
+                if not pos:
+                    break
+
+                price = self._ex._get_current_price(self.asset_id, pos)
+                if price is None or price <= 0:
+                    time.sleep(interval)
+                    continue
+
+                # Trailing stop update
+                new_trail = self._ex.risk.update_trailing_stop(pos, price)
+                if self.asset_id in port.open_positions:
+                    port.open_positions[self.asset_id]["trailing_stop"] = new_trail
+                    port.update_position_price(self.asset_id, price)
+
+                # Exit check — use _close_lock to prevent double-close
+                should_close, reason = self._ex.risk.should_close_position(pos, price)
+                if should_close:
+                    with self._ex._close_lock:
+                        if self.asset_id in port.open_positions:
+                            self._ex._execute_close(self.asset_id, price, reason)
+                    break
+
+            except Exception as e:
+                logger.debug("PositionMonitor[%s] error: %s", self.asset_id, e)
+
+            time.sleep(interval)
+
 
 class TradeExecutor:
     """
@@ -40,6 +99,8 @@ class TradeExecutor:
         self._exchange = None          # Binance spot (live only)
         self._futures_exchange = None  # Binance USDT-M futures (live only)
         self._tls = threading.local()  # Thread-local storage for risk override
+        self._close_lock = threading.Lock()              # Prevent double-close race conditions
+        self._pair_cooldowns: dict[str, float] = {}      # asset_id → last close timestamp
 
         if not config.PAPER_TRADING:
             self._init_live_exchange()
@@ -70,6 +131,14 @@ class TradeExecutor:
         if self.portfolio.has_position(asset_id):
             return self._maybe_close(asset_id, price, signal)
 
+        # ── Cooldown check — prevent re-entering same pair immediately ────
+        cooldown = _FOREX_COOLDOWN_SEC if signal.market == "forex" else _CRYPTO_COOLDOWN_SEC
+        last_close = self._pair_cooldowns.get(asset_id, 0)
+        elapsed = time.time() - last_close
+        if elapsed < cooldown:
+            logger.debug("COOLDOWN %s — %ds remaining", asset_id, int(cooldown - elapsed))
+            return None
+
         # ── Open new position ─────────────────────────────────────────────
         if signal.signal == "BUY":
             return self._open_long(signal)
@@ -85,9 +154,8 @@ class TradeExecutor:
 
     def update_all_positions(self):
         """
-        Refresh prices for all open positions and trigger stop/TP checks.
-        Also runs liquidation guard for futures positions.
-        Call this periodically (every scan cycle).
+        Mark-to-market all positions and run liquidation guard for futures.
+        Stop/TP/trailing exits are handled by per-position PositionMonitor threads.
         """
         for asset_id in list(self.portfolio.open_positions.keys()):
             pos = self.portfolio.open_positions.get(asset_id)
@@ -98,23 +166,14 @@ class TradeExecutor:
             if current_price is None:
                 continue
 
-            # Futures: check liquidation distance first (emergency exit)
+            # Futures: liquidation guard is time-critical — keep in main loop
             if pos.get("is_futures"):
                 self._check_liquidation_guard(asset_id, pos, current_price)
                 if asset_id not in self.portfolio.open_positions:
-                    continue  # Was closed by liquidation guard
+                    continue
 
-            # Update trailing stop
-            new_trail = self.risk.update_trailing_stop(pos, current_price)
-            self.portfolio.open_positions[asset_id]["trailing_stop"] = new_trail
-
-            # Update mark-to-market
+            # Mark-to-market (PositionMonitor threads handle stop/TP)
             self.portfolio.update_position_price(asset_id, current_price)
-
-            # Check exit conditions
-            should_close, reason = self.risk.should_close_position(pos, current_price)
-            if should_close:
-                self._execute_close(asset_id, current_price, reason)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Internal Execution
@@ -157,6 +216,7 @@ class TradeExecutor:
             signal.stop_loss, signal.take_profit, signal.to_dict()
         )
         if pos:
+            PositionMonitor(signal.asset_id, self)
             logger.info("EXECUTED BUY  %-12s $%.4f × %.6f = $%.2f | Score: %.2f | Conv: %.2f",
                         signal.symbol, fill_price, qty, size_usd, signal.score, signal.conviction)
         return pos
@@ -192,6 +252,7 @@ class TradeExecutor:
             signal.stop_loss, signal.take_profit, signal.to_dict()
         )
         if pos:
+            PositionMonitor(signal.asset_id, self)
             logger.info("EXECUTED SELL %-12s $%.4f × %.6f = $%.2f | Score: %.2f | Conv: %.2f",
                         signal.symbol, fill_price, qty, size_usd, signal.score, signal.conviction)
         return pos
@@ -217,13 +278,16 @@ class TradeExecutor:
 
     def _execute_close(self, asset_id: str, price: float, reason: str) -> dict:
         """Execute a position close."""
-        fill_price = self._fill_price(price, "sell" if self.portfolio.open_positions.get(asset_id, {}).get("side") == "long" else "buy")
+        pos_side = self.portfolio.open_positions.get(asset_id, {}).get("side", "long")
+        market   = self.portfolio.open_positions.get(asset_id, {}).get("market", "crypto")
+        fill_price = self._fill_price(price, "sell" if pos_side == "long" else "buy", market)
         trade = self.portfolio.close_position(asset_id, fill_price, reason)
         if trade:
             pnl_str = f"+${trade['pnl_usd']:.2f}" if trade['pnl_usd'] >= 0 else f"-${abs(trade['pnl_usd']):.2f}"
             logger.info("CLOSED %-12s @ $%.4f | PnL: %s (%.2f%%) | %s",
                         trade.get("symbol", asset_id), fill_price,
                         pnl_str, trade['pnl_pct'], reason)
+            self._pair_cooldowns[asset_id] = time.time()  # Start cooldown after close
         return trade
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -260,11 +324,16 @@ class TradeExecutor:
             elif market == "stocks":
                 return df_mod.get_stock_price(asset_id)
             elif market == "forex":
-                pair = asset_id
+                pair  = asset_id
                 parts = pair.replace("-", "/").split("/")
                 if len(parts) == 2:
-                    rates = df_mod.get_forex_rates(parts[1])
-                    return rates.get(parts[0])
+                    base, quote = parts[0].strip(), parts[1].strip()
+                    # get_forex_rates(base) returns {quote: price_per_base}
+                    # e.g. get_forex_rates("USD")["JPY"] = 148  (JPY per USD) ✓
+                    #      get_forex_rates("AUD")["USD"] = 0.63 (USD per AUD) ✓
+                    rates = df_mod.get_forex_rates(base)
+                    val   = rates.get(quote)
+                    return float(val) if val else None
         except Exception as e:
             logger.debug("Price fetch error for %s: %s", asset_id, e)
         return None
