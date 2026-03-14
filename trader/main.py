@@ -42,21 +42,23 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-# Load .env — always resolve relative to this file so it works regardless of CWD
-import pathlib as _pathlib
-_env_file = _pathlib.Path(__file__).parent / ".env"
+# Load .env — direct parse first (no dependency), then dotenv as bonus
+import os as _os, pathlib as _pathlib
+_env_file = _pathlib.Path(__file__).resolve().parent / ".env"
+if _env_file.exists():
+    for _ln in _env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        _ln = _ln.strip()
+        if _ln and not _ln.startswith("#") and "=" in _ln:
+            _k, _, _v = _ln.partition("=")
+            _k = _k.strip()
+            _v = _v.strip().strip('"').strip("'")  # handle quoted values
+            if _k:
+                _os.environ[_k] = _v  # always set — override any stale system env
 try:
     from dotenv import load_dotenv as _load_dotenv
-    _load_dotenv(_env_file, override=True)
+    _load_dotenv(_env_file, override=True)  # picks up any dotenv-specific syntax
 except ImportError:
-    # python-dotenv not installed — parse manually so keys always load
-    import os as _os
-    if _env_file.exists():
-        for _line in _env_file.read_text().splitlines():
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _k, _, _v = _line.partition("=")
-                _os.environ[_k.strip()] = _v.strip()
+    pass
 
 import config
 from portfolio import Portfolio
