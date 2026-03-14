@@ -256,9 +256,15 @@ class AITrader:
         t0 = time.time()
         now_dt = datetime.now(timezone.utc)
         now    = now_dt.strftime("%H:%M:%S UTC")
-        equity = self.portfolio.equity()
-        logger.info("━━━ Cycle #%d  %s  Equity: $%.2f ━━━",
-                    self._cycle, now, equity)
+        # Real equity = cash (SOL in wallet) + open DEX position values
+        dex_value = sum(
+            pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
+            * (1 + pos.get("current_pnl_pct", 0))
+            for pos in self._dex_positions.values()
+        )
+        equity = self.portfolio.cash + dex_value
+        logger.info("━━━ Cycle #%d  %s  SOL wallet: $%.2f  DEX positions: $%.2f  Total: $%.2f ━━━",
+                    self._cycle, now, self.portfolio.cash, dex_value, equity)
 
         # ── Midnight reset: daily loss tracker + optional wallet sync ─────
         today = now_dt.date()
@@ -279,70 +285,19 @@ class AITrader:
                 if wallet_value > 10:
                     logger.info("Midnight wallet sync: $%.2f", wallet_value)
 
-        # ── 1. Update all open positions (mark-to-market; exits handled by monitors)
-        self.executor.update_all_positions()
+        # ── 1. Update open DEX positions (price refresh, exits, partial TPs)
         self._update_dex_positions()
-        # Note: _save_dex_positions() removed from every cycle — periodic 5-min save is enough
 
-        # ── 2–8. Fire all independent network operations in parallel ──────
+        # ── 2. DEX scan: find new Solana tokens to buy ────────────────────
         now_ts = time.time()
-        _should_scalp   = config.SCALP_ENABLED and now_ts - self._last_scalp >= config.SCALP_INTERVAL_SEC
-        _should_dex     = now_ts - self._last_dex  >= config.DEX_SCAN_INTERVAL_SEC
-
-        par_tasks: dict[str, object] = {
-            "snapshot": self._log_market_snapshot,
-            "cex":      self._run_cex_scan,
-        }
-        if _should_scalp:  par_tasks["scalp"] = self._run_scalp_scan
-        if _should_dex:    par_tasks["dex"]   = self._run_dex_scan
-        # Polymarket disabled — no API keys configured yet
-
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=len(par_tasks), thread_name_prefix="scan") as exe:
-            futs = {name: exe.submit(fn) for name, fn in par_tasks.items()}
-            for name, fut in futs.items():
-                try:
-                    fut.result(timeout=28)
-                except concurrent.futures.TimeoutError:
-                    logger.warning("Scan '%s' timed out (>28s) — skipping this cycle", name)
-                except Exception as e:
-                    logger.warning("Scan '%s' error: %s", name, e)
-
-        now_ts = time.time()
-        if _should_scalp: self._last_scalp = now_ts
-        if _should_dex:   self._last_dex   = now_ts
-
-        # ── 5. Futures Swings: reads _cex_signals_cache set above (no HTTP) ─
-        if config.FUTURES_ENABLED and now_ts - self._last_futures >= 60:
-            self._run_futures_swing_scan()
-            self._last_futures = now_ts
-
-        # ── 6. Pyramid: Add to winning positions ──────────────────────────
-        self._check_pyramiding()
-
-        # ── 10. Funding Rate Arbitrage (in-memory, fast) ──────────────────
-        if getattr(config, "FUNDING_ARB_ENABLED", False):
-            if now_ts - self._last_arb >= getattr(config, "FUNDING_ARB_SCAN_INTERVAL_SEC", 600):
-                self._run_funding_arb_scan()
-                self._last_arb = now_ts
-            else:
-                self.funding_arb.update_positions()
-
-        # ── 11. Grid Trading (in-memory, fast) ────────────────────────────
-        if getattr(config, "GRID_TRADING_ENABLED", False):
-            if now_ts - self._last_grid >= getattr(config, "GRID_SCAN_INTERVAL_SEC", 60):
-                self._run_grid_management()
-                self._last_grid = now_ts
+        if now_ts - self._last_dex >= config.DEX_SCAN_INTERVAL_SEC:
+            try:
+                self._run_dex_scan()
+            except Exception as e:
+                logger.warning("DEX scan error: %s", e)
+            self._last_dex = time.time()
 
         # ── 12. Compound: Reinvest + rebalance ────────────────────────────
-        alloc = self.compounder.on_cycle_complete()
-        logger.info("Compound allocations: " + " | ".join(
-            f"{k}: ${v:.0f}" for k, v in alloc.items()))
-
-        # ── 12b. Strategy audit + repivot (every 80 cycles ≈ 20 min) ─────────
-        if self._cycle % 80 == 0:
-            self.auditor.run_audit()
-
         # ── 13. Equity snapshot (cap in-memory at 2880 = 24h of 30s cycles) ──
         self._equity_curve.append({
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -514,36 +469,13 @@ class AITrader:
     def _write_bot_state(self, equity: float, elapsed_ms: float):
         """Write lightweight state file for the dashboard to read."""
         try:
-            # True equity = CEX portfolio + DEX positions current value
-            dex_value = sum(
-                pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
-                * (1 + pos.get("current_pnl_pct", 0))
-                for pos in self._dex_positions.values()
-            )
-            true_equity = equity + dex_value
-            # Keep peak_equity in sync with true equity (includes DEX)
+            # Equity = cash (real SOL balance in USD) + open DEX position values
+            true_equity = equity   # already computed as cash + dex_value in _run_cycle
             if true_equity > self.portfolio.peak_equity:
                 self.portfolio.peak_equity = true_equity
             daily_pnl = round(true_equity - self._day_start_eq, 2)
             perf = self.portfolio.performance_summary()
-            # Build signal table from latest CEX scan cache (thread-safe snapshot)
-            with self._cex_cache_lock:
-                cex_cache_snapshot = list(self._cex_signals_cache)
-            signal_table = [
-                {
-                    "symbol": s.symbol,
-                    "market": s.market,
-                    "signal": s.signal,
-                    "score": round(s.score, 4),
-                    "conviction": round(s.conviction, 4),
-                    "price": s.current_price,
-                    "regime": s.regime,
-                    "trend": s.trend_direction,
-                    "components": {k: round(v, 3) for k, v in s.component_scores.items()},
-                }
-                for s in sorted(cex_cache_snapshot,
-                                 key=lambda x: abs(x.score), reverse=True)[:20]
-            ]
+            signal_table = []  # No CEX signals — Solana DEX only
             # Live wallet balances for dashboard — cached 60s to avoid RPC rate limits
             _sol, _usdc, _sol_usd, _cache_ts = self._wallet_balance_cache
             if self.solana.is_connected and (time.time() - _cache_ts > 60):
@@ -586,17 +518,21 @@ class AITrader:
                 # Recent closed trades (last 30) — written every cycle so dashboard
                 # is always current, regardless of trades.json save frequency.
                 "recent_trades": list(self.portfolio.closed_trades)[-30:],
-                # Signal scanner table for dashboard heatmap
                 "signal_table": signal_table,
-                # Compound engine stats
-                "allocations": self.compounder.allocations,
-                "scale_factor": round(self.compounder.get_position_scale_factor(), 3),
-                # Market overview
-                "market_sentiment": self._market_snapshot.get("market_sentiment", "neutral"),
-                "btc_dominance": round(self._market_snapshot.get("btc_dominance", 0), 2),
-                "avg_24h_change": round(self._market_snapshot.get("avg_24h_change", 0), 2),
-                "top_gainers": self._market_snapshot.get("top_gainers", [])[:5],
-                "top_losers": self._market_snapshot.get("top_losers", [])[:5],
+                # DEX positions detail for dashboard
+                "dex_position_details": [
+                    {
+                        "symbol":    pos.get("symbol", "?"),
+                        "address":   pos.get("address", ""),
+                        "size_usd":  round(pos.get("size_usd", 0), 2),
+                        "entry":     pos.get("entry_price", 0),
+                        "current":   pos.get("current_price", pos.get("entry_price", 0)),
+                        "pnl_pct":   round(pos.get("current_pnl_pct", 0) * 100, 2),
+                        "remaining": round(pos.get("remaining_fraction", 1.0) * 100, 1),
+                        "chain":     pos.get("chain", "solana"),
+                    }
+                    for pos in self._dex_positions.values()
+                ],
             }
             self._atomic_json("bot_state.json", state)
             # Write equity curve every cycle so chart stays live (not just every 5 min)

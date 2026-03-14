@@ -17,51 +17,12 @@ RISK_PER_TRADE_PCT = 0.02     # Risk 2% of portfolio per trade (Kelly-based)
 MIN_SIGNAL_STRENGTH = 0.22    # Minimum ensemble score to trigger trade (lower = more trades)
 TRAILING_STOP_PCT = 0.025     # 2.5% trailing stop
 
-# ─── Leverage / Futures (Binance USDT-M Perpetuals) ──────────────────────────
-FUTURES_ENABLED = True                    # Trade leveraged futures alongside spot
-DEFAULT_LEVERAGE = 3                      # Default leverage multiplier
-MAX_LEVERAGE = 8                          # Hard cap (safety)
-FUTURES_SYMBOLS = [                       # USDT-M perpetual pairs to trade with leverage
-    "BTC/USDT:USDT",
-    "ETH/USDT:USDT",
-    "SOL/USDT:USDT",
-]
-FUTURES_RISK_PCT = 0.01                   # 1% of equity at risk per futures trade
-FUTURES_DAILY_LOSS_LIMIT = 0.05           # 5% daily hard stop — protects real SOL from catastrophic loss
-# Maps (min_conviction_threshold, leverage_multiplier) — highest conviction first
-# BUG FIX: was (0.00, 2) — any signal got 2x. Now requires 0.40 minimum.
-LEVERAGE_BY_CONVICTION = [
-    (0.80, 8),
-    (0.65, 5),
-    (0.50, 3),
-    (0.40, 2),   # Min 40% conviction required for any leverage
-]
-MIN_FUTURES_CONVICTION = 0.40   # Hard gate: below this = no futures trade
-
-# ─── Funding Rate Arbitrage ───────────────────────────────────────────────────
-FUNDING_ARB_ENABLED = True
-FUNDING_ARB_MIN_RATE = 0.0003       # 0.03% per 8h minimum (0.27%/day) to open arb
-FUNDING_ARB_MAX_POSITION_USD = 2000 # Max USD per arb pair
-FUNDING_ARB_SCAN_INTERVAL_SEC = 600 # Every 10 minutes (funding updates every 8h)
-
-# ─── Grid Trading ─────────────────────────────────────────────────────────────
-GRID_TRADING_ENABLED = True
-GRID_SYMBOLS = ["BTC", "ETH", "SOL"]
-GRID_SPACING_PCT = 0.004          # 0.4% between grid levels
-GRID_LEVELS = 8                   # Levels on each side of center
-GRID_SIZE_USD_PER_LEVEL = 50.0    # USD per order
-GRID_MAX_TOTAL_USD = 2000.0       # Max total grid exposure per symbol
-GRID_SCAN_INTERVAL_SEC = 60       # Check grid fills every 60s
-
-# ─── Scalping (5-minute signals) ─────────────────────────────────────────────
-SCALP_ENABLED = True
-SCALP_INTERVAL_SEC = 10         # Run scalp scan every 10 seconds (short-trade focus)
-SCALP_CANDLE_INTERVAL = "5m"    # 5-minute candle timeframe
-SCALP_CANDLES = 50              # Number of 5m candles to fetch
-SCALP_RSI_OVERSOLD = 25         # Aggressive RSI threshold for scalp buys
-SCALP_RSI_OVERBOUGHT = 75       # Aggressive RSI threshold for scalp sells
-SCALP_MIN_SCORE = 0.28          # Minimum score to fire a scalp trade
-SCALP_SYMBOLS = ["BTC", "ETH", "SOL", "LINK", "AVAX", "MATIC"]  # Symbols to scalp
+# ─── Disabled strategies (Solana DEX only) ────────────────────────────────────
+FUTURES_ENABLED     = False   # No Binance futures
+FUNDING_ARB_ENABLED = False   # No funding rate arb
+GRID_TRADING_ENABLED = False  # No grid trading
+SCALP_ENABLED       = False   # No CEX scalping
+FOREX_ENABLED       = False   # No forex
 
 # ─── Market Coverage ──────────────────────────────────────────────────────────
 CRYPTO_TOP_N = 30             # Scan top 30 coins — broader coverage, more signals
