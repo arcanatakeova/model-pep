@@ -579,6 +579,9 @@ class SolanaWallet:
         """
         try:
             amount_sol = amount_lamports / 1e9
+            # PumpPortal expects slippage as integer percentage (e.g. 10 = 10%)
+            # Use minimum 10% — memecoins on bonding curves need wide slippage
+            slippage_pct = max(10, slippage_bps // 100)
             resp = requests.post(
                 PUMPFUN_TRADE_URL,
                 headers={"Content-Type": "application/json"},
@@ -588,14 +591,15 @@ class SolanaWallet:
                     "mint":             output_mint,
                     "denominatedInSol": "true",
                     "amount":           round(amount_sol, 6),
-                    "slippage":         slippage_bps / 100,
+                    "slippage":         slippage_pct,
                     "priorityFee":      0.0001,
                     "pool":             "pump",
                 },
                 timeout=10,
             )
             if not resp.ok:
-                logger.warning("PumpPortal failed: HTTP %s", resp.status_code)
+                logger.warning("PumpPortal failed: HTTP %s — %s",
+                               resp.status_code, resp.text[:300])
                 return None, 0, 0.0
             tx_bytes = resp.content
             if not tx_bytes:

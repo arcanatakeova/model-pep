@@ -723,8 +723,9 @@ class AITrader:
                 )
                 size_usd = min(size_usd, config.DEX_MAX_POSITION_USD)  # dex_position_size_usd already handles equity/cash caps
                 if size_usd < config.DEX_MIN_POSITION_USD:
-                    logger.debug("SKIP %s: size $%.2f below min $%.2f",
-                                 token.base_symbol, size_usd, config.DEX_MIN_POSITION_USD)
+                    logger.warning("SKIP %s: size $%.2f below min $%.2f "
+                                   "(vol/safety too high for current equity)",
+                                   token.base_symbol, size_usd, config.DEX_MIN_POSITION_USD)
                     continue
 
                 # Jupiter price confirmation — verify price is within 2% of DexScreener
