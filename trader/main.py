@@ -401,12 +401,19 @@ class AITrader:
     def _write_bot_state(self, equity: float, elapsed_ms: float):
         """Write lightweight state file for the dashboard to read."""
         try:
-            daily_pnl = round(equity - self._day_start_eq, 2)
+            # True equity = CEX portfolio + DEX positions current value
+            dex_value = sum(
+                pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
+                * (1 + pos.get("current_pnl_pct", 0))
+                for pos in self._dex_positions.values()
+            )
+            true_equity = equity + dex_value
+            daily_pnl = round(true_equity - self._day_start_eq, 2)
             state = {
                 "cycle": self._cycle,
                 "last_cycle_ts": time.time(),
                 "last_cycle_ms": round(elapsed_ms, 1),
-                "equity": round(equity, 2),
+                "equity": round(true_equity, 2),
                 "cash": round(self.portfolio.cash, 2),
                 "initial_capital": self.portfolio.initial_capital,
                 "mode": "live" if self.live else "paper",

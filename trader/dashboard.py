@@ -126,6 +126,12 @@ def trade_card_html(symbol: str, market: str, side: str, pnl_pct: float,
                     pnl_usd: float, entry: float, current: float,
                     stop_pct: float, target_pct: float, opened: str,
                     leverage: int = 1, size_usd: float = 0) -> str:
+    """
+    Returns HTML for a single trade card.
+    IMPORTANT: Uses only ONE outer <div> + inline <span>/<br> inside.
+    Streamlit's markdown renderer strips nested <div> blocks, so we
+    avoid them entirely and rely on float + inline elements only.
+    """
     green  = "#22c55e"
     red    = "#ef4444"
     color  = green if pnl_usd >= 0 else red
@@ -133,8 +139,6 @@ def trade_card_html(symbol: str, market: str, side: str, pnl_pct: float,
     bg     = "rgba(34,197,94,0.06)" if pnl_usd >= 0 else "rgba(239,68,68,0.06)"
     sign   = "+" if pnl_usd >= 0 else ""
 
-    # Progress bar: 0% = at stop, 50% = at entry, 100% = at target
-    # Maps price range [entry*(1-stop), entry*(1+target)] → 0-100%
     stop_price   = entry * (1 - stop_pct)
     target_price = entry * (1 + target_pct)
     price_range  = target_price - stop_price
@@ -142,56 +146,51 @@ def trade_card_html(symbol: str, market: str, side: str, pnl_pct: float,
     progress     = max(2, min(98, progress))
     bar_color    = green if progress > 50 else red
 
-    # Format prices neatly
     def fmt_price(p):
-        if p < 0.0001:    return f"${p:.8f}"
-        if p < 0.01:      return f"${p:.6f}"
-        if p < 1:         return f"${p:.4f}"
-        if p < 10000:     return f"${p:,.2f}"
+        if p < 0.0001: return f"${p:.8f}"
+        if p < 0.01:   return f"${p:.6f}"
+        if p < 1:      return f"${p:.4f}"
+        if p < 10000:  return f"${p:,.2f}"
         return f"${p:,.0f}"
 
     time_str = ""
     try:
         opened_dt = datetime.fromisoformat(opened.replace("Z", "+00:00"))
-        age = datetime.now(timezone.utc) - opened_dt
-        h, m = divmod(int(age.total_seconds() // 60), 60)
+        age_s = (datetime.now(timezone.utc) - opened_dt).total_seconds()
+        h, m  = divmod(int(age_s // 60), 60)
         time_str = f"{h}h {m}m" if h > 0 else f"{m}m"
     except Exception:
-        time_str = opened[:10] if opened else ""
+        time_str = ""
 
-    lev_badge = f'<span style="background:#1e3a5f;color:#60a5fa;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;">{leverage}x</span>' if leverage > 1 else ""
-    side_badge_color = "#22c55e" if side.lower() == "long" else "#ef4444"
-    size_str = f"${size_usd:,.0f}" if size_usd >= 1 else ""
+    lev   = f' <span style="background:#1e3a5f;color:#60a5fa;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700">{leverage}x</span>' if leverage > 1 else ""
+    sz    = f' &middot; <span style="color:#475569">${size_usd:,.0f}</span>' if size_usd >= 1 else ""
+    s_col = green if side.lower() == "long" else red
 
-    return f"""
-    <div class="trade-card" style="background:{bg};border:1px solid {border};border-left:4px solid {color};">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
-            <div>
-                <span style="color:#f1f5f9;font-size:20px;font-weight:800;letter-spacing:0.5px;">{symbol}</span>
-                {lev_badge}
-                <br>
-                <span style="color:#475569;font-size:11px;">{market}</span>
-                &nbsp;
-                <span style="color:{side_badge_color};font-size:11px;font-weight:600;">{side.upper()}</span>
-                &nbsp;·&nbsp;
-                <span style="color:#475569;font-size:11px;">⏱ {time_str}</span>
-                {f'&nbsp;·&nbsp;<span style="color:#475569;font-size:11px;">{size_str}</span>' if size_str else ''}
-            </div>
-            <div style="text-align:right;">
-                <div style="color:{color};font-size:30px;font-weight:900;line-height:1;">{sign}{pnl_pct:.1f}%</div>
-                <div style="color:{color};font-size:13px;font-weight:600;margin-top:2px;">{sign}${abs(pnl_usd):.2f}</div>
-            </div>
-        </div>
-        <div style="margin:12px 0 6px 0;display:flex;justify-content:space-between;font-size:11px;">
-            <span style="color:#64748b;">Entry <span style="color:#94a3b8;">{fmt_price(entry)}</span></span>
-            <span style="color:#64748b;">Now <span style="color:#f1f5f9;font-weight:600;">{fmt_price(current)}</span></span>
-            <span style="color:#ef4444;">⬇ Stop {stop_pct*100:.0f}%</span>
-            <span style="color:#22c55e;">⬆ Target {target_pct*100:.0f}%</span>
-        </div>
-        <div style="background:#0d1526;border-radius:6px;height:5px;overflow:hidden;">
-            <div style="background:{bar_color};width:{progress:.1f}%;height:5px;border-radius:6px;transition:width 0.5s;"></div>
-        </div>
-    </div>"""
+    # Single outer div, all inner content uses only span + br (no nested divs)
+    return (
+        f'<div style="border:1px solid {border};border-left:4px solid {color};'
+        f'border-radius:12px;padding:16px 18px;background:{bg};margin-bottom:12px;">'
+        # Row 1: symbol left, big P&L right
+        f'<span style="color:#f1f5f9;font-size:22px;font-weight:800">{symbol}</span>{lev}'
+        f'<span style="float:right;color:{color};font-size:30px;font-weight:900;line-height:1">{sign}{pnl_pct:.1f}%</span><br>'
+        # Row 2: market / side / time, USD P&L right
+        f'<span style="color:#475569;font-size:11px">{market} &middot; '
+        f'<span style="color:{s_col};font-weight:600">{side.upper()}</span>'
+        f' &middot; &#9201; {time_str}{sz}</span>'
+        f'<span style="float:right;color:{color};font-size:13px;font-weight:600">{sign}${abs(pnl_usd):.2f}</span><br><br>'
+        # Row 3: prices + levels
+        f'<span style="color:#64748b;font-size:11px">'
+        f'Entry <b style="color:#94a3b8">{fmt_price(entry)}</b>'
+        f' &rarr; Now <b style="color:#f1f5f9">{fmt_price(current)}</b>'
+        f' &nbsp;&nbsp; <span style="color:#ef4444">&#x2193; Stop {stop_pct*100:.0f}%</span>'
+        f' &nbsp; <span style="color:#22c55e">&#x2191; Target {target_pct*100:.0f}%</span>'
+        f'</span><br>'
+        # Progress bar: span display:block trick (no nested div)
+        f'<span style="display:block;background:#0d1526;border-radius:6px;height:5px;margin-top:8px;overflow:hidden">'
+        f'<span style="display:block;background:{bar_color};width:{progress:.1f}%;height:5px;border-radius:6px"></span>'
+        f'</span>'
+        f'</div>'
+    )
 
 
 # ─── Main Render ──────────────────────────────────────────────────────────────
@@ -527,7 +526,7 @@ def render():
             for line in reversed(filtered):
                 c = line_color(line)
                 esc = line.replace("<", "&lt;").replace(">", "&gt;")
-                html += f'<div class="feed-line" style="color:{c};">{esc}</div>'
+                html += f'<span style="display:block;color:{c};padding:3px 0;border-bottom:1px solid #0d1526">{esc}</span>'
             html += "</div>"
             st.markdown(html, unsafe_allow_html=True)
         except Exception as e:
