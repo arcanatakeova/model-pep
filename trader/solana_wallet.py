@@ -127,11 +127,37 @@ class SolanaWallet:
 
             logger.info("Solana wallet connected: %s…%s",
                         self._pubkey[:6], self._pubkey[-4:])
+            self._check_jupiter_connectivity()
         except ImportError:
             logger.warning("solana/solders not installed — Solana trading disabled.")
             logger.warning("Install: pip install solana solders")
         except Exception as e:
             logger.error("Wallet init failed: %s", e)
+
+    def _check_jupiter_connectivity(self):
+        """Warn at startup if Jupiter API is unreachable (geo-block / DNS issue)."""
+        try:
+            resp = requests.get(
+                "https://quote-api.jup.ag/v6/quote",
+                params={
+                    "inputMint":  "So11111111111111111111111111111111111111112",
+                    "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "amount":     "1000000",
+                    "slippageBps":"50",
+                },
+                timeout=5,
+            )
+            if resp.ok:
+                logger.info("Jupiter API reachable — DEX trading enabled")
+            else:
+                logger.warning("Jupiter API returned %s — swaps may fail", resp.status_code)
+        except Exception:
+            logger.error(
+                "Jupiter API unreachable — DEX buys will FAIL until fixed.\n"
+                "  Likely cause: geo-block or DNS issue.\n"
+                "  Fix: enable a VPN (e.g. Cloudflare WARP: https://one.one.one.one/)\n"
+                "       or set HTTPS_PROXY=socks5://localhost:PORT before starting."
+            )
 
     # ─── Properties ────────────────────────────────────────────────────────────
 
