@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import time
 import requests
+import concurrent.futures
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -126,7 +127,7 @@ class PolymarketTrader:
     def get_active_markets(self, limit: int = 100, min_volume: float = 1000) -> list[PolyMarket]:
         """Fetch active markets sorted by 24h volume."""
         cache_key = f"markets_{limit}"
-        cached = self._cached(cache_key)
+        cached = self._cached(cache_key, ttl=300)  # Cache markets for 5 min (not 60s)
         if cached is not None:
             return cached
 

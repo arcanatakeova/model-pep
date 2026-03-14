@@ -494,18 +494,10 @@ def mini_sparkline(values: list, color_line: str) -> go.Figure:
 
 # ── Main render ───────────────────────────────────────────────────────────────
 
-REFRESH_SEC = 15  # Dashboard auto-refresh interval in seconds
+REFRESH_SEC = 10  # Dashboard auto-refresh interval in seconds
 
 
 def render():
-    # ── Inject JavaScript auto-refresh (browser-level, never breaks) ──────────
-    # This is more reliable than time.sleep()+st.rerun() which can break after
-    # a few cycles due to Streamlit WebSocket / session state issues.
-    st.components.v1.html(
-        f'<script>setTimeout(function(){{window.parent.location.reload();}},{REFRESH_SEC*1000});</script>',
-        height=0,
-    )
-
     state     = load("bot_state.json", {})
     portfolio = load("trades.json", {})
     eq_curve  = load("equity_curve.json", [])
@@ -1042,7 +1034,9 @@ def render():
         f'AI Trader v3.0 &nbsp;·&nbsp; {now_str} &nbsp;·&nbsp; auto-refresh {REFRESH_SEC}s'
         f'</div>',
         unsafe_allow_html=True)
-    # JS reload already injected at the top of render() — no sleep needed
+    # ── Auto-refresh: sleep then rerun — keeps WebSocket alive, no page flash ─
+    time.sleep(REFRESH_SEC)
+    st.rerun()
 
 
 render()

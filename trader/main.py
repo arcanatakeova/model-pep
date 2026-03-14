@@ -30,6 +30,7 @@ Usage:
   python main.py --growth         # Show projected compound growth table
 """
 import argparse
+import concurrent.futures
 import json
 import logging
 import logging.handlers
@@ -135,7 +136,7 @@ class AITrader:
         self._last_grid      = 0.0     # Grid runs on cycle 1 (no API calls)
         self._day_start_eq   = self.portfolio.equity()
         self._last_day       = datetime.now(timezone.utc).date()
-        self._equity_curve   = []
+        self._equity_curve   = self._load_equity_curve()  # Persist chart history across restarts
         self._dex_positions: dict = {}  # addr → {buy_price, qty, chain, symbol}
         self._cex_signals_cache = []    # Shared between CEX scan + futures swing scan
         self._market_snapshot: dict = {}  # Latest market overview (BTC dom, sentiment)
@@ -841,10 +842,17 @@ class AITrader:
     def _run_polymarket_scan(self):
         """Scan Polymarket for prediction market edge plays."""
         try:
-            signals = self.poly_trader.find_edges(
-                min_edge=config.POLYMARKET_MIN_EDGE,
-                min_volume=config.POLYMARKET_MIN_VOLUME,
-            )
+            # Hard 25s timeout — Polymarket API pagination can block for minutes
+            # (each page: 10s timeout × 3 retries × N pages). Run in a thread so
+            # the main cycle is never held hostage by a slow external API.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(self.poly_trader.find_edges,
+                                config.POLYMARKET_MIN_EDGE, config.POLYMARKET_MIN_VOLUME)
+                try:
+                    signals = fut.result(timeout=25)
+                except concurrent.futures.TimeoutError:
+                    logger.warning("Polymarket scan timed out (>25s) — skipping this cycle")
+                    return
             logger.info("Polymarket: %d edge signals found", len(signals))
 
             budget = self.compounder.max_position_for_market("polymarket")
@@ -928,6 +936,20 @@ class AITrader:
             pass
         except Exception as e:
             logger.warning("Failed to load DEX positions: %s", e)
+
+    def _load_equity_curve(self) -> list:
+        """Load equity curve from disk so chart history survives bot restarts."""
+        try:
+            path = "equity_curve.json"
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list) and data:
+                    logger.info("Equity curve restored: %d points", len(data))
+                    return data[-2_880:]   # Cap at 24h
+        except Exception:
+            pass
+        return []
 
     def _save_equity_curve(self):
         try:
