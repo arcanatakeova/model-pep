@@ -6,6 +6,7 @@ requests>=2.31.0            # HTTP client for all API calls
 pandas>=2.0.0               # Data manipulation and time series analysis
 numpy>=1.24.0               # Numerical computations for indicators
 python-dotenv>=1.0.0        # Load API keys from .env file
+websocket-client>=1.6.0     # Binance WebSocket feed (replaces manual socket impl)
 
 # ── Stock & ETF Data ─────────────────────────────────────────────────────────
 yfinance>=0.2.18            # Yahoo Finance (stocks, ETFs, indices)

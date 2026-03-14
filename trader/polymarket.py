@@ -293,9 +293,16 @@ class PolymarketTrader:
         Requires py-clob-client and a funded Polygon wallet.
         """
         if not self._client:
-            logger.info("Polymarket paper: WOULD BUY %s %s @ %.4f size $%.2f",
-                        signal.side, signal.market.question[:50],
-                        signal.target_price, size_usdc)
+            logger.info(
+                "POLY PAPER | %-3s %s | p=%.4f | edge=%.1f%% | $%.0f | vol=$%.0f | '%s'",
+                signal.side,
+                signal.market.condition_id[:8],
+                signal.target_price,
+                signal.edge_pct * 100,
+                size_usdc,
+                signal.market.volume_24h,
+                signal.market.question[:60],
+            )
             return {"paper": True, "side": signal.side, "size": size_usdc,
                     "price": signal.target_price, "market": signal.market.condition_id}
 

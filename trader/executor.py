@@ -142,7 +142,7 @@ class TradeExecutor:
             logger.debug("Position size too small ($%.2f) for %s", size_usd, signal.asset_id)
             return None
 
-        fill_price = self._fill_price(price, "buy")
+        fill_price = self._fill_price(price, "buy", signal.market)
         qty        = self.risk.qty_from_usd(size_usd, fill_price)
         commission  = size_usd * COMMISSION
         actual_cost = size_usd + commission
@@ -182,7 +182,7 @@ class TradeExecutor:
         if size_usd < 1.0:
             return None
 
-        fill_price = self._fill_price(price, "sell")
+        fill_price = self._fill_price(price, "sell", signal.market)
         qty        = self.risk.qty_from_usd(size_usd, fill_price)
         commission = size_usd * COMMISSION
 
@@ -230,13 +230,21 @@ class TradeExecutor:
     # Utilities
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _fill_price(self, market_price: float, side: str) -> float:
-        """Simulate slippage for paper trading."""
+    def _fill_price(self, market_price: float, side: str,
+                    market: str = "crypto") -> float:
+        """
+        Simulate realistic fill price for paper trading.
+        Forex uses a tight spread model (~0.5 pip on majors) rather than
+        the 0.1% crypto slippage — otherwise stops are triggered incorrectly
+        and position sizing is off by an order of magnitude in pips.
+        """
         if config.PAPER_TRADING:
+            # Forex: use typical pip spread (0.005% ≈ 0.5 pip on EUR/USD at 1.10)
+            slip = 0.00005 if market == "forex" else SLIPPAGE
             if side == "buy":
-                return market_price * (1 + SLIPPAGE)
+                return market_price * (1 + slip)
             else:
-                return market_price * (1 - SLIPPAGE)
+                return market_price * (1 - slip)
         return market_price
 
     def _get_current_price(self, asset_id: str, pos: dict) -> Optional[float]:

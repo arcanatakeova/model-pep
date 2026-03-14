@@ -84,6 +84,19 @@ CRYPTO_WATCHLIST = [
 # Major forex pairs — enabled for pro-trader coverage
 FOREX_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD"]
 
+# ─── Forex Strategy (Professional Engine) ─────────────────────────────────────
+FOREX_ENABLED        = True
+FOREX_SESSION_FILTER = True   # Only trade during active London/NY/Tokyo windows
+FOREX_MIN_ADX        = 20     # Skip ranging markets (ADX < 20 = no clear trend)
+FOREX_MIN_SCORE      = 0.35   # Min signal score (higher bar than crypto 0.22)
+FOREX_ATR_STOP_MULTIPLIER = 1.5  # Stop = 1.5× ATR from entry
+FOREX_RR_RATIO       = 2.2    # Target = 2.2× stop (minimum R:R)
+FOREX_MAX_CORRELATED_PAIRS = 1   # Max 1 position per correlation group
+FOREX_SPREADS_PIPS = {        # Typical retail spread per pair (pips)
+    "EUR/USD": 0.5, "GBP/USD": 0.8, "USD/JPY": 0.6,
+    "AUD/USD": 0.7, "USD/CAD": 1.0,
+}
+
 # Stock/ETF symbols — enabled
 STOCK_WATCHLIST = ["SPY", "QQQ", "NVDA", "TSLA", "META", "COIN", "MSTR", "MARA"]
 
@@ -205,7 +218,7 @@ POLYMARKET_PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY", "")  # Polygon EVM 
 POLYMARKET_MIN_EDGE = 0.04         # Minimum 4% edge to trade
 POLYMARKET_MIN_VOLUME = 5_000      # Minimum $5k/24h market volume
 POLYMARKET_MAX_POSITION_USD = 200  # Max per prediction market position
-POLYMARKET_SCAN_INTERVAL_SEC = 120 # Scan Polymarket every 2 minutes
+POLYMARKET_SCAN_INTERVAL_SEC = 300 # Scan Polymarket every 5 minutes (was 2 min — too frequent)
 
 # ─── Compounding ──────────────────────────────────────────────────────────────
 COMPOUND_ALL_PROFITS = True        # Always reinvest — never withdraw

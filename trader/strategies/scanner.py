@@ -23,6 +23,8 @@ class MarketScanner:
     def __init__(self):
         self.engine = EnsembleSignal()
         self._symbol_map = {}   # coin_id → symbol (BTC, ETH, ...)
+        from strategies.forex_strategy import ForexAnalyzer
+        self._forex_analyzer = ForexAnalyzer()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Public API
@@ -142,11 +144,21 @@ class MarketScanner:
         return self.engine.analyze(df, asset_id=coin_id, market="crypto", symbol=symbol)
 
     def _analyze_forex(self, pair: str) -> Optional[TradeSignal]:
-        df = df_mod.get_forex_ohlcv(pair, limit=config.OHLCV_CANDLES)
-        if df.empty or len(df) < 30:
+        """
+        Institutional-quality forex analysis using the dedicated ForexAnalyzer:
+        multi-timeframe (1h entry + 4h trend), ATR stops, ADX trend filter,
+        session awareness, and Stochastic/RSI/MACD/Pivot confluence.
+        """
+        df_1h = df_mod.get_forex_ohlcv(pair, limit=200)
+        if df_1h.empty or len(df_1h) < 50:
             return None
-        symbol = pair.replace("/", "")
-        return self.engine.analyze(df, asset_id=pair, market="forex", symbol=symbol)
+
+        df_4h = df_mod.get_forex_ohlcv_4h(pair)  # optional; None is fine
+
+        sig = self._forex_analyzer.analyze(pair, df_1h, df_4h if not df_4h.empty else None)
+        if sig is None:
+            return None
+        return sig.to_trade_signal()
 
     def _analyze_stock(self, symbol: str) -> Optional[TradeSignal]:
         df = df_mod.get_stock_ohlcv(symbol, period="60d", interval="1h")
