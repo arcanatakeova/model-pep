@@ -42,10 +42,11 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-# Load .env if available
+# Load .env — always resolve relative to this file so it works regardless of CWD
 try:
-    from dotenv import load_dotenv
-    load_dotenv()
+    from dotenv import load_dotenv as _load_dotenv
+    import pathlib as _pathlib
+    _load_dotenv(_pathlib.Path(__file__).parent / ".env", override=True)
 except ImportError:
     pass
 
