@@ -144,23 +144,12 @@ class AITrader:
         self._cex_signals_cache = []    # Shared between CEX scan + futures swing scan
         self._cex_cache_lock = threading.Lock()  # Protects _cex_signals_cache cross-thread
         self._market_snapshot: dict = {}  # Latest market overview (BTC dom, sentiment)
+        self._wallet_balance_cache = (0.0, 0.0, 0.0, 0.0)  # sol, usdc, sol_usd, ts
 
-        # Load saved state — live mode preserves history; paper mode is always a fresh session
-        if live:
-            self.portfolio.load()
-            self._load_dex_positions()
-        else:
-            # Paper trading is session-based: always start clean at INITIAL_CAPITAL.
-            # Previous paper sessions are irrelevant — this prevents stale data bleeding in.
-            logger.info("Paper mode: starting fresh session at $%.0f (no history loaded)",
-                        config.INITIAL_CAPITAL)
-            # Wipe any leftover paper files so the dashboard shows a clean slate immediately
-            for fname in ("trades.json", "dex_positions.json", "equity_curve.json"):
-                try:
-                    os.unlink(fname)
-                except FileNotFoundError:
-                    pass
-            self.portfolio.save()   # Write clean $100k state right away
+        # Always load existing portfolio — NEVER delete trade history on startup.
+        # With real money, an accidental non-live restart must not wipe trade records.
+        self.portfolio.load()
+        self._load_dex_positions()
         self.risk_mgr.reset_daily_loss_tracker()
         # Write portfolio immediately so dashboard has data before cycle 1 finishes
         self.portfolio.save()
@@ -512,17 +501,17 @@ class AITrader:
                 for s in sorted(cex_cache_snapshot,
                                  key=lambda x: abs(x.score), reverse=True)[:20]
             ]
-            # Live wallet balances for dashboard (SOL + USDC)
-            wallet_sol     = 0.0
-            wallet_usdc    = 0.0
-            wallet_sol_usd = 0.0
-            if self.solana.is_connected:
+            # Live wallet balances for dashboard — cached 60s to avoid RPC rate limits
+            _sol, _usdc, _sol_usd, _cache_ts = self._wallet_balance_cache
+            if self.solana.is_connected and (time.time() - _cache_ts > 60):
                 try:
-                    wallet_sol     = self.solana.get_sol_balance()
-                    wallet_usdc    = self.solana.get_usdc_balance()
-                    wallet_sol_usd = self.solana.get_portfolio_value_usd()
+                    _sol     = self.solana.get_sol_balance()
+                    _usdc    = self.solana.get_usdc_balance()
+                    _sol_usd = self.solana.get_portfolio_value_usd()
+                    self._wallet_balance_cache = (_sol, _usdc, _sol_usd, time.time())
                 except Exception:
                     pass
+            wallet_sol, wallet_usdc, wallet_sol_usd = _sol, _usdc, _sol_usd
             state = {
                 "cycle": self._cycle,
                 "last_cycle_ts": time.time(),
@@ -889,10 +878,11 @@ class AITrader:
 
         liq_usd = pos.get("liquidity_usd", 0.0)
         if pos["chain"] == "solana" and self.solana.is_connected and "paper" not in pos.get("tx", ""):
-            sell_tx = self.solana.sell_token(pos["address"], proceeds,
-                                             liquidity_usd=liq_usd)
-            if sell_tx:
-                self.portfolio.cash += proceeds
+            sell_result = self.solana.sell_token(pos["address"], proceeds,
+                                                liquidity_usd=liq_usd)
+            if sell_result:
+                _sig, actual_usd = sell_result
+                self.portfolio.cash += actual_usd
             else:
                 # Sell failed — keep position open for retry next cycle
                 # DO NOT credit cash (token still in wallet) — avoids double-counting
@@ -947,11 +937,12 @@ class AITrader:
             liq_usd = pos.get("liquidity_usd", 0.0)
             if (pos["chain"] == "solana" and self.solana.is_connected
                     and "paper" not in pos.get("tx", "")):
-                tx = self.solana.sell_token_partial(pos["address"], fraction,
-                                                    liquidity_usd=liq_usd)
-                if not tx:
+                sell_result = self.solana.sell_token_partial(pos["address"], fraction,
+                                                             liquidity_usd=liq_usd)
+                if not sell_result:
                     return
-                self.portfolio.cash += proceeds
+                _sig, actual_usd = sell_result
+                self.portfolio.cash += actual_usd
             else:
                 self.portfolio.cash += proceeds
 
@@ -1102,7 +1093,8 @@ class AITrader:
     def _apply_dashboard_settings(self):
         """
         Read settings.json written by the dashboard and apply any changes.
-        Handles: live/paper mode toggle and paper account reset.
+        Live/paper toggle has been REMOVED — bot is always live with real SOL.
+        Only dashboard close commands are processed here; mode switching is gone.
         Called at the top of every cycle — fast (local file read only).
         """
         try:
@@ -1111,26 +1103,9 @@ class AITrader:
         except (FileNotFoundError, json.JSONDecodeError):
             return
 
-        # ── Live / paper mode toggle ──────────────────────────────────────
-        want_live = bool(settings.get("live_mode", self.live))
-        if want_live != self.live:
-            if want_live and not self.solana.is_connected:
-                logger.warning(
-                    "Dashboard requested LIVE mode but no Phantom wallet connected "
-                    "(PHANTOM_PRIVATE_KEY not set) — staying in paper mode")
-                # Write back false so dashboard shows the correct state
-                settings["live_mode"] = False
-                self._atomic_json("settings.json", settings)
-            else:
-                self.live = want_live
-                config.PAPER_TRADING = not want_live
-                logger.info(
-                    "Mode switched to %s by dashboard", "LIVE" if want_live else "PAPER")
-
-        # ── Paper account reset ───────────────────────────────────────────
-        if settings.get("reset_paper", False) and not self.live:
-            self._reset_paper_account()
-            settings["reset_paper"] = False
+        # Ensure settings.json always reflects live mode (in case stale file exists)
+        if not settings.get("live_mode", True):
+            settings["live_mode"] = True
             self._atomic_json("settings.json", settings)
 
     def _reset_paper_account(self):

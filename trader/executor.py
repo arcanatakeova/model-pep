@@ -469,6 +469,11 @@ class TradeExecutor:
                 logger.error("Futures order failed for %s: %s", signal.symbol, e)
                 return None
 
+        # In live mode without a connected futures exchange, skip — never create fake
+        # leveraged positions that would corrupt cash accounting with real SOL in play.
+        if not config.PAPER_TRADING and self._futures_exchange is None:
+            return None
+
         # Deduct only margin + commission (NOT the full notional).
         # portfolio.open_position() deducts qty*price (notional) for longs — we temporarily
         # pre-fund that amount so its internal check passes, then the net deduction is correct.

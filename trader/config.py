@@ -27,7 +27,7 @@ FUTURES_SYMBOLS = [                       # USDT-M perpetual pairs to trade with
     "SOL/USDT:USDT",
 ]
 FUTURES_RISK_PCT = 0.01                   # 1% of equity at risk per futures trade
-FUTURES_DAILY_LOSS_LIMIT = 0.20           # 20% daily loss — bot always keeps trading and recovering
+FUTURES_DAILY_LOSS_LIMIT = 0.05           # 5% daily hard stop — protects real SOL from catastrophic loss
 # Maps (min_conviction_threshold, leverage_multiplier) — highest conviction first
 # BUG FIX: was (0.00, 2) — any signal got 2x. Now requires 0.40 minimum.
 LEVERAGE_BY_CONVICTION = [
@@ -217,12 +217,12 @@ PHANTOM_PRIVATE_KEY = os.getenv("PHANTOM_PRIVATE_KEY", "")
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 SOL_TRADE_SIZE_USD        = 50.0    # Default Solana trade size in USD
 SOL_MAX_SLIPPAGE_BPS      = 300     # 3% hard cap on slippage (dynamic calc stays under this)
-SOL_PRIORITY_FEE_LAMPORTS = 10_000  # Fallback priority fee (lamports) when Helius unavailable
+SOL_PRIORITY_FEE_LAMPORTS = 100_000  # Fallback priority fee (lamports) when Helius unavailable
 
 # ─── Jito MEV Bundle Protection ───────────────────────────────────────────────
 # Jito routes transactions through the block engine to prevent sandwich attacks.
 # The tip is paid in SOL to a random Jito tip account alongside the swap tx.
-JITO_TIP_LAMPORTS = 100_000        # 0.0001 SOL tip — competitive for most conditions
+JITO_TIP_LAMPORTS = 1_000_000      # 0.001 SOL tip — market-rate to avoid MEV sandwiching
 
 # ─── Polymarket ───────────────────────────────────────────────────────────────
 POLYMARKET_PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY", "")  # Polygon EVM key

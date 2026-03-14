@@ -153,7 +153,9 @@ class TokenSafetyChecker:
         # This check runs first. Nothing overrides it.
         sell_passed = sell_sim.get("passed")
         round_trip_tax = sell_sim.get("round_trip_tax_pct")
-        if sell_passed is False and config.BLOCK_HONEYPOTS:
+        # Fail SAFE: block if sell simulation returned False (honeypot) OR None (API timeout).
+        # Only allow if sell explicitly passed (True). Never trade when uncertain.
+        if sell_passed is not True and config.BLOCK_HONEYPOTS:
             report = TokenSafetyReport(
                 mint_address=mint_address,
                 safety_score=0.0,

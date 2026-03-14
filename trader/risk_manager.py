@@ -27,7 +27,7 @@ class RiskManager:
     def __init__(self, portfolio):
         self.portfolio = portfolio
         self._daily_loss_start_equity: Optional[float] = None
-        self._daily_loss_limit = 0.20    # 20% — bot always keeps trading and recovering
+        self._daily_loss_limit = 0.05    # 5% daily hard stop — protects real capital
         self._max_drawdown_limit = 0.50  # 50% max drawdown hard stop (last resort only)
 
     # ─────────────────────────────────────────────────────────────────────────

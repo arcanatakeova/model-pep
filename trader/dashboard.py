@@ -502,6 +502,13 @@ def render():
         st.markdown(f'<div class="sec-hdr">Phantom Wallet</div>', unsafe_allow_html=True)
         if wallet_ok:
             sol_color = TV["green"] if wallet_sol >= 0.05 else TV["yellow"]
+            # Build USDC cell separately to avoid backslash-in-f-string syntax error
+            usdc_cell = (
+                f'<div><div style="color:{TV["text2"]};font-size:9.5px;text-transform:uppercase;'
+                f'letter-spacing:1px;">USDC</div>'
+                f'<div style="color:{TV["text"]};font-size:15px;font-weight:800;">'
+                f'${wallet_usdc:,.2f}</div></div>'
+            ) if wallet_usdc > 0.01 else ""
             st.markdown(
                 f'<div class="wallet-card">'
                 f'<div style="display:flex;justify-content:space-between;align-items:center;">'
@@ -517,7 +524,7 @@ def render():
                 f'letter-spacing:1px;">USD VALUE</div>'
                 f'<div style="color:{TV["text"]};font-size:15px;font-weight:800;">'
                 f'${wallet_sol_usd:,.2f}</div></div>'
-                f'{"<div><div style=\"color:" + TV["text2"] + ";font-size:9.5px;text-transform:uppercase;letter-spacing:1px;\">USDC</div><div style=\"color:" + TV["text"] + ";font-size:15px;font-weight:800;\">$" + f"{wallet_usdc:,.2f}" + "</div></div>" if wallet_usdc > 0.01 else ""}'
+                f'{usdc_cell}'
                 f'</div>'
                 f'<div style="color:{TV["text2"]};font-size:10px;margin-top:6px;">'
                 f'Solana Mainnet · Jupiter + Jito MEV</div>'

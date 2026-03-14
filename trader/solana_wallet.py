@@ -53,7 +53,7 @@ USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 
 # Safety constants
-MIN_SOL_RESERVE_LAMPORTS = 10_000_000   # 0.01 SOL — keep for fees
+MIN_SOL_RESERVE_LAMPORTS = 50_000_000   # 0.05 SOL — reserve for fees + tip headroom
 QUOTE_MAX_AGE_SECS       = 5            # Refetch quote if older than this
 MAX_PRICE_IMPACT_PCT     = 4.0          # Reject swaps with > 4% impact
 CONFIRMATION_TIMEOUT     = 60           # Seconds to wait for finalized
@@ -234,14 +234,16 @@ class SolanaWallet:
 
     def sell_token(self, token_mint: str, est_value_usd: float,
                    liquidity_usd: float = 0.0,
-                   slippage_bps: int = None) -> Optional[str]:
+                   slippage_bps: int = None) -> Optional[tuple]:
         """
-        Sell entire on-chain token balance back to USDC.
-        Uses actual on-chain balance (not a stored estimate).
+        Sell entire on-chain token balance back to SOL.
+        Returns (tx_signature, actual_usd_received) or None on failure.
+        actual_usd_received is computed from real SOL output × current SOL price,
+        so portfolio.cash is always credited with what the wallet actually received.
         """
         if not self.is_connected:
             logger.info("PAPER SELL: %s est=$%.2f", token_mint[:12], est_value_usd)
-            return f"paper_sell_{int(time.time())}"
+            return f"paper_sell_{int(time.time())}", est_value_usd
 
         if not self._check_lamport_balance():
             logger.error("Insufficient SOL for fees — skipping sell of %s", token_mint[:12])
@@ -267,24 +269,26 @@ class SolanaWallet:
         )
         if result.success:
             out_sol = result.out_amount / 1e9
-            logger.info("SELL %s → %.4f SOL impact=%.2f%% | tx=%s",
-                        token_mint[:12], out_sol, result.price_impact_pct,
-                        result.signature[:16])
-            return result.signature
+            sol_price = self._get_sol_price()
+            actual_usd = out_sol * sol_price if sol_price > 0 else est_value_usd
+            logger.info("SELL %s → %.4f SOL ($%.2f) impact=%.2f%% | tx=%s",
+                        token_mint[:12], out_sol, actual_usd,
+                        result.price_impact_pct, result.signature[:16])
+            return result.signature, actual_usd
         else:
             logger.error("SELL FAILED %s: %s", token_mint[:12], result.error)
             return None
 
     def sell_token_partial(self, token_mint: str, fraction: float,
                            liquidity_usd: float = 0.0,
-                           slippage_bps: int = None) -> Optional[str]:
+                           slippage_bps: int = None) -> Optional[tuple]:
         """
         Sell a fraction (0.0-1.0) of the on-chain token balance.
-        Used for partial profit-taking tiers.
+        Returns (tx_signature, actual_usd_received) or None on failure.
         """
         if not self.is_connected:
             logger.info("PAPER PARTIAL SELL: %s %.0f%%", token_mint[:12], fraction * 100)
-            return f"paper_partial_sell_{int(time.time())}"
+            return f"paper_partial_sell_{int(time.time())}", 0.0
 
         if not self._check_lamport_balance():
             return None
@@ -312,10 +316,12 @@ class SolanaWallet:
         )
         if result.success:
             out_sol = result.out_amount / 1e9
-            logger.info("PARTIAL SELL %s %.0f%% → %.4f SOL | tx=%s",
-                        token_mint[:12], fraction * 100, out_sol,
+            sol_price = self._get_sol_price()
+            actual_usd = out_sol * sol_price if sol_price > 0 else 0.0
+            logger.info("PARTIAL SELL %s %.0f%% → %.4f SOL ($%.2f) | tx=%s",
+                        token_mint[:12], fraction * 100, out_sol, actual_usd,
                         result.signature[:16])
-            return result.signature
+            return result.signature, actual_usd
         else:
             logger.error("PARTIAL SELL FAILED %s: %s", token_mint[:12], result.error)
             return None
@@ -390,6 +396,28 @@ class SolanaWallet:
         confirmed = self._wait_finalized(sig)
         if not confirmed:
             if _retry == 0:
+                # Before retrying, check if the original TX landed on-chain
+                # (it may just be slow). Retrying without checking risks a double-spend
+                # if TX1 was already accepted and TX2 also executes.
+                try:
+                    from solders.signature import Signature as _Sig
+                    st = self._client.get_signature_statuses(
+                        [_Sig.from_string(sig)])
+                    if st.value and st.value[0] is not None:
+                        logger.warning(
+                            "TX on-chain but slow — waiting 30s more: %s", sig[:16])
+                        if self._wait_finalized(sig, timeout=30):
+                            return SwapResult(success=True, signature=sig,
+                                              out_amount=out_amount,
+                                              price_impact_pct=price_impact,
+                                              actual_slippage_bps=slippage_bps)
+                        logger.error("TX still unfinalized after extra 30s: %s",
+                                     sig[:16])
+                        return SwapResult(success=False,
+                                          error=f"Slow TX not finalized: {sig[:16]}")
+                except Exception:
+                    pass
+                # TX not found on-chain — safe to retry with higher fee
                 logger.warning("TX not finalized in %ds — retrying with 2× fee: %s",
                                CONFIRMATION_TIMEOUT, sig[:16])
                 return self._execute_swap_raw(input_mint, output_mint,
