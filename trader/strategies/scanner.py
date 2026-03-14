@@ -127,6 +127,12 @@ class MarketScanner:
         CC_OVERRIDES = {
             "avalanche-2": "AVAX", "matic-network": "MATIC", "binancecoin": "BNB",
             "shiba-inu": "SHIB", "wrapped-bitcoin": "WBTC", "staked-ether": "STETH",
+            "the-open-network": "TON", "injective-protocol": "INJ",
+            "uniswap": "UNI", "chainlink": "LINK", "arbitrum": "ARB",
+            "optimism": "OP", "sui": "SUI", "aptos": "APT",
+            "near": "NEAR", "polkadot": "DOT", "cosmos": "ATOM",
+            "internet-computer": "ICP", "hedera": "HBAR",
+            "render-token": "RNDR", "pepe": "PEPE", "dogecoin": "DOGE",
         }
         symbol = CC_OVERRIDES.get(coin_id, symbol)
         df = df_mod.get_crypto_ohlcv_cc(symbol, limit=config.OHLCV_CANDLES)

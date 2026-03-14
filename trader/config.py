@@ -14,7 +14,7 @@ MAX_OPEN_POSITIONS = 20       # Maximum concurrent positions
 STOP_LOSS_PCT = 0.03          # 3% stop loss
 TAKE_PROFIT_PCT = 0.06        # 6% take profit (2:1 R/R ratio)
 RISK_PER_TRADE_PCT = 0.02     # Risk 2% of portfolio per trade (Kelly-based)
-MIN_SIGNAL_STRENGTH = 0.30    # Minimum ensemble score to trigger trade (lower = more trades)
+MIN_SIGNAL_STRENGTH = 0.22    # Minimum ensemble score to trigger trade (lower = more trades)
 TRAILING_STOP_PCT = 0.025     # 2.5% trailing stop
 
 # ─── Leverage / Futures (Binance USDT-M Perpetuals) ──────────────────────────
@@ -60,25 +60,32 @@ SCALP_CANDLE_INTERVAL = "5m"    # 5-minute candle timeframe
 SCALP_CANDLES = 50              # Number of 5m candles to fetch
 SCALP_RSI_OVERSOLD = 25         # Aggressive RSI threshold for scalp buys
 SCALP_RSI_OVERBOUGHT = 75       # Aggressive RSI threshold for scalp sells
-SCALP_MIN_SCORE = 0.40          # Minimum score to fire a scalp trade
-SCALP_SYMBOLS = ["BTC", "ETH", "SOL"]  # Symbols to scalp
+SCALP_MIN_SCORE = 0.28          # Minimum score to fire a scalp trade
+SCALP_SYMBOLS = ["BTC", "ETH", "SOL", "LINK", "AVAX", "MATIC"]  # Symbols to scalp
 
 # ─── Market Coverage ──────────────────────────────────────────────────────────
-CRYPTO_TOP_N = 5              # Only top few coins (SOL focus, CEX scanner minimal)
-CRYPTO_MIN_VOLUME_USD = 1_000_000   # Minimum 24h volume to consider
+CRYPTO_TOP_N = 30             # Scan top 30 coins — broader coverage, more signals
+CRYPTO_MIN_VOLUME_USD = 5_000_000   # Minimum $5M 24h volume (filters noise)
 
-# Target crypto assets (overrides top-N if set)
+# Target crypto assets (always scanned, merged with top-N)
 CRYPTO_WATCHLIST = [
-    "solana",
     "bitcoin",
     "ethereum",
+    "solana",
+    "chainlink",
+    "avalanche-2",
+    "the-open-network",
+    "sui",
+    "injective-protocol",
+    "arbitrum",
+    "optimism",
 ]
 
 # Major forex pairs — enabled for pro-trader coverage
-FOREX_PAIRS = ["EUR/USD", "GBP/USD"]
+FOREX_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD"]
 
 # Stock/ETF symbols — enabled
-STOCK_WATCHLIST = ["SPY", "QQQ", "NVDA"]
+STOCK_WATCHLIST = ["SPY", "QQQ", "NVDA", "TSLA", "META", "COIN", "MSTR", "MARA"]
 
 # ─── Strategy Weights ─────────────────────────────────────────────────────────
 STRATEGY_WEIGHTS = {
@@ -182,8 +189,8 @@ MEV_MAX_SLIPPAGE_BPS = 100         # Tighter slippage (1%) for MEV protection
 MEV_PRIORITY_FEE_LAMPORTS = 50000  # Higher priority fee to front-run sandwich
 
 # ─── Concentration Limits ───────────────────────────────────────────────────
-MAX_DEX_POSITIONS = 5              # Max concurrent DEX/memecoin positions
-MAX_SAME_DEX_POSITIONS = 3         # Max positions on same DEX (e.g., Raydium)
+MAX_DEX_POSITIONS = 8              # Max concurrent DEX/memecoin positions
+MAX_SAME_DEX_POSITIONS = 6         # Max positions on same DEX (e.g., Raydium/Pumpswap)
 MIN_LIQUIDITY_RATIO = 0.10         # Position must be < 10% of pool liquidity
 
 # ─── Solana / Phantom Wallet ──────────────────────────────────────────────────
