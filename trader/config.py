@@ -5,7 +5,7 @@ All trading parameters, API endpoints, and strategy weights.
 import os
 
 # ─── Trading Mode ─────────────────────────────────────────────────────────────
-PAPER_TRADING = True          # Set False to enable live trading (requires API keys)
+PAPER_TRADING = False         # Live mode by default — real Solana DEX trades via Phantom
 INITIAL_CAPITAL = 100_000.0   # Starting capital in USD (overridden by wallet balance)
 
 # ─── Risk Management ──────────────────────────────────────────────────────────

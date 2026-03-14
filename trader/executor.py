@@ -201,6 +201,10 @@ class TradeExecutor:
             logger.debug("Position size too small ($%.2f) for %s", size_usd, signal.asset_id)
             return None
 
+        # In live mode without a connected exchange, skip CEX trades — no fake positions
+        if not config.PAPER_TRADING and self._exchange is None:
+            return None
+
         fill_price = self._fill_price(price, "buy", signal.market)
         qty        = self.risk.qty_from_usd(size_usd, fill_price)
         commission  = size_usd * COMMISSION
@@ -223,6 +227,10 @@ class TradeExecutor:
 
     def _open_short(self, signal: TradeSignal) -> Optional[dict]:
         """Open a short position (paper only)."""
+        # In live mode without a connected exchange, skip — no fake CEX positions
+        if not config.PAPER_TRADING and self._exchange is None:
+            return None
+
         allowed, reason = self.risk.can_open_position(
             signal.asset_id, signal.score, signal.market)
         if not allowed:
@@ -245,6 +253,12 @@ class TradeExecutor:
         fill_price = self._fill_price(price, "sell", signal.market)
         qty        = self.risk.qty_from_usd(size_usd, fill_price)
         commission = size_usd * COMMISSION
+
+        # Pre-flight cash check: need at least commission
+        if commission > self.portfolio.cash:
+            logger.debug("Insufficient cash for short commission: need $%.4f, have $%.2f",
+                         commission, self.portfolio.cash)
+            return None
 
         self.portfolio.cash -= commission   # Deduct commission for short entry
         pos = self.portfolio.open_position(
@@ -302,6 +316,8 @@ class TradeExecutor:
         the 0.1% crypto slippage — otherwise stops are triggered incorrectly
         and position sizing is off by an order of magnitude in pips.
         """
+        if market_price <= 0:
+            return 0.0
         if config.PAPER_TRADING:
             # Forex: use typical pip spread (0.005% ≈ 0.5 pip on EUR/USD at 1.10)
             slip = 0.00005 if market == "forex" else SLIPPAGE

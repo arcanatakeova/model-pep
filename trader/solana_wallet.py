@@ -216,14 +216,15 @@ class SolanaWallet:
             slippage_bps = self._compute_slippage_bps(
                 trade_usd=usdc_amount, liquidity_usd=liquidity_usd)
 
+        # Use SOL as input (native, no USDC required) — Jupiter handles SOL→token directly
         result = self._execute_swap(
-            input_mint=USDC_MINT,
+            input_mint=SOL_MINT,
             output_mint=token_mint,
             input_amount_usd=usdc_amount,
             slippage_bps=slippage_bps,
         )
         if result.success:
-            logger.info("BUY %s $%.2f slippage=%dbps impact=%.2f%% | tx=%s",
+            logger.info("BUY %s $%.2f SOL slippage=%dbps impact=%.2f%% | tx=%s",
                         token_mint[:12], usdc_amount, slippage_bps,
                         result.price_impact_pct, result.signature[:16])
             return result.signature
@@ -257,16 +258,17 @@ class SolanaWallet:
         # Selling is riskier (slippage asymmetry) — add 50bps buffer
         slippage_bps = min(slippage_bps + 50, config.SOL_MAX_SLIPPAGE_BPS)
 
+        # Sell token back to SOL (native) — no USDC required
         result = self._execute_swap_raw(
             input_mint=token_mint,
-            output_mint=USDC_MINT,
+            output_mint=SOL_MINT,
             raw_input_amount=raw_amount,
             slippage_bps=slippage_bps,
         )
         if result.success:
-            out_usdc = result.out_amount / 1e6
-            logger.info("SELL %s → $%.2f USDC impact=%.2f%% | tx=%s",
-                        token_mint[:12], out_usdc, result.price_impact_pct,
+            out_sol = result.out_amount / 1e9
+            logger.info("SELL %s → %.4f SOL impact=%.2f%% | tx=%s",
+                        token_mint[:12], out_sol, result.price_impact_pct,
                         result.signature[:16])
             return result.signature
         else:
@@ -301,16 +303,17 @@ class SolanaWallet:
                 trade_usd=0.0, liquidity_usd=liquidity_usd)
         slippage_bps = min(slippage_bps + 50, config.SOL_MAX_SLIPPAGE_BPS)
 
+        # Sell token back to SOL (native)
         result = self._execute_swap_raw(
             input_mint=token_mint,
-            output_mint=USDC_MINT,
+            output_mint=SOL_MINT,
             raw_input_amount=sell_raw,
             slippage_bps=slippage_bps,
         )
         if result.success:
-            out_usdc = result.out_amount / 1e6
-            logger.info("PARTIAL SELL %s %.0f%% → $%.2f USDC | tx=%s",
-                        token_mint[:12], fraction * 100, out_usdc,
+            out_sol = result.out_amount / 1e9
+            logger.info("PARTIAL SELL %s %.0f%% → %.4f SOL | tx=%s",
+                        token_mint[:12], fraction * 100, out_sol,
                         result.signature[:16])
             return result.signature
         else:

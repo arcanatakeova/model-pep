@@ -37,6 +37,7 @@ import logging.handlers
 import os
 import signal
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -99,7 +100,7 @@ class AITrader:
     Deposits money into Phantom → bot runs forever compounding.
     """
 
-    def __init__(self, live: bool = False):
+    def __init__(self, live: bool = True):
         self.live    = live
         self.running = False
         config.PAPER_TRADING = not live
@@ -141,6 +142,7 @@ class AITrader:
         self._equity_curve   = self._load_equity_curve()  # Persist chart history across restarts
         self._dex_positions: dict = {}  # addr → {buy_price, qty, chain, symbol}
         self._cex_signals_cache = []    # Shared between CEX scan + futures swing scan
+        self._cex_cache_lock = threading.Lock()  # Protects _cex_signals_cache cross-thread
         self._market_snapshot: dict = {}  # Latest market overview (BTC dom, sentiment)
 
         # Load saved state — live mode preserves history; paper mode is always a fresh session
@@ -166,17 +168,21 @@ class AITrader:
         # Initialise settings.json if missing (preserve existing settings on restart)
         if not os.path.exists("settings.json"):
             self._atomic_json("settings.json", {
-                "live_mode": live,
+                "live_mode": True,   # Always default to live — real money, real trades
                 "reset_paper": False,
             })
 
-        # Sync initial capital with Phantom wallet if connected
-        if self.solana.is_connected and live:
-            wallet_value = self.solana.get_portfolio_value_usd()
-            if wallet_value > 10:
-                self.portfolio.cash = wallet_value
-                self.portfolio.initial_capital = wallet_value
-                logger.info("Phantom wallet synced: $%.2f", wallet_value)
+        # Sync initial capital with Phantom wallet on first-ever startup only.
+        # Do NOT overwrite cash on restarts — portfolio already tracks open positions.
+        _fresh_portfolio = not os.path.exists(config.TRADE_LOG_FILE)
+        if self.solana.is_connected and live and _fresh_portfolio:
+            sol_bal   = self.solana.get_sol_balance()
+            sol_usd   = self.solana.get_portfolio_value_usd()
+            if sol_usd > 0.50:   # At least $0.50 SOL to trade
+                self.portfolio.cash = sol_usd        # Track in USD terms
+                self.portfolio.initial_capital = sol_usd
+                logger.info("Phantom wallet synced (fresh): SOL=%.4f ($%.2f)",
+                            sol_bal, sol_usd)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Main Loop
@@ -364,7 +370,8 @@ class AITrader:
         try:
             signals = self.cex_scanner.scan_all(max_workers=20)
             # Cache for futures swing scan + grid trader (avoids double API call)
-            self._cex_signals_cache = signals
+            with self._cex_cache_lock:
+                self._cex_signals_cache = signals
             actionable = [s for s in signals if s.signal != "HOLD"]
             logger.info("CEX scan: %d signals (%d actionable)",
                         len(signals), len(actionable))
@@ -419,7 +426,8 @@ class AITrader:
         """
         try:
             # Reuse signals from CEX scan (set in _run_cex_scan this cycle)
-            signals = self._cex_signals_cache
+            with self._cex_cache_lock:
+                signals = list(self._cex_signals_cache)
             if not signals:
                 return
             # Filter for crypto only and high conviction
@@ -486,7 +494,9 @@ class AITrader:
                 self.portfolio.peak_equity = true_equity
             daily_pnl = round(true_equity - self._day_start_eq, 2)
             perf = self.portfolio.performance_summary()
-            # Build signal table from latest CEX scan cache
+            # Build signal table from latest CEX scan cache (thread-safe snapshot)
+            with self._cex_cache_lock:
+                cex_cache_snapshot = list(self._cex_signals_cache)
             signal_table = [
                 {
                     "symbol": s.symbol,
@@ -499,9 +509,20 @@ class AITrader:
                     "trend": s.trend_direction,
                     "components": {k: round(v, 3) for k, v in s.component_scores.items()},
                 }
-                for s in sorted(self._cex_signals_cache,
+                for s in sorted(cex_cache_snapshot,
                                  key=lambda x: abs(x.score), reverse=True)[:20]
             ]
+            # Live wallet balances for dashboard (SOL + USDC)
+            wallet_sol     = 0.0
+            wallet_usdc    = 0.0
+            wallet_sol_usd = 0.0
+            if self.solana.is_connected:
+                try:
+                    wallet_sol     = self.solana.get_sol_balance()
+                    wallet_usdc    = self.solana.get_usdc_balance()
+                    wallet_sol_usd = self.solana.get_portfolio_value_usd()
+                except Exception:
+                    pass
             state = {
                 "cycle": self._cycle,
                 "last_cycle_ts": time.time(),
@@ -520,8 +541,11 @@ class AITrader:
                 "peak_equity": round(self.portfolio.peak_equity, 2),
                 "total_trades": len(self.portfolio.closed_trades),
                 # Solana wallet status (shown in dashboard mode control panel)
-                "wallet_connected": self.solana.is_connected,
-                "wallet_address":   str(self.solana.pubkey) if self.solana.is_connected else "",
+                "wallet_connected":  self.solana.is_connected,
+                "wallet_address":    str(self.solana.pubkey) if self.solana.is_connected else "",
+                "wallet_sol":        round(wallet_sol,     4),
+                "wallet_usdc":       round(wallet_usdc,    2),
+                "wallet_sol_usd":    round(wallet_sol_usd, 2),
                 # Performance stats
                 "win_rate_pct": perf.get("win_rate_pct", 0),
                 "profit_factor": perf.get("profit_factor", 0),
@@ -706,12 +730,12 @@ class AITrader:
                                self.portfolio.cash, size_usd)
                 return
 
-            # ── Live wallet: verify USDC balance before attempting swap ──────
+            # ── Live wallet: verify SOL balance before attempting swap ───────
             if token.chain_id == "solana" and self.solana.is_connected:
-                usdc_bal = self.solana.get_usdc_balance()
-                if usdc_bal < size_usd * 0.99:
-                    logger.warning("USDC balance $%.2f insufficient for $%.2f trade — skipping",
-                                   usdc_bal, size_usd)
+                sol_bal_usd = self.solana.get_portfolio_value_usd()
+                if sol_bal_usd < size_usd * 1.05:   # Need trade size + ~5% for fees
+                    logger.warning("SOL balance $%.2f insufficient for $%.2f trade — skipping",
+                                   sol_bal_usd, size_usd)
                     return
 
             safety_score = safety.safety_score if safety else 0.5

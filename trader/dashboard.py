@@ -359,7 +359,7 @@ def equity_chart(eq_curve: list, initial_cap: float, tf: str) -> go.Figure:
 
 # ── Main render ───────────────────────────────────────────────────────────────
 
-REFRESH_SEC = 5
+REFRESH_SEC = 3
 
 
 def render():
@@ -408,8 +408,11 @@ def render():
     scale_f     = state.get("scale_factor", 1.0)
 
     # Solana wallet info from bot_state
-    wallet_ok   = state.get("wallet_connected", False)
-    wallet_addr = state.get("wallet_address", "")
+    wallet_ok      = state.get("wallet_connected", False)
+    wallet_addr    = state.get("wallet_address", "")
+    wallet_sol     = state.get("wallet_sol",     0.0)
+    wallet_usdc    = state.get("wallet_usdc",    0.0)
+    wallet_sol_usd = state.get("wallet_sol_usd", 0.0)
     wallet_addr_short = f"{wallet_addr[:4]}...{wallet_addr[-4:]}" if len(wallet_addr) > 8 else wallet_addr
 
     wins      = [t for t in all_closed if t.get("pnl_usd", 0) > 0]
@@ -426,15 +429,13 @@ def render():
     now_str = datetime.now().strftime("%H:%M:%S")
     age_c   = TV["green"] if age_sec < 60 else TV["yellow"] if age_sec < 120 else TV["red"]
 
-    if mode == "live":
-        mode_cls = "mode-live"
-        mode_txt = "● LIVE"
-    elif paused:
+    # Always live — no paper mode
+    if paused:
         mode_cls = "mode-paused"
         mode_txt = "⏸ PAUSED"
     else:
-        mode_cls = "mode-paper"
-        mode_txt = "◎ PAPER"
+        mode_cls = "mode-live"
+        mode_txt = "● LIVE"
 
     # ── Top bar ───────────────────────────────────────────────────────────────
     tb1, tb2, tb3 = st.columns([5, 3, 1])
@@ -447,12 +448,16 @@ def render():
             f'<span style="color:{TV["text2"]};font-size:11px;">{"📡 WS" if ws_ok else "🌐 REST"}</span>'
             f'</div>', unsafe_allow_html=True)
     with tb2:
+        if wallet_ok:
+            sol_disp = f"{wallet_sol:.4f} SOL (${wallet_sol_usd:,.2f})"
+        else:
+            sol_disp = "○ No Wallet"
         st.markdown(
             f'<div style="padding:10px 4px 4px 4px;text-align:right;'
             f'color:{TV["text2"]};font-size:11.5px;">'
-            f'🕐 {now_str} UTC &nbsp;·&nbsp; Solana: '
+            f'🕐 {now_str} UTC &nbsp;·&nbsp; '
             f'<span style="color:{TV["green"] if wallet_ok else TV["red"]};">'
-            f'{"● " + wallet_addr_short if wallet_ok else "○ No Wallet"}'
+            f'{"● " + wallet_addr_short + " · " + sol_disp if wallet_ok else sol_disp}'
             f'</span></div>', unsafe_allow_html=True)
     with tb3:
         if st.button("⟳", help="Refresh", use_container_width=True):
@@ -460,9 +465,12 @@ def render():
 
     # ── KPI strip ─────────────────────────────────────────────────────────────
     k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
+    # Use wallet SOL value as primary equity if wallet is connected
+    display_equity = wallet_sol_usd if (wallet_ok and wallet_sol_usd > 0) else equity
+    wallet_label   = f"Wallet (SOL)" if wallet_ok else "Portfolio"
+    wallet_sub     = f"{wallet_sol:.4f} SOL" if wallet_ok else f"${equity:,.2f} tracked"
     kpis = [
-        (k1, kpi_html("Portfolio",    f"${equity:,.2f}",
-                      f"{'+' if total_ret>=0 else ''}{total_ret:.2f}% total", total_ret >= 0)),
+        (k1, kpi_html(wallet_label,   f"${display_equity:,.2f}", wallet_sub, True)),
         (k2, kpi_html("Today P&L",    fmt_usd(daily_pnl, True),
                       f"{'+' if daily_pct>=0 else ''}{daily_pct:.2f}%", daily_pnl >= 0)),
         (k3, kpi_html("Win Rate",     f"{wr:.1f}%",
@@ -490,51 +498,45 @@ def render():
     # ─────────────────────────────────────────────────────────────────────────
     with ctrl_col:
 
-        # ── TRADING MODE ──────────────────────────────────────────────────────
-        st.markdown(f'<div class="sec-hdr">Trading Mode</div>', unsafe_allow_html=True)
-        with st.container():
-            cur_live = settings.get("live_mode", mode == "live")
-
-            # Warning if no wallet
-            if not wallet_ok:
+        # ── PHANTOM WALLET ────────────────────────────────────────────────────
+        st.markdown(f'<div class="sec-hdr">Phantom Wallet</div>', unsafe_allow_html=True)
+        if wallet_ok:
+            sol_color = TV["green"] if wallet_sol >= 0.05 else TV["yellow"]
+            st.markdown(
+                f'<div class="wallet-card">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;">'
+                f'<span style="color:{TV["green"]};font-size:12px;font-weight:700;">● LIVE</span>'
+                f'<span style="color:{TV["text2"]};font-size:10.5px;">{wallet_addr_short}</span>'
+                f'</div>'
+                f'<div style="display:flex;gap:12px;margin-top:8px;">'
+                f'<div><div style="color:{TV["text2"]};font-size:9.5px;text-transform:uppercase;'
+                f'letter-spacing:1px;">SOL</div>'
+                f'<div style="color:{sol_color};font-size:15px;font-weight:800;">'
+                f'{wallet_sol:.4f}</div></div>'
+                f'<div><div style="color:{TV["text2"]};font-size:9.5px;text-transform:uppercase;'
+                f'letter-spacing:1px;">USD VALUE</div>'
+                f'<div style="color:{TV["text"]};font-size:15px;font-weight:800;">'
+                f'${wallet_sol_usd:,.2f}</div></div>'
+                f'{"<div><div style=\"color:" + TV["text2"] + ";font-size:9.5px;text-transform:uppercase;letter-spacing:1px;\">USDC</div><div style=\"color:" + TV["text"] + ";font-size:15px;font-weight:800;\">$" + f"{wallet_usdc:,.2f}" + "</div></div>" if wallet_usdc > 0.01 else ""}'
+                f'</div>'
+                f'<div style="color:{TV["text2"]};font-size:10px;margin-top:6px;">'
+                f'Solana Mainnet · Jupiter + Jito MEV</div>'
+                f'</div>',
+                unsafe_allow_html=True)
+            if wallet_sol < 0.01:
                 st.markdown(
-                    f'<div style="background:{TV["yellow_dim"]};border:1px solid {TV["yellow"]}44;'
-                    f'border-radius:6px;padding:8px 10px;font-size:11.5px;color:{TV["yellow"]};">'
-                    f'⚠ Set PHANTOM_PRIVATE_KEY to enable live trading</div>',
+                    f'<div style="background:{TV["red_dim"]};border:1px solid {TV["red"]}44;'
+                    f'border-radius:6px;padding:8px 10px;font-size:11.5px;color:{TV["red"]};">'
+                    f'⚠ Low SOL — need ≥0.01 SOL for transaction fees</div>',
                     unsafe_allow_html=True)
-
-            new_live = st.toggle(
-                "🔴 Live Trading (Solana)",
-                value=cur_live,
-                disabled=(not wallet_ok and not cur_live),
-                key="live_toggle",
-                help="Switches between paper simulation and real Solana wallet execution",
-            )
-            if new_live != cur_live:
-                settings["live_mode"] = new_live
-                save_settings(settings)
-                st.rerun()
-
-            # Wallet status card
-            if wallet_ok:
-                st.markdown(
-                    f'<div class="wallet-card">'
-                    f'<div style="display:flex;justify-content:space-between;align-items:center;">'
-                    f'<span style="color:{TV["green"]};font-size:12px;font-weight:700;">● Connected</span>'
-                    f'<span style="color:{TV["text2"]};font-size:10.5px;">{wallet_addr_short}</span>'
-                    f'</div>'
-                    f'<div style="color:{TV["text2"]};font-size:10.5px;margin-top:4px;">'
-                    f'Solana Mainnet · Jupiter DEX</div>'
-                    f'</div>',
-                    unsafe_allow_html=True)
-            else:
-                st.markdown(
-                    f'<div class="wallet-card">'
-                    f'<div style="color:{TV["red"]};font-size:12px;font-weight:700;">○ Not Connected</div>'
-                    f'<div style="color:{TV["text2"]};font-size:10.5px;margin-top:4px;">'
-                    f'env PHANTOM_PRIVATE_KEY=...</div>'
-                    f'</div>',
-                    unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f'<div class="wallet-card">'
+                f'<div style="color:{TV["red"]};font-size:12px;font-weight:700;">○ Not Connected</div>'
+                f'<div style="color:{TV["text2"]};font-size:10.5px;margin-top:4px;">'
+                f'Set PHANTOM_PRIVATE_KEY in .env</div>'
+                f'</div>',
+                unsafe_allow_html=True)
 
         # ── CONTROLS ──────────────────────────────────────────────────────────
         st.markdown(f'<div class="sec-hdr">Controls</div>', unsafe_allow_html=True)
@@ -551,11 +553,8 @@ def render():
                     (TRADER_DIR / "PAUSED").touch()
                     st.rerun()
         with c2:
-            if not cur_live:
-                if st.button("↺ Reset Paper", use_container_width=True,
-                             help="Immediately wipe all paper trades and restart with $100k"):
-                    _reset_paper_now()
-                    st.rerun()
+            if st.button("⟳ Refresh", use_container_width=True, help="Force data refresh"):
+                st.rerun()
 
         # ── BOT STATUS ────────────────────────────────────────────────────────
         st.markdown(f'<div class="sec-hdr">Bot Status</div>', unsafe_allow_html=True)
