@@ -284,6 +284,7 @@ class Portfolio:
             "open_positions": self.open_positions,
             "closed_trades": self.closed_trades,
             "saved_at": datetime.now(timezone.utc).isoformat(),
+            "mode": "paper" if config.PAPER_TRADING else "live",
         }
         tmp = filepath + ".tmp"
         try:

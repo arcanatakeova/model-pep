@@ -146,32 +146,52 @@ class AITrader:
         self._market_snapshot: dict = {}  # Latest market overview (BTC dom, sentiment)
         self._wallet_balance_cache = (0.0, 0.0, 0.0, 0.0)  # sol, usdc, sol_usd, ts
 
-        # Always load existing portfolio — NEVER delete trade history on startup.
-        # With real money, an accidental non-live restart must not wipe trade records.
+        # Load existing portfolio — but if we're starting LIVE and the saved data
+        # was from a paper session, wipe it so fake money never pollutes real tracking.
+        _saved_mode = self._peek_saved_mode(config.TRADE_LOG_FILE)
+        _is_paper_data = (_saved_mode == "paper")
+
+        if live and _is_paper_data:
+            logger.warning(
+                "Saved portfolio was paper-trading data — wiping fake history "
+                "and starting fresh from Phantom wallet balance.")
+            for fname in (config.TRADE_LOG_FILE, "dex_positions.json", "equity_curve.json"):
+                try:
+                    os.unlink(fname)
+                except FileNotFoundError:
+                    pass
+            self._equity_curve = []
+
         self.portfolio.load()
         self._load_dex_positions()
         self.risk_mgr.reset_daily_loss_tracker()
-        # Write portfolio immediately so dashboard has data before cycle 1 finishes
-        self.portfolio.save()
 
-        # Initialise settings.json if missing (preserve existing settings on restart)
+        # Initialise settings.json if missing
         if not os.path.exists("settings.json"):
             self._atomic_json("settings.json", {
-                "live_mode": True,   # Always default to live — real money, real trades
+                "live_mode": True,
                 "reset_paper": False,
             })
 
-        # Sync initial capital with Phantom wallet on first-ever startup only.
-        # Do NOT overwrite cash on restarts — portfolio already tracks open positions.
-        _fresh_portfolio = not os.path.exists(config.TRADE_LOG_FILE)
-        if self.solana.is_connected and live and _fresh_portfolio:
-            sol_bal   = self.solana.get_sol_balance()
-            sol_usd   = self.solana.get_portfolio_value_usd()
-            if sol_usd > 0.50:   # At least $0.50 SOL to trade
-                self.portfolio.cash = sol_usd        # Track in USD terms
-                self.portfolio.initial_capital = sol_usd
-                logger.info("Phantom wallet synced (fresh): SOL=%.4f ($%.2f)",
-                            sol_bal, sol_usd)
+        # Sync capital with Phantom wallet whenever this is a fresh live start
+        # (no prior live trades.json) OR we just wiped paper data above.
+        _fresh_live = live and (not os.path.exists(config.TRADE_LOG_FILE) or _is_paper_data)
+        if self.solana.is_connected and _fresh_live:
+            try:
+                sol_bal = self.solana.get_sol_balance()
+                sol_usd = self.solana.get_portfolio_value_usd()
+                if sol_usd > 0.50:
+                    self.portfolio.cash            = sol_usd
+                    self.portfolio.initial_capital  = sol_usd
+                    self.portfolio.peak_equity      = sol_usd
+                    self._day_start_eq              = sol_usd
+                    logger.info("Phantom wallet synced: SOL=%.4f ($%.2f)", sol_bal, sol_usd)
+            except Exception as e:
+                logger.warning("Wallet sync failed: %s", e)
+
+        # Write portfolio immediately so dashboard has data before cycle 1 finishes
+        self.portfolio.save()
+        self._save_dex_positions()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Main Loop
@@ -1020,6 +1040,18 @@ class AITrader:
         self._save_equity_curve()
         self._print_report()
         logger.info("Trader stopped cleanly.")
+
+    @staticmethod
+    @staticmethod
+    def _peek_saved_mode(filepath: str) -> str:
+        """Return the 'mode' field from a saved portfolio file without fully loading it.
+        Returns 'paper', 'live', or '' if the file is missing or unreadable."""
+        try:
+            with open(filepath) as f:
+                data = json.load(f)
+            return data.get("mode", "")
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return ""
 
     @staticmethod
     def _atomic_json(path: str, data, indent: int = 0):
