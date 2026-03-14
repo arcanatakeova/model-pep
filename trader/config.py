@@ -18,11 +18,22 @@ MIN_SIGNAL_STRENGTH = 0.22    # Minimum ensemble score to trigger trade (lower =
 TRAILING_STOP_PCT = 0.025     # 2.5% trailing stop
 
 # ─── Disabled strategies (Solana DEX only) ────────────────────────────────────
-FUTURES_ENABLED     = False   # No Binance futures
-FUNDING_ARB_ENABLED = False   # No funding rate arb
-GRID_TRADING_ENABLED = False  # No grid trading
-SCALP_ENABLED       = False   # No CEX scalping
-FOREX_ENABLED       = False   # No forex
+FUTURES_ENABLED      = False   # No Binance futures
+FUNDING_ARB_ENABLED  = False   # No funding rate arb
+GRID_TRADING_ENABLED = False   # No grid trading
+SCALP_ENABLED        = False   # No CEX scalping
+FOREX_ENABLED        = False   # No forex (set once — do not override below)
+
+# ─── Futures / Leverage constants (safe stubs — FUTURES_ENABLED=False above) ──
+FUTURES_DAILY_LOSS_LIMIT = 0.05    # 5% daily hard stop if futures were ever re-enabled
+FUTURES_RISK_PCT         = 0.01    # 1% equity risk per futures trade
+MAX_LEVERAGE             = 3       # Conservative max leverage
+LEVERAGE_BY_CONVICTION   = [       # (min_conviction, leverage) pairs
+    (0.80, 3),
+    (0.60, 2),
+    (0.0,  1),
+]
+SCALP_INTERVAL_SEC       = 30      # Stub — scalping disabled
 
 # ─── Market Coverage ──────────────────────────────────────────────────────────
 CRYPTO_TOP_N = 30             # Scan top 30 coins — broader coverage, more signals
@@ -42,12 +53,11 @@ CRYPTO_WATCHLIST = [
     "optimism",
 ]
 
-# Major forex pairs — enabled for pro-trader coverage
+# Major forex pairs (kept for reference, not traded — FOREX_ENABLED=False above)
 FOREX_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD"]
 
-# ─── Forex Strategy (Professional Engine) ─────────────────────────────────────
-FOREX_ENABLED        = True
-FOREX_SESSION_FILTER = True   # Only trade during active London/NY/Tokyo windows
+# ─── Forex Strategy parameters (stubs — FOREX_ENABLED=False) ─────────────────
+FOREX_SESSION_FILTER = False  # Disabled
 FOREX_MIN_ADX        = 20     # Skip ranging markets (ADX < 20 = no clear trend)
 FOREX_MIN_SCORE      = 0.35   # Min signal score (higher bar than crypto 0.22)
 FOREX_ATR_STOP_MULTIPLIER = 1.5  # Stop = 1.5× ATR from entry

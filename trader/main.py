@@ -189,6 +189,9 @@ class AITrader:
                     self.portfolio.initial_capital  = sol_usd
                     self.portfolio.peak_equity      = sol_usd
                     self._day_start_eq              = sol_usd
+                    # Reset daily loss tracker AFTER wallet sync so the baseline
+                    # is the real SOL balance — not the fake $100k config default.
+                    self.risk_mgr.reset_daily_loss_tracker()
                     logger.info("Phantom wallet synced: SOL=%.4f ($%.2f)", sol_bal, sol_usd)
             except Exception as e:
                 logger.warning("Wallet sync failed: %s", e)
@@ -931,8 +934,7 @@ class AITrader:
             self._dex_positions.pop(addr, None)
 
     def _close_dex_position(self, pair_addr: str, pos: dict, current_price: float, reason: str) -> bool:
-        """Close a DEX position. Returns False if the on-chain sell failed (position stays open)."""
-        """Close a DEX position (remaining fraction only)."""
+        """Close a DEX position (remaining fraction only). Returns False if on-chain sell failed."""
         entry     = pos["entry_price"]
         remaining = pos.get("remaining_fraction", 1.0)
         size      = pos["size_usd"] * remaining
@@ -955,7 +957,7 @@ class AITrader:
                 # DO NOT credit cash (token still in wallet) — avoids double-counting
                 logger.error("SELL FAILED %s — keeping position open for retry next cycle",
                              pos["symbol"])
-                return   # Caller must NOT remove this position from _dex_positions
+                return False   # Caller must NOT remove this position from _dex_positions
         else:
             self.portfolio.cash += proceeds
 
