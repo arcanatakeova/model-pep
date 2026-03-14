@@ -416,27 +416,28 @@ class RiskManager:
 
         return False, "Hold"
 
-    def get_partial_profit_action(self, position: dict) -> tuple[Optional[float], str]:
+    def get_partial_profit_action(self, position: dict) -> tuple[Optional[float], str, float]:
         """
         Check if a partial profit-take is due.
-        Returns (fraction_to_sell, reason) or (None, "Hold").
+        Returns (fraction_to_sell, reason, threshold_pct) or (None, "Hold", 0).
+        threshold_pct is returned so the caller can mark the exact tier as taken.
         """
         if not config.PARTIAL_PROFIT_ENABLED:
-            return None, "Hold"
+            return None, "Hold", 0
 
         entry = position.get("entry_price", 0)
         current = position.get("current_price", entry)
         if entry <= 0:
-            return None, "Hold"
+            return None, "Hold", 0
 
         pnl_pct = (current - entry) / entry
         already_taken = position.get("partial_profits_taken", [])
 
         for threshold_pct, sell_fraction in config.PARTIAL_PROFIT_TIERS:
             if pnl_pct >= threshold_pct and threshold_pct not in already_taken:
-                return sell_fraction, f"Partial TP at +{threshold_pct:.0%} (sell {sell_fraction:.0%})"
+                return sell_fraction, f"Partial TP at +{threshold_pct:.0%} (sell {sell_fraction:.0%})", threshold_pct
 
-        return None, "Hold"
+        return None, "Hold", 0
 
     # ─────────────────────────────────────────────────────────────────────────
     # Risk Reporting

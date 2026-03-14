@@ -52,6 +52,7 @@ from portfolio import Portfolio
 from risk_manager import RiskManager
 from executor import TradeExecutor
 from compounding_engine import CompoundingEngine
+from strategy_auditor import StrategyAuditor
 from strategies import MarketScanner
 from strategies.scalper import ScalpingScanner
 from strategies.funding_arb import FundingArbScanner
@@ -108,6 +109,7 @@ class AITrader:
         self.risk_mgr   = RiskManager(self.portfolio)
         self.executor   = TradeExecutor(self.portfolio, self.risk_mgr)
         self.compounder = CompoundingEngine(self.portfolio, self.risk_mgr)
+        self.auditor    = StrategyAuditor(self.portfolio, config)
 
         # ── Market Scanners ───────────────────────────────────────────────
         self.cex_scanner  = MarketScanner()                          # crypto/forex/stocks (1h)
@@ -283,6 +285,10 @@ class AITrader:
         alloc = self.compounder.on_cycle_complete()
         logger.info("Compound allocations: " + " | ".join(
             f"{k}: ${v:.0f}" for k, v in alloc.items()))
+
+        # ── 12b. Strategy audit + repivot (every 80 cycles ≈ 20 min) ─────────
+        if self._cycle % 80 == 0:
+            self.auditor.run_audit()
 
         # ── 13. Equity snapshot (cap in-memory at 2880 = 24h of 30s cycles) ──
         self._equity_curve.append({
@@ -749,9 +755,9 @@ class AITrader:
                     continue
 
                 # 2. PARTIAL PROFIT-TAKING
-                sell_frac, partial_reason = self.risk_mgr.get_partial_profit_action(pos)
+                sell_frac, partial_reason, partial_threshold = self.risk_mgr.get_partial_profit_action(pos)
                 if sell_frac is not None:
-                    self._execute_partial_profit(pair_addr, pos, sell_frac, partial_reason)
+                    self._execute_partial_profit(pair_addr, pos, sell_frac, partial_reason, partial_threshold)
 
                 # 3. FULL EXIT conditions
                 remaining = pos.get("remaining_fraction", 1.0)
@@ -820,14 +826,22 @@ class AITrader:
             self.portfolio._archive_old_trades()
 
     def _execute_partial_profit(self, pair_addr: str, pos: dict,
-                                 fraction: float, reason: str):
+                                 fraction: float, reason: str, threshold_pct: float = 0):
         """Execute a partial profit-take on a DEX position."""
         try:
+            size_usd = pos.get("size_usd", 0)
+            if size_usd <= 0:
+                logger.warning("SKIP partial TP %s: size_usd=%s (corrupted position — closing)",
+                                pos.get("symbol", "?"), size_usd)
+                # Mark tier taken anyway to prevent infinite loop
+                pos["partial_profits_taken"].append(threshold_pct)
+                return
+
             remaining = pos.get("remaining_fraction", 1.0)
             actual_frac = fraction * remaining
 
             pnl_pct = pos.get("current_pnl_pct", 0)
-            proceeds = pos["size_usd"] * actual_frac * (1 + pnl_pct)
+            proceeds = size_usd * actual_frac * (1 + pnl_pct)
 
             if (pos["chain"] == "solana" and self.solana.is_connected
                     and "paper" not in pos.get("tx", "")):
@@ -839,7 +853,9 @@ class AITrader:
                 self.portfolio.cash += proceeds
 
             pos["remaining_fraction"] = remaining - actual_frac
-            pos["partial_profits_taken"].append(pnl_pct)
+            # Append the TIER threshold (not current pnl_pct) so the check
+            # `threshold_pct not in already_taken` correctly marks it as done.
+            pos["partial_profits_taken"].append(threshold_pct)
 
             logger.info("PARTIAL TP %s: sold %.0f%% ($%.2f) | %s",
                          pos["symbol"], fraction * 100, proceeds, reason)
