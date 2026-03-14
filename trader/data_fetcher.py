@@ -27,6 +27,9 @@ import config
 
 logger = logging.getLogger(__name__)
 
+# Suppress noisy websocket-client internal error logs (451/geo-block spam)
+logging.getLogger("websocket").setLevel(logging.CRITICAL)
+
 # ─── Thread-safe in-memory cache with TTL eviction ────────────────────────────
 _cache: dict = {}
 _cache_lock = threading.Lock()
@@ -217,10 +220,15 @@ class BinanceWebSocketFeed:
     def _on_error(self, ws, error):
         self._connected = False
         if "451" in str(error):
-            self._geo_blocked = True
-            logger.warning("BinanceWS geo-blocked (451) — switching to stream.binance.us")
+            if self._geo_blocked:
+                # Both binance.com and binance.us are blocked — give up silently
+                self._running = False
+                logger.info("BinanceWS geo-blocked on both endpoints — disabled (DEX-only mode active)")
+            else:
+                self._geo_blocked = True
+                logger.warning("BinanceWS geo-blocked (451) — retrying with stream.binance.us")
         else:
-            logger.warning("BinanceWS disconnected: %s", error)
+            logger.debug("BinanceWS disconnected: %s", error)
 
     def _on_close(self, ws, close_status_code, close_msg):
         self._connected = False

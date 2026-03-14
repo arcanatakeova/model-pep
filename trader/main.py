@@ -43,12 +43,20 @@ from datetime import datetime, timezone
 from typing import Optional
 
 # Load .env — always resolve relative to this file so it works regardless of CWD
+import pathlib as _pathlib
+_env_file = _pathlib.Path(__file__).parent / ".env"
 try:
     from dotenv import load_dotenv as _load_dotenv
-    import pathlib as _pathlib
-    _load_dotenv(_pathlib.Path(__file__).parent / ".env", override=True)
+    _load_dotenv(_env_file, override=True)
 except ImportError:
-    pass
+    # python-dotenv not installed — parse manually so keys always load
+    import os as _os
+    if _env_file.exists():
+        for _line in _env_file.read_text().splitlines():
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _, _v = _line.partition("=")
+                _os.environ[_k.strip()] = _v.strip()
 
 import config
 from portfolio import Portfolio
@@ -85,11 +93,10 @@ logger = logging.getLogger("ai_trader")
 
 BANNER = """
 ╔══════════════════════════════════════════════════════════════════╗
-║       AUTONOMOUS AI TRADER  v3.0  —  LEVERAGED 24/7              ║
+║           AUTONOMOUS AI TRADER  v3.0  —  SOLANA DEX              ║
 ╠══════════════════════════════════════════════════════════════════╣
-║  CEX │ Futures(2-8x) │ Scalps(5m) │ DEX │ Poly │ Stocks │ Forex  ║
 ║  Mode: {mode:<8}    Capital: ${capital:<12,.0f}                  ║
-║  Scan: 15s cycle │ Scalp: 30s │ Futures: 60s │ DEX: 45s          ║
+║  Scan: {scan}s cycle │ DEX: {dex}s │ Price monitor: 3s            ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -210,7 +217,9 @@ class AITrader:
         self.running = True
         mode = "LIVE" if self.live else "PAPER"
         equity = self.portfolio.equity()
-        print(BANNER.format(mode=mode, capital=equity))
+        print(BANNER.format(mode=mode, capital=equity,
+                           scan=config.SCAN_INTERVAL_SEC,
+                           dex=config.DEX_SCAN_INTERVAL_SEC))
 
         logger.info("=" * 68)
         logger.info("AI Trader starting | Mode: %s | Equity: $%.2f", mode, equity)
