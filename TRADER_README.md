@@ -9,8 +9,8 @@
 ```bash
 # 1. Install dependencies
 cd model-pep
-pip install -r requirements.txt
-pip install ccxt          # Required for Binance Futures (leveraged trading)
+pip3 install -r requirements.txt
+pip3 install ccxt          # Required for Binance Futures (leveraged trading)
 
 # 2. Set up your keys
 cp .env.example .env
@@ -35,12 +35,12 @@ cd trader
 |-------------|---------|
 | Python | 3.9+ |
 | pip packages | see `requirements.txt` |
-| ccxt | `pip install ccxt` (for Binance Futures) |
+| ccxt | `pip3 install ccxt` (for Binance Futures) |
 
 ```bash
 # Install everything
-pip install -r requirements.txt
-pip install ccxt
+pip3 install -r requirements.txt
+pip3 install ccxt
 ```
 
 ---
@@ -131,7 +131,7 @@ cd trader
 1. Backs up `trades.json` + `dex_positions.json` to `backups/` (safety)
 2. Gracefully shuts down the running bot (SIGTERM, waits up to 30s)
 3. `git pull` (with automatic retry on network failure)
-4. `pip install -r requirements.txt --upgrade`
+4. `pip3 install -r requirements.txt --upgrade`
 5. Syntax-checks `main.py` before restarting
 6. Shows what changed (git log)
 7. Restarts the bot in the same mode it was running before

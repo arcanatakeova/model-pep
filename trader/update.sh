@@ -138,7 +138,7 @@ fi
 
 if [[ -f "$REQUIREMENTS" ]]; then
     log "Upgrading Python packages..."
-    pip install -r "$REQUIREMENTS" --upgrade --quiet 2>&1 | tee -a "$LOGFILE" || {
+    python3 -m pip install -r "$REQUIREMENTS" --upgrade --quiet 2>&1 | tee -a "$LOGFILE" || {
         log "WARNING: pip upgrade had errors (bot may still work with existing packages)"
     }
     log "Packages up to date."
