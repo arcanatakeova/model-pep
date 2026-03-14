@@ -501,17 +501,29 @@ class AITrader:
     def _run_dex_scan(self):
         """DEX Screener scan with safety checks, vol-adjusted sizing, concentration limits."""
         try:
+            # Circuit breaker: respect daily loss limit before opening any new DEX trades
+            allowed, cb_reason = self.risk_mgr.can_open_position("_dex_check", size_usd=1)
+            if not allowed and "circuit breaker" in cb_reason.lower():
+                logger.info("DEX scan skipped: %s", cb_reason)
+                return
+
             tokens = self.dex_screener.get_multi_chain_opportunities()
             logger.info("DEX scan: %d opportunities found", len(tokens))
 
             budget = self.compounder.max_position_for_market("crypto_dex")
             traded = 0
 
+            # Build set of symbols already held (catches same token on different pairs)
+            held_symbols = {pos.get("symbol", "").upper()
+                            for pos in self._dex_positions.values()}
+
             for token in tokens[:8]:   # Check top 8 (some filtered by safety)
                 if token.score < config.DEX_MIN_SCORE:
                     continue
                 if token.pair_address in self._dex_positions:
                     continue
+                if token.base_symbol.upper() in held_symbols:
+                    continue   # Already hold this token on a different pair
                 if traded >= 2:
                     break
 
