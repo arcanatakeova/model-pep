@@ -1,24 +1,424 @@
 """
-Data Fetcher - Retrieves market data from free public APIs.
+Data Fetcher - Retrieves market data from free public APIs + Binance WebSocket.
 
 Sources:
-  - CoinGecko  : crypto OHLCV, market cap, volume (free, no key)
-  - CoinCap    : real-time crypto prices (free, no key)
-  - CryptoCompare: crypto historical OHLCV (free, no key)
+  - CoinGecko       : crypto OHLCV, market cap, volume (free, no key)
+  - CoinCap         : real-time crypto prices (free, no key)
+  - CryptoCompare   : crypto historical OHLCV (free, no key)
   - ExchangeRate API: forex rates (free, no key)
-  - Yahoo Finance (yfinance): stocks & ETFs (unofficial, no key)
+  - Yahoo Finance   : stocks & ETFs via yfinance (unofficial, no key)
+  - Binance WS      : real-time tick prices <50ms latency (free, no key)
+  - Binance REST    : funding rates, order book (free, requires API key for trading)
 """
 from __future__ import annotations
-import time
+import json
 import logging
-import requests
-import pandas as pd
+import socket
+import ssl
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Optional
+
+import requests
+import pandas as pd
 
 import config
 
 logger = logging.getLogger(__name__)
+
+# ─── Simple in-memory cache ────────────────────────────────────────────────────
+_cache: dict = {}
+
+def _cached(key: str, ttl: int = config.DATA_CACHE_TTL):
+    if key in _cache:
+        value, ts = _cache[key]
+        if time.time() - ts < ttl:
+            return value
+    return None
+
+def _store(key: str, value):
+    _cache[key] = (value, time.time())
+    return value
+
+def _get(url: str, params: dict = None, timeout: int = 10) -> Optional[dict]:
+    """HTTP GET with basic error handling and rate-limit backoff."""
+    for attempt in range(3):
+        try:
+            headers = {"Accept": "application/json", "User-Agent": "ai-trader/2.0"}
+            if config.COINGECKO_API_KEY and "coingecko" in url:
+                headers["x-cg-demo-api-key"] = config.COINGECKO_API_KEY
+            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+            if resp.status_code == 429:
+                wait = 2 + attempt * 2
+                logger.debug("Rate limited by %s, waiting %ds", url, wait)
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as e:
+            logger.debug("Request failed (%s): %s", url, e)
+            if attempt < 2:
+                time.sleep(1)
+    return None
+
+# ─── Binance WebSocket Real-Time Price Feed ────────────────────────────────────
+
+class BinanceWebSocketFeed:
+    """
+    Maintains a persistent WebSocket connection to Binance for real-time
+    trade prices on BTC, ETH, and SOL. Updates an in-memory price cache
+    with <50ms latency — orders of magnitude faster than REST polling.
+
+    Usage:
+        ws = BinanceWebSocketFeed()
+        ws.start()
+        price = ws.get_price("BTC")   # instant, no HTTP call
+    """
+
+    # Binance combined stream endpoint
+    _WS_URL = "wss://stream.binance.com:9443/stream"
+    _SYMBOLS = {
+        "BTC": "btcusdt",
+        "ETH": "ethusdt",
+        "SOL": "solusdt",
+        "BNB": "bnbusdt",
+    }
+
+    def __init__(self):
+        self._prices:    dict[str, float] = {}   # "BTC" → price
+        self._volumes:   dict[str, float] = {}   # "BTC" → 24h quote vol
+        self._changes:   dict[str, float] = {}   # "BTC" → 24h % change
+        self._last_tick: dict[str, float] = {}   # "BTC" → epoch of last tick
+        self._lock       = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+        self._running    = False
+        self._connected  = False
+
+    def start(self):
+        """Launch WebSocket listener in a daemon thread."""
+        if self._thread and self._thread.is_alive():
+            return
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._run_forever, name="BinanceWS", daemon=True)
+        self._thread.start()
+        logger.info("BinanceWebSocketFeed started — streams: %s",
+                    ", ".join(self._SYMBOLS.keys()))
+
+    def stop(self):
+        self._running = False
+
+    def get_price(self, symbol: str) -> Optional[float]:
+        """Return latest WebSocket price, or None if not yet received."""
+        with self._lock:
+            return self._prices.get(symbol.upper())
+
+    def get_24h_change(self, symbol: str) -> Optional[float]:
+        with self._lock:
+            return self._changes.get(symbol.upper())
+
+    def get_volume(self, symbol: str) -> Optional[float]:
+        with self._lock:
+            return self._volumes.get(symbol.upper())
+
+    def is_fresh(self, symbol: str, max_age_sec: float = 10.0) -> bool:
+        """Return True if the last tick for this symbol is within max_age_sec."""
+        ts = self._last_tick.get(symbol.upper(), 0)
+        return (time.time() - ts) < max_age_sec
+
+    def get_all_prices(self) -> dict[str, float]:
+        with self._lock:
+            return dict(self._prices)
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    # ── Internal ─────────────────────────────────────────────────────────────
+
+    def _stream_names(self) -> str:
+        return "/".join(f"{s}@miniTicker" for s in self._SYMBOLS.values())
+
+    def _run_forever(self):
+        """Reconnecting WebSocket loop."""
+        backoff = 1
+        while self._running:
+            try:
+                self._connect_and_listen()
+                backoff = 1   # Reset on clean disconnect
+            except Exception as e:
+                self._connected = False
+                logger.warning("BinanceWS disconnected: %s — reconnecting in %ds", e, backoff)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
+    def _connect_and_listen(self):
+        """Open WS, read messages until disconnected."""
+        host = "stream.binance.com"
+        path = f"/stream?streams={self._stream_names()}"
+        ctx  = ssl.create_default_context()
+
+        sock = socket.create_connection((host, 9443), timeout=10)
+        sock = ctx.wrap_socket(sock, server_hostname=host)
+
+        # Send HTTP upgrade request
+        handshake = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        )
+        sock.sendall(handshake.encode())
+
+        # Read HTTP response (skip headers)
+        resp = b""
+        while b"\r\n\r\n" not in resp:
+            resp += sock.recv(4096)
+        if b"101 Switching Protocols" not in resp:
+            raise ConnectionError("WS handshake failed")
+
+        self._connected = True
+        logger.info("BinanceWS connected")
+
+        sock.settimeout(30)   # 30s timeout per recv — server sends pings
+        buf = b""
+
+        while self._running:
+            try:
+                chunk = sock.recv(8192)
+            except socket.timeout:
+                # Send a WS ping frame to keep alive
+                sock.sendall(b"\x89\x00")
+                continue
+            if not chunk:
+                raise ConnectionError("WS stream closed by server")
+
+            buf += chunk
+            # Parse all complete WebSocket frames in buffer
+            while True:
+                frame, buf = self._parse_frame(buf)
+                if frame is None:
+                    break
+                self._handle_message(frame)
+
+        sock.close()
+        self._connected = False
+
+    @staticmethod
+    def _parse_frame(buf: bytes) -> tuple[Optional[str], bytes]:
+        """
+        Minimal WebSocket frame parser (text frames only, no masking).
+        Returns (payload_str, remaining_buf) or (None, buf) if incomplete.
+        """
+        if len(buf) < 2:
+            return None, buf
+
+        opcode = buf[0] & 0x0F
+        masked  = (buf[1] & 0x80) != 0
+        length  = buf[1] & 0x7F
+
+        offset = 2
+        if length == 126:
+            if len(buf) < 4:
+                return None, buf
+            length = int.from_bytes(buf[2:4], "big")
+            offset = 4
+        elif length == 127:
+            if len(buf) < 10:
+                return None, buf
+            length = int.from_bytes(buf[2:10], "big")
+            offset = 10
+
+        mask_key = b""
+        if masked:
+            if len(buf) < offset + 4:
+                return None, buf
+            mask_key = buf[offset:offset + 4]
+            offset += 4
+
+        if len(buf) < offset + length:
+            return None, buf   # Not enough data yet
+
+        payload = bytearray(buf[offset:offset + length])
+        if masked:
+            for i in range(length):
+                payload[i] ^= mask_key[i % 4]
+
+        remaining = buf[offset + length:]
+
+        if opcode == 0x8:   # Close
+            raise ConnectionError("Server sent close frame")
+        if opcode not in (0x1, 0x0):  # Not text or continuation
+            return None, remaining
+
+        try:
+            return payload.decode("utf-8"), remaining
+        except UnicodeDecodeError:
+            return None, remaining
+
+    def _handle_message(self, text: str):
+        """Parse miniTicker message and update price cache."""
+        try:
+            outer = json.loads(text)
+            data  = outer.get("data", outer)  # Combined stream wraps in {"data": {...}}
+            if data.get("e") != "24hrMiniTicker":
+                return
+
+            raw_sym = data.get("s", "")  # e.g. "BTCUSDT"
+            close   = float(data.get("c", 0))
+            vol     = float(data.get("q", 0))  # Quote asset volume 24h
+            o       = float(data.get("o", 0))  # Open 24h
+
+            # Map back to our short symbol
+            for short, binance in self._SYMBOLS.items():
+                if binance.upper() == raw_sym.upper():
+                    pct_change = ((close - o) / o * 100) if o > 0 else 0.0
+                    with self._lock:
+                        self._prices[short]    = close
+                        self._volumes[short]   = vol
+                        self._changes[short]   = round(pct_change, 3)
+                        self._last_tick[short] = time.time()
+                    break
+        except Exception as e:
+            logger.debug("WS message parse error: %s", e)
+
+
+# ─── Global WebSocket instance (started lazily) ───────────────────────────────
+_ws_feed: Optional[BinanceWebSocketFeed] = None
+_ws_lock  = threading.Lock()
+
+def get_ws_feed() -> BinanceWebSocketFeed:
+    """Return the global WebSocket feed, starting it if not yet running."""
+    global _ws_feed
+    with _ws_lock:
+        if _ws_feed is None:
+            _ws_feed = BinanceWebSocketFeed()
+            _ws_feed.start()
+            time.sleep(0.5)   # Brief settle time
+    return _ws_feed
+
+def get_realtime_price(symbol: str) -> Optional[float]:
+    """
+    Get real-time price from Binance WebSocket cache (<50ms latency).
+    Falls back to REST if WebSocket not fresh.
+    """
+    feed = get_ws_feed()
+    if feed.is_fresh(symbol, max_age_sec=5.0):
+        price = feed.get_price(symbol)
+        if price and price > 0:
+            return price
+    # Fallback to REST
+    return get_coin_price(f"{symbol.lower()}")
+
+
+# ─── Binance REST — Funding Rates & Order Book (free, public endpoints) ───────
+
+def get_funding_rates() -> dict[str, dict]:
+    """
+    Fetch current and predicted funding rates for all USDT-M perpetual contracts.
+    Returns: { "BTCUSDT": {"rate": 0.0001, "next_funding_time": ...}, ... }
+    Free endpoint — no API key required.
+    """
+    key = "funding_rates"
+    cached = _cached(key, ttl=60)
+    if cached is not None:
+        return cached
+
+    data = _get("https://fapi.binance.com/fapi/v1/premiumIndex")
+    if not data:
+        return _store(key, {})
+
+    result = {}
+    for item in data:
+        sym  = item.get("symbol", "")
+        rate = float(item.get("lastFundingRate", 0))
+        nft  = item.get("nextFundingTime", 0)
+        if sym.endswith("USDT") and rate != 0:
+            result[sym] = {
+                "rate": rate,
+                "rate_pct": round(rate * 100, 6),
+                "rate_daily_pct": round(rate * 3 * 100, 4),  # 3 funding periods/day
+                "next_funding_time": nft,
+                "annualized_pct": round(rate * 3 * 365 * 100, 1),
+            }
+
+    return _store(key, result)
+
+def get_order_book_depth(symbol: str, limit: int = 20) -> dict:
+    """
+    Fetch L2 order book for a symbol from Binance.
+    Returns bids/asks lists and spread metrics.
+    Free public endpoint.
+    """
+    key = f"orderbook_{symbol}_{limit}"
+    cached = _cached(key, ttl=5)   # Very short cache — order book changes fast
+    if cached is not None:
+        return cached
+
+    data = _get(
+        "https://api.binance.com/api/v3/depth",
+        params={"symbol": symbol, "limit": limit},
+        timeout=3,
+    )
+    if not data:
+        return _store(key, {})
+
+    bids = [(float(p), float(q)) for p, q in data.get("bids", [])]
+    asks = [(float(p), float(q)) for p, q in data.get("asks", [])]
+
+    if not bids or not asks:
+        return _store(key, {})
+
+    best_bid = bids[0][0]
+    best_ask = asks[0][0]
+    spread   = best_ask - best_bid
+    spread_pct = spread / best_bid * 100
+
+    total_bid_vol = sum(q for _, q in bids)
+    total_ask_vol = sum(q for _, q in asks)
+    imbalance = (total_bid_vol - total_ask_vol) / (total_bid_vol + total_ask_vol)
+
+    result = {
+        "bids": bids,
+        "asks": asks,
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "spread": round(spread, 6),
+        "spread_pct": round(spread_pct, 4),
+        "bid_volume": round(total_bid_vol, 4),
+        "ask_volume": round(total_ask_vol, 4),
+        "imbalance": round(imbalance, 4),   # +1 = all bids, -1 = all asks
+    }
+    return _store(key, result)
+
+def get_open_interest(symbol: str) -> dict:
+    """
+    Fetch open interest from Binance Futures (free public endpoint).
+    High OI + rising price = strong trend. High OI + falling price = potential squeeze.
+    """
+    key = f"oi_{symbol}"
+    cached = _cached(key, ttl=30)
+    if cached is not None:
+        return cached
+
+    data = _get(
+        "https://fapi.binance.com/fapi/v1/openInterest",
+        params={"symbol": symbol},
+        timeout=5,
+    )
+    if not data:
+        return _store(key, {})
+
+    result = {
+        "symbol": data.get("symbol"),
+        "open_interest": float(data.get("openInterest", 0)),
+        "time": data.get("time"),
+    }
+    return _store(key, result)
 
 # ─── Simple in-memory cache ────────────────────────────────────────────────────
 _cache: dict = {}

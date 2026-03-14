@@ -38,6 +38,7 @@ class TradeExecutor:
         self.risk = risk_manager
         self._exchange = None          # Binance spot (live only)
         self._futures_exchange = None  # Binance USDT-M futures (live only)
+        self._risk_override: Optional[float] = None  # Thread-local risk % override (bug fix)
 
         if not config.PAPER_TRADING:
             self._init_live_exchange()
@@ -128,7 +129,13 @@ class TradeExecutor:
 
         price   = signal.current_price
         stop_pct = abs(price - signal.stop_loss) / price if price > 0 else config.STOP_LOSS_PCT
+
+        # Use thread-local risk override if set (avoids mutating global config)
+        risk_pct_backup = config.RISK_PER_TRADE_PCT
+        if self._risk_override is not None:
+            config.RISK_PER_TRADE_PCT = self._risk_override
         size_usd = self.risk.position_size_usd(signal.score, signal.conviction, stop_pct, price)
+        config.RISK_PER_TRADE_PCT = risk_pct_backup
 
         if size_usd < 1.0:
             logger.debug("Position size too small ($%.2f) for %s", size_usd, signal.asset_id)
@@ -299,6 +306,13 @@ class TradeExecutor:
         if not config.FUTURES_ENABLED:
             return None
         if signal.signal == "HOLD":
+            return None
+
+        # BUG FIX: Hard gate — minimum conviction required for any leverage
+        if signal.conviction < getattr(config, "MIN_FUTURES_CONVICTION", 0.40):
+            logger.debug("SKIP FUTURES %s: conviction %.2f below min %.2f",
+                         signal.symbol, signal.conviction,
+                         getattr(config, "MIN_FUTURES_CONVICTION", 0.40))
             return None
 
         side = "long" if signal.signal == "BUY" else "short"

@@ -29,12 +29,29 @@ FUTURES_SYMBOLS = [                       # USDT-M perpetual pairs to trade with
 FUTURES_RISK_PCT = 0.01                   # 1% of equity at risk per futures trade
 FUTURES_DAILY_LOSS_LIMIT = 0.03           # 3% daily loss limit (tighter — leverage amplifies losses)
 # Maps (min_conviction_threshold, leverage_multiplier) — highest conviction first
+# BUG FIX: was (0.00, 2) — any signal got 2x. Now requires 0.40 minimum.
 LEVERAGE_BY_CONVICTION = [
     (0.80, 8),
     (0.65, 5),
     (0.50, 3),
-    (0.00, 2),
+    (0.40, 2),   # Min 40% conviction required for any leverage
 ]
+MIN_FUTURES_CONVICTION = 0.40   # Hard gate: below this = no futures trade
+
+# ─── Funding Rate Arbitrage ───────────────────────────────────────────────────
+FUNDING_ARB_ENABLED = True
+FUNDING_ARB_MIN_RATE = 0.0003       # 0.03% per 8h minimum (0.27%/day) to open arb
+FUNDING_ARB_MAX_POSITION_USD = 2000 # Max USD per arb pair
+FUNDING_ARB_SCAN_INTERVAL_SEC = 600 # Every 10 minutes (funding updates every 8h)
+
+# ─── Grid Trading ─────────────────────────────────────────────────────────────
+GRID_TRADING_ENABLED = True
+GRID_SYMBOLS = ["BTC", "ETH", "SOL"]
+GRID_SPACING_PCT = 0.004          # 0.4% between grid levels
+GRID_LEVELS = 8                   # Levels on each side of center
+GRID_SIZE_USD_PER_LEVEL = 50.0    # USD per order
+GRID_MAX_TOTAL_USD = 2000.0       # Max total grid exposure per symbol
+GRID_SCAN_INTERVAL_SEC = 60       # Check grid fills every 60s
 
 # ─── Scalping (5-minute signals) ─────────────────────────────────────────────
 SCALP_ENABLED = True

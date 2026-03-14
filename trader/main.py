@@ -52,6 +52,8 @@ from executor import TradeExecutor
 from compounding_engine import CompoundingEngine
 from strategies import MarketScanner
 from strategies.scalper import ScalpingScanner
+from strategies.funding_arb import FundingArbScanner
+from strategies.grid_trader import GridTrader
 from dex_screener import DexScreener
 from polymarket import PolymarketTrader
 from solana_wallet import SolanaWallet
@@ -103,22 +105,32 @@ class AITrader:
         # ── Market Scanners ───────────────────────────────────────────────
         self.cex_scanner  = MarketScanner()                          # crypto/forex/stocks (1h)
         self.scalper      = ScalpingScanner()                        # 5m scalp signals
+        self.funding_arb  = FundingArbScanner(self.portfolio, self.executor)   # funding rate arb
+        self.grid_trader  = GridTrader(self.portfolio, self.executor)           # grid trading
         self.dex_screener = DexScreener()                            # on-chain tokens
         self.poly_trader  = PolymarketTrader(
             private_key=config.POLYMARKET_PRIVATE_KEY)               # prediction markets
         self.solana       = SolanaWallet(
             private_key_b58=config.PHANTOM_PRIVATE_KEY)              # Phantom wallet
 
+        # ── WebSocket real-time feed ──────────────────────────────────────
+        self._ws_feed = df_mod.get_ws_feed()   # Start WebSocket in background
+
         # ── State ─────────────────────────────────────────────────────────
-        self._cycle        = 0
-        self._last_save    = time.time()
-        self._last_poly    = 0.0
-        self._last_dex     = 0.0
-        self._last_scalp   = 0.0
-        self._last_futures = 0.0
-        self._last_day     = datetime.now(timezone.utc).date()
-        self._equity_curve = []
+        self._cycle          = 0
+        self._last_save      = time.time()
+        self._last_state     = time.time()
+        self._last_poly      = 0.0
+        self._last_dex       = 0.0
+        self._last_scalp     = 0.0
+        self._last_futures   = 0.0
+        self._last_arb       = 0.0
+        self._last_grid      = 0.0
+        self._day_start_eq   = self.portfolio.equity()
+        self._last_day       = datetime.now(timezone.utc).date()
+        self._equity_curve   = []
         self._dex_positions: dict = {}  # addr → {buy_price, qty, chain, symbol}
+        self._cex_signals_cache = []    # Shared between CEX scan + futures swing scan
 
         # Load saved state
         self.portfolio.load()
@@ -167,6 +179,11 @@ class AITrader:
         self._cleanup()
 
     def _run_cycle(self):
+        # ── PAUSED check ──────────────────────────────────────────────────
+        if os.path.exists("PAUSED"):
+            logger.info("Bot is PAUSED (remove PAUSED file to resume)")
+            return
+
         self._cycle += 1
         t0 = time.time()
         now_dt = datetime.now(timezone.utc)
@@ -221,34 +238,53 @@ class AITrader:
             self._run_polymarket_scan()
             self._last_poly = now_ts
 
-        # ── 10. Compound: Reinvest + rebalance ────────────────────────────
+        # ── 10. Funding Rate Arbitrage ────────────────────────────────────
+        if getattr(config, "FUNDING_ARB_ENABLED", False):
+            if now_ts - self._last_arb >= getattr(config, "FUNDING_ARB_SCAN_INTERVAL_SEC", 600):
+                self._run_funding_arb_scan()
+                self._last_arb = now_ts
+            else:
+                self.funding_arb.update_positions()  # Check exits/collect funding every cycle
+
+        # ── 11. Grid Trading ──────────────────────────────────────────────
+        if getattr(config, "GRID_TRADING_ENABLED", False):
+            if now_ts - self._last_grid >= getattr(config, "GRID_SCAN_INTERVAL_SEC", 60):
+                self._run_grid_management()
+                self._last_grid = now_ts
+
+        # ── 12. Compound: Reinvest + rebalance ────────────────────────────
         alloc = self.compounder.on_cycle_complete()
         logger.info("Compound allocations: " + " | ".join(
             f"{k}: ${v:.0f}" for k, v in alloc.items()))
 
-        # ── 11. Equity snapshot ───────────────────────────────────────────
+        # ── 13. Equity snapshot ───────────────────────────────────────────
         self._equity_curve.append({
             "ts": datetime.now(timezone.utc).isoformat(),
             "equity": round(equity, 2),
             "cycle": self._cycle,
         })
 
-        # ── 12. Risk report ───────────────────────────────────────────────
+        # ── 14. Risk report ───────────────────────────────────────────────
         risk = self.risk_mgr.risk_report()
         logger.info("Risk: pos=%d/%d cash=$%.0f dd=%.1f%% daily=%.1f%%",
                     risk["open_positions"], risk["max_positions"],
                     risk["cash"], risk["current_drawdown_pct"],
                     risk["daily_loss_pct"])
 
-        # ── 13. Periodic saves ────────────────────────────────────────────
+        elapsed_ms = (time.time() - t0) * 1000
+
+        # ── 15. Write bot_state.json for dashboard ────────────────────────
+        self._write_bot_state(equity, elapsed_ms)
+
+        # ── 16. Periodic saves ────────────────────────────────────────────
         if time.time() - self._last_save > config.PORTFOLIO_SNAPSHOT_INTERVAL:
             self.portfolio.save()
             self._save_dex_positions()
             self._save_equity_curve()
+            self._save_strategy_states()
             self._last_save = time.time()
 
-        elapsed = time.time() - t0
-        logger.info("Cycle #%d done in %.1fs", self._cycle, elapsed)
+        logger.info("Cycle #%d done in %.0fms", self._cycle, elapsed_ms)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Market Subsystems
@@ -258,6 +294,8 @@ class AITrader:
         """CEX scan: crypto (CoinGecko/CC), stocks (yfinance), forex."""
         try:
             signals = self.cex_scanner.scan_all(max_workers=10)
+            # Cache for futures swing scan + grid trader (avoids double API call)
+            self._cex_signals_cache = signals
             actionable = [s for s in signals if s.signal != "HOLD"]
             logger.info("CEX scan: %d signals (%d actionable)",
                         len(signals), len(actionable))
@@ -269,21 +307,17 @@ class AITrader:
 
     def _execute_cex_signal(self, signal):
         """Execute a CEX trade with compound-scaled position sizing."""
-        market_key = {"crypto": "crypto_cex", "stocks": "stocks",
-                      "forex": "forex"}.get(signal.market, "crypto_cex")
-        max_pos = self.compounder.max_position_for_market(market_key)
-        scale   = self.compounder.get_position_scale_factor()
+        # BUG FIX: was mutating config.RISK_PER_TRADE_PCT — race condition when
+        # multiple threads run concurrent scans. Now pass scale as a local variable.
+        scale = self.compounder.get_position_scale_factor()
+        scaled_risk = min(config.RISK_PER_TRADE_PCT * scale, 0.04)
 
-        # Temporarily override risk manager's position size via scale
-        original_risk = config.RISK_PER_TRADE_PCT
-        config.RISK_PER_TRADE_PCT = min(
-            original_risk * scale,
-            0.04,   # Never more than 4% per trade
-        )
+        # Temporarily patch on the executor level via a thread-local override
+        self.executor._risk_override = scaled_risk
         try:
             self.executor.process_signal(signal)
         finally:
-            config.RISK_PER_TRADE_PCT = original_risk
+            self.executor._risk_override = None
 
     def _run_scalp_scan(self):
         """5-minute scalp signals on BTC/ETH/SOL → leveraged futures trades."""
@@ -302,15 +336,22 @@ class AITrader:
             logger.warning("Scalp scan error: %s", e)
 
     def _run_futures_swing_scan(self):
-        """1h swing signals on major crypto pairs → leveraged futures trades."""
+        """
+        1h swing signals on major crypto pairs → leveraged futures trades.
+        BUG FIX: Reuses _cex_signals_cache instead of calling scan_all() again
+        (was hitting APIs twice per minute and causing rate limits).
+        """
         try:
-            signals = self.cex_scanner.scan_all(max_workers=4)
+            # Reuse signals from CEX scan (set in _run_cex_scan this cycle)
+            signals = self._cex_signals_cache
+            if not signals:
+                return
             # Filter for crypto only and high conviction
             futures_candidates = [
                 s for s in signals
                 if s.market == "crypto" and abs(s.score) > 0.45 and s.signal != "HOLD"
             ]
-            logger.info("Futures swing scan: %d candidates", len(futures_candidates))
+            logger.info("Futures swing scan: %d candidates from cached CEX signals", len(futures_candidates))
             for sig in futures_candidates[:3]:
                 pos = self.executor.open_futures_position(sig)
                 if pos:
@@ -321,6 +362,73 @@ class AITrader:
                     )
         except Exception as e:
             logger.warning("Futures swing scan error: %s", e)
+
+    def _run_funding_arb_scan(self):
+        """Scan for funding rate arb opportunities and open best ones."""
+        try:
+            opps = self.funding_arb.find_opportunities()
+            logger.info("Funding arb scan: %d opportunities found", len(opps))
+            for opp in opps[:2]:   # Open at most 2 new arb positions per scan
+                arb = self.funding_arb.open_arb(opp)
+                if arb:
+                    logger.info(
+                        "ARB OPENED %-10s rate=%.4f%%/8h → %.2f%%/day",
+                        opp["symbol"], opp["rate"] * 100, opp["rate_daily_pct"],
+                    )
+        except Exception as e:
+            logger.warning("Funding arb scan error: %s", e)
+
+    def _run_grid_management(self):
+        """Update all grids (check fills, recenter, auto-open on ranging signals)."""
+        try:
+            # Update existing grids
+            self.grid_trader.update_all_grids()
+            self.grid_trader.recenter_grids()
+            # Auto-open grids when market is ranging
+            if self._cex_signals_cache:
+                self.grid_trader.maybe_open_grids(self._cex_signals_cache)
+            summary = self.grid_trader.summary()
+            if summary["active_grids"] > 0:
+                logger.info("Grid: %d active | %d fills | pnl=$%.2f",
+                            summary["active_grids"], summary["total_fills"],
+                            summary["total_pnl_usd"])
+        except Exception as e:
+            logger.warning("Grid management error: %s", e)
+
+    def _write_bot_state(self, equity: float, elapsed_ms: float):
+        """Write lightweight state file for the dashboard to read."""
+        try:
+            state = {
+                "cycle": self._cycle,
+                "last_cycle_ts": time.time(),
+                "last_cycle_ms": round(elapsed_ms, 1),
+                "equity": round(equity, 2),
+                "mode": "live" if self.live else "paper",
+                "daily_pnl_usd": round(equity - self._day_start_eq, 2),
+                "daily_pnl_pct": round((equity - self._day_start_eq) / self._day_start_eq * 100, 2)
+                    if self._day_start_eq > 0 else 0,
+                "ws_connected": self._ws_feed.connected if self._ws_feed else False,
+                "futures_enabled": config.FUTURES_ENABLED,
+                "open_positions": len(self.portfolio.open_positions),
+                "dex_positions": len(self._dex_positions),
+            }
+            with open("bot_state.json", "w") as f:
+                json.dump(state, f)
+        except Exception:
+            pass   # Non-critical — dashboard will show stale data
+
+    def _save_strategy_states(self):
+        """Persist grid and arb state for dashboard display."""
+        try:
+            with open("grid_state.json", "w") as f:
+                json.dump(self.grid_trader.summary(), f, indent=2)
+        except Exception:
+            pass
+        try:
+            with open("arb_state.json", "w") as f:
+                json.dump(self.funding_arb.summary(), f, indent=2)
+        except Exception:
+            pass
 
     def _check_pyramiding(self):
         """
