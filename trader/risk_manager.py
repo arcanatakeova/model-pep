@@ -314,6 +314,61 @@ class RiskManager:
             return 0.0
         return round(size, 2)
 
+    def dynamic_dex_stop_pct(self, price_change_h1: float, price_change_h6: float,
+                              price_change_h24: float, safety_score: float) -> float:
+        """
+        AI-set stop-loss for each DEX trade based on observed volatility.
+
+        Logic: if a token moves ±20% per hour normally, a 15% stop is just noise —
+        it will get hit on random oscillations. Stop should be wide enough to survive
+        the token's own natural swing range while still protecting from real losses.
+
+          Base stop  = 2.5× the 1h move (gives room for 2-3 normal candles)
+          Minimum    = 20% (memecoins always need at least this)
+          Maximum    = 50% (hard cap — never risk more than half the position)
+          Safety adj = riskier tokens swing harder → need even wider stops
+        """
+        h1_vol  = abs(price_change_h1  or 0) / 100
+        h6_vol  = abs(price_change_h6  or 0) / 100
+        h24_vol = abs(price_change_h24 or 0) / 100
+
+        # Use the largest observed timeframe as the volatility anchor
+        base = max(h1_vol * 2.5, h6_vol * 0.6, h24_vol * 0.25, 0.20)
+        base = min(base, 0.45)
+
+        # Safety-adjusted multiplier: less trusted = more volatile = wider stop needed
+        if safety_score >= 0.80:
+            mult = 0.85    # well-audited token, slightly tighter
+        elif safety_score >= 0.60:
+            mult = 1.00    # average
+        else:
+            mult = 1.30    # unknown/risky — expect big swings
+
+        stop = round(min(base * mult, 0.50), 3)
+        logger.debug("Dynamic stop: h1=%.1f%% h6=%.1f%% h24=%.1f%% safety=%.2f → stop=%.1f%%",
+                     h1_vol*100, h6_vol*100, h24_vol*100, safety_score, stop*100)
+        return stop
+
+    def dynamic_dex_target_pct(self, price_change_h24: float, score: float) -> float:
+        """
+        AI-set take-profit for each DEX trade based on momentum strength.
+
+        A token that already ran +200% in 24h has shown it CAN move big.
+        Set targets proportionally — don't cut a moonshot at +40%.
+
+          Base target = 80% of the 24h move already seen (tokens often continue)
+          Minimum     = 35% (never settle for less on a memecoin)
+          Maximum     = 250% (realistic ceiling for a 1-3 day hold)
+          Score boost = higher conviction → higher target
+        """
+        h24 = abs(price_change_h24 or 0) / 100
+        base = max(h24 * 0.80, 0.35)
+        base = min(base, 2.50)
+        target = round(base * (1 + score * 0.3), 3)
+        logger.debug("Dynamic target: h24=%.1f%% score=%.2f → target=%.1f%%",
+                     h24*100, score, target*100)
+        return target
+
     def check_dex_concentration(self, dex_positions: dict,
                                  token_dex_id: str = "") -> tuple[bool, str]:
         """Check memecoin concentration limits before opening new position."""

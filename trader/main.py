@@ -563,6 +563,18 @@ class AITrader:
     def _open_dex_position(self, token, size_usd: float, safety=None):
         """Open a DEX position with safety verification and MEV protection."""
         try:
+            safety_score = safety.safety_score if safety else 0.5
+            # AI-computed stop and target per trade based on token's own volatility
+            stop_pct   = self.risk_mgr.dynamic_dex_stop_pct(
+                price_change_h1  = getattr(token, "price_change_h1",  0) or 0,
+                price_change_h6  = getattr(token, "price_change_h6",  0) or 0,
+                price_change_h24 = getattr(token, "price_change_h24", 0) or 0,
+                safety_score     = safety_score,
+            )
+            target_pct = self.risk_mgr.dynamic_dex_target_pct(
+                price_change_h24 = getattr(token, "price_change_h24", 0) or 0,
+                score            = token.score,
+            )
             pos_data = {
                 "symbol": token.base_symbol,
                 "address": token.base_address,
@@ -573,8 +585,8 @@ class AITrader:
                 "size_usd": size_usd,
                 "remaining_fraction": 1.0,
                 "opened_at": datetime.now(timezone.utc).isoformat(),
-                "stop_pct": 0.15,
-                "target_pct": 0.40,
+                "stop_pct": stop_pct,
+                "target_pct": target_pct,
                 "score": token.score,
                 "safety_score": safety.safety_score if safety else None,
                 "risk_level": safety.risk_level if safety else None,
@@ -601,9 +613,13 @@ class AITrader:
                 pos_data["tx"] = f"paper_{int(time.time())}"
                 self._dex_positions[token.pair_address] = pos_data
                 self.portfolio.cash -= size_usd
-                logger.info("PAPER DEX BUY %s $%.2f @ $%.8f score=%.2f | %s",
-                            token.base_symbol, size_usd, token.price_usd,
-                            token.score, ", ".join(token.signals[:2]))
+                logger.info(
+                    "PAPER DEX BUY %s $%.2f @ $%.8f score=%.2f | "
+                    "stop=%.0f%% target=%.0f%% | %s",
+                    token.base_symbol, size_usd, token.price_usd, token.score,
+                    stop_pct * 100, target_pct * 100,
+                    ", ".join(token.signals[:2])
+                )
 
         except Exception as e:
             logger.warning("DEX position open failed (%s): %s", token.base_symbol, e)
@@ -645,13 +661,18 @@ class AITrader:
                 # Raise target as partials are taken
                 adj_target = pos["target_pct"] * (1 + (1 - remaining) * 0.5)
 
+                # Trailing stop: adaptive to the position's own stop distance
+                # Only kicks in after we're in profit by at least 50% of the stop
+                pos_stop  = pos.get("stop_pct", 0.20)
+                trail_thr = pos_stop * 0.80   # e.g. 24% trail for a 30% stop
+                profit_thr = pos_stop * 0.50  # must be in profit before trailing
                 reason = None
                 if pnl_pct >= adj_target:
                     reason = f"Take profit +{pnl_pct:.0%}"
-                elif pnl_pct <= -pos["stop_pct"]:
+                elif pnl_pct <= -pos_stop:
                     reason = f"Stop loss {pnl_pct:.0%}"
-                elif trail_pct > 0.12 and pnl_pct > 0.05:
-                    reason = f"Trailing stop (peak=${peak:.8f})"
+                elif trail_pct > trail_thr and pnl_pct > profit_thr:
+                    reason = f"Trailing stop (peak=${peak:.8f}, trail={trail_pct:.0%})"
 
                 if reason:
                     self._close_dex_position(pair_addr, pos, current, reason)
