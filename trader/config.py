@@ -136,8 +136,12 @@ EXCHANGERATE_BASE = "https://open.er-api.com/v6"
 
 # Optional API keys (from environment)
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")
-ALPHAVANTAGE_KEY = os.getenv("ALPHAVANTAGE_KEY", "")
-FINNHUB_KEY = os.getenv("FINNHUB_KEY", "")
+ALPHAVANTAGE_KEY  = os.getenv("ALPHAVANTAGE_KEY", "")
+FINNHUB_KEY       = os.getenv("FINNHUB_KEY", "")
+
+# ─── Birdeye API (Real-time Solana data) ──────────────────────────────────────
+# Get key at https://birdeye.so — Starter plan ($99/mo) recommended
+BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "")
 
 # Exchange API keys for live CEX trading (optional)
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
@@ -166,7 +170,7 @@ NEW_PAIR_MAX_AGE_HOURS = 48        # Consider pairs up to 48h old
 NEW_PAIR_MIN_LIQUIDITY = 15_000    # $15k minimum liquidity (lower for memecoins)
 
 # ─── Token Safety / Rug Protection (Balanced Mode) ──────────────────────────
-MIN_SAFETY_SCORE = 0.35            # Minimum safety score to trade (balanced: penalize, don't block)
+MIN_SAFETY_SCORE = 0.45            # Minimum safety score to trade (raised: 0.35 was too permissive)
 SAFETY_SCORE_WEIGHT = 0.20         # Weight of safety in overall token score
 ENABLE_SELL_SIMULATION = True      # Honeypot check via Jupiter round-trip quote
 SELL_SIM_AMOUNT_USD = 1.0          # Dollar amount for sell simulation
@@ -174,7 +178,7 @@ MAX_ROUND_TRIP_TAX_PCT = 0.30      # Max acceptable round-trip tax (30% = balanc
 RUGCHECK_CACHE_TTL = 300           # Cache safety results for 5 minutes
 SAFETY_CHECK_TIMEOUT = 8           # Seconds before safety check times out
 BLOCK_HONEYPOTS = True             # Hard block if sell simulation fails completely
-MAX_TOP10_HOLDER_PCT = 0.85        # Penalize heavily if top 10 holders own > 85%
+MAX_TOP10_HOLDER_PCT = 0.70        # Penalize heavily if top 10 holders own > 70% (tighter for memecoins)
 
 # ─── Volatility-Adjusted Position Sizing ────────────────────────────────────
 DEX_BASE_POSITION_USD = 50.0       # Base position for memecoin trades
@@ -208,10 +212,17 @@ MIN_LIQUIDITY_RATIO = 0.10         # Position must be < 10% of pool liquidity
 
 # ─── Solana / Phantom Wallet ──────────────────────────────────────────────────
 PHANTOM_PRIVATE_KEY = os.getenv("PHANTOM_PRIVATE_KEY", "")
+# Use Helius for premium RPC + priority fee estimation:
+#   https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
-SOL_TRADE_SIZE_USD = 50.0          # Default Solana trade size in USD
-SOL_MAX_SLIPPAGE_BPS = 150         # 1.5% max slippage for Solana swaps
-SOL_PRIORITY_FEE_LAMPORTS = 10000  # Priority fee for fast execution
+SOL_TRADE_SIZE_USD        = 50.0    # Default Solana trade size in USD
+SOL_MAX_SLIPPAGE_BPS      = 300     # 3% hard cap on slippage (dynamic calc stays under this)
+SOL_PRIORITY_FEE_LAMPORTS = 10_000  # Fallback priority fee (lamports) when Helius unavailable
+
+# ─── Jito MEV Bundle Protection ───────────────────────────────────────────────
+# Jito routes transactions through the block engine to prevent sandwich attacks.
+# The tip is paid in SOL to a random Jito tip account alongside the swap tx.
+JITO_TIP_LAMPORTS = 100_000        # 0.0001 SOL tip — competitive for most conditions
 
 # ─── Polymarket ───────────────────────────────────────────────────────────────
 POLYMARKET_PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY", "")  # Polygon EVM key

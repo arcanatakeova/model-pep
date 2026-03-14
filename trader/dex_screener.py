@@ -21,6 +21,20 @@ from typing import Optional
 import config
 from token_safety import TokenSafetyChecker
 
+# Birdeye client — lazy-loaded only if API key is set
+_birdeye_client = None
+
+
+def _get_birdeye():
+    global _birdeye_client
+    if _birdeye_client is None and config.BIRDEYE_API_KEY:
+        try:
+            from birdeye import BirdeyeClient
+            _birdeye_client = BirdeyeClient(config.BIRDEYE_API_KEY)
+        except Exception:
+            pass
+    return _birdeye_client
+
 logger = logging.getLogger(__name__)
 
 DEXSCREENER_BASE = "https://api.dexscreener.com"
@@ -165,7 +179,11 @@ class DexScreener:
         return scored
 
     def get_token_info(self, token_address: str, chain: str = "solana") -> Optional[DexToken]:
-        """Fetch data for a specific token address."""
+        """
+        Fetch data for a specific token address.
+        Price is enriched from Birdeye (real-time) if API key is available,
+        falling back to DexScreener (cached 60s).
+        """
         data = self._get(f"{DEXSCREENER_BASE}/latest/dex/tokens/{token_address}")
         if not data or not data.get("pairs"):
             return None
@@ -175,8 +193,25 @@ class DexScreener:
         # Return the highest liquidity pair
         pairs.sort(key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
         token = self._parse_pair(pairs[0])
-        if token:
-            self._score_token(token)
+        if not token:
+            return None
+
+        # Enrich with Birdeye real-time price (bypasses DexScreener 60s cache)
+        be = _get_birdeye()
+        if be and chain == "solana":
+            try:
+                bp = be.get_price(token_address)
+                if bp and bp.price_usd > 0:
+                    token.price_usd          = bp.price_usd
+                    token.price_change_h24   = bp.price_change_24h_pct
+                    if bp.volume_24h_usd > 0:
+                        token.volume_h24     = bp.volume_24h_usd
+                    if bp.liquidity_usd > 0:
+                        token.liquidity_usd  = bp.liquidity_usd
+            except Exception as e:
+                logger.debug("Birdeye price enrich error: %s", e)
+
+        self._score_token(token)
         return token
 
     def search_token(self, query: str) -> list[DexToken]:

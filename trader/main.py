@@ -728,21 +728,23 @@ class AITrader:
                 "partial_profits_taken": [],
                 "peak_price": token.price_usd,
                 "current_pnl_pct": 0.0,
+                "liquidity_usd": token.liquidity_usd,  # for dynamic slippage on exit
             }
 
             if token.chain_id == "solana" and self.solana.is_connected:
+                # Pass liquidity so wallet can compute dynamic slippage
                 tx = self.solana.safe_buy_token(
                     token.base_address, size_usd,
                     safety_report=safety,
-                    slippage_bps=config.SOL_MAX_SLIPPAGE_BPS)
-                if tx:
+                    liquidity_usd=token.liquidity_usd)
+                if tx and not tx.startswith("paper_"):
                     pos_data["tx"] = tx
                     self._dex_positions[token.pair_address] = pos_data
                     self.portfolio.cash -= size_usd
                     risk_str = safety.risk_level if safety else "?"
-                    logger.info("DEX BUY %s $%.2f @ $%.8f score=%.2f safety=%s",
+                    logger.info("DEX BUY %s $%.2f @ $%.8f score=%.2f safety=%s | tx=%s",
                                 token.base_symbol, size_usd, token.price_usd,
-                                token.score, risk_str)
+                                token.score, risk_str, tx[:16])
             else:
                 pos_data["tx"] = f"paper_{int(time.time())}"
                 self._dex_positions[token.pair_address] = pos_data
@@ -770,8 +772,11 @@ class AITrader:
                 entry   = pos["entry_price"]
                 current = token.price_usd
                 pnl_pct = (current - entry) / entry if entry > 0 else 0
-                pos["current_price"] = current
+                pos["current_price"]  = current
                 pos["current_pnl_pct"] = pnl_pct
+                # Refresh liquidity for dynamic slippage calculations on exit
+                if token.liquidity_usd > 0:
+                    pos["liquidity_usd"] = token.liquidity_usd
 
                 # Update trailing high
                 pos["peak_price"] = max(pos.get("peak_price", entry), current)
@@ -785,12 +790,19 @@ class AITrader:
                     closed.append(pair_addr)
                     continue
 
-                # 2. PARTIAL PROFIT-TAKING
+                # 2. DUST CLEANUP — remaining fraction too small to trade meaningfully
+                remaining_now = pos.get("remaining_fraction", 1.0)
+                if remaining_now < 0.02:
+                    self._close_dex_position(pair_addr, pos, current, "Dust cleanup (<2% remaining)")
+                    closed.append(pair_addr)
+                    continue
+
+                # 3. PARTIAL PROFIT-TAKING
                 sell_frac, partial_reason, partial_threshold = self.risk_mgr.get_partial_profit_action(pos)
                 if sell_frac is not None:
                     self._execute_partial_profit(pair_addr, pos, sell_frac, partial_reason, partial_threshold)
 
-                # 3. FULL EXIT conditions
+                # 4. FULL EXIT conditions
                 remaining = pos.get("remaining_fraction", 1.0)
                 # Raise target as partials are taken
                 adj_target = pos["target_pct"] * (1 + (1 - remaining) * 0.5)
@@ -827,8 +839,19 @@ class AITrader:
         pnl_usd   = size * pnl_pct
         proceeds  = size + pnl_usd
 
+        liq_usd = pos.get("liquidity_usd", 0.0)
         if pos["chain"] == "solana" and self.solana.is_connected and "paper" not in pos.get("tx", ""):
-            self.solana.sell_token(pos["address"], proceeds)
+            sell_tx = self.solana.sell_token(pos["address"], proceeds,
+                                             liquidity_usd=liq_usd)
+            # Always credit cash — on-chain sell handles the actual transfer
+            if sell_tx:
+                self.portfolio.cash += proceeds
+            # If sell fails (e.g. token already zero balance), still credit
+            # to avoid phantom cash leak — log for investigation
+            else:
+                logger.warning("Sell tx failed for %s — crediting paper proceeds $%.2f",
+                               pos["symbol"], proceeds)
+                self.portfolio.cash += proceeds
         else:
             self.portfolio.cash += proceeds
 
@@ -874,9 +897,11 @@ class AITrader:
             pnl_pct = pos.get("current_pnl_pct", 0)
             proceeds = size_usd * actual_frac * (1 + pnl_pct)
 
+            liq_usd = pos.get("liquidity_usd", 0.0)
             if (pos["chain"] == "solana" and self.solana.is_connected
                     and "paper" not in pos.get("tx", "")):
-                tx = self.solana.sell_token_partial(pos["address"], fraction)
+                tx = self.solana.sell_token_partial(pos["address"], fraction,
+                                                    liquidity_usd=liq_usd)
                 if not tx:
                     return
                 self.portfolio.cash += proceeds

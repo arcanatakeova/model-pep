@@ -1,16 +1,27 @@
 """
 Token Safety — Rug Pull Detection, Honeypot Simulation, On-Chain Verification
 ==============================================================================
-Aggregates data from three free sources to produce a composite safety score:
+Aggregates data from multiple sources to produce a composite safety score:
 
-1. RugCheck API (https://api.rugcheck.xyz) — risk assessment, holder analysis
-2. Solana RPC (getAccountInfo) — mint/freeze authority verification
-3. Jupiter Quote API — sell simulation for honeypot detection
+1. Birdeye API (preferred)       — real-time security data, mint/freeze authority,
+                                   top-holder concentration, Token-2022 detection
+2. RugCheck API (free fallback)  — risk assessment, holder analysis
+3. Solana RPC (getAccountInfo)   — on-chain mint/freeze authority (ground truth)
+4. Jupiter Quote API             — sell simulation for honeypot detection
 
-Balanced mode: penalize risky tokens with reduced scores/positions rather
-than hard-blocking them, but still block confirmed honeypots.
+Critical rules:
+- Confirmed honeypots (sell simulation fails) → score = 0, hard block
+- Mint authority active          → -0.25 (can inflate supply)
+- Freeze authority active        → -0.20 (can freeze wallets)
+- Creator holds > 20%            → -0.30 (rug risk)
+- Top 10 holders > 70%           → -0.30 (extreme concentration for memecoins)
+- RugCheck DANGER rating         → -0.20
+
+Safety bypass fix: is_safe_to_trade = score >= MIN_SAFETY_SCORE (raised to 0.45).
+Any token that is a confirmed honeypot gets score=0 regardless of momentum.
 """
 from __future__ import annotations
+
 import base64
 import json
 import logging
@@ -25,10 +36,21 @@ import config
 
 logger = logging.getLogger(__name__)
 
-RUGCHECK_BASE = "https://api.rugcheck.xyz/v1"
-JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
-JUPITER_TOKEN_LIST_URL = "https://token.jup.ag/all"
-USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+RUGCHECK_BASE       = "https://api.rugcheck.xyz/v1"
+JUPITER_QUOTE_URL   = "https://quote-api.jup.ag/v6/quote"
+JUPITER_TOKEN_LIST  = "https://token.jup.ag/all"
+USDC_MINT           = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+# SPL Token Mint layout offsets
+_SPL_MINT_AUTH_OPTION  = 0    # u32 (COption: 0=None, 1=Some)
+_SPL_MINT_AUTH_KEY     = 4    # Pubkey 32 bytes
+_SPL_FREEZE_AUTH_OPTION = 46  # u32 (COption)
+_SPL_FREEZE_AUTH_KEY   = 50   # Pubkey 32 bytes
+_SPL_MINT_MIN_LEN      = 82
+
+# Token-2022 extended mint: header is same 82 bytes, followed by extension data.
+# We only need the first 82 bytes to read authority options.
+_TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 
 
 @dataclass
@@ -43,11 +65,13 @@ class TokenSafetyReport:
     mint_authority_disabled: Optional[bool] = None
     freeze_authority_disabled: Optional[bool] = None
     is_jupiter_verified: bool = False
+    is_token_2022: bool = False
 
     # RugCheck data
     rugcheck_risk: Optional[str] = None
     rugcheck_score: Optional[float] = None
     top_10_holder_pct: Optional[float] = None
+    creator_pct: Optional[float] = None
     lp_locked: Optional[bool] = None
 
     # Honeypot simulation
@@ -62,82 +86,132 @@ class TokenSafetyReport:
 class TokenSafetyChecker:
     """
     Multi-source token safety analysis for Solana memecoins.
-    Uses RugCheck API, Solana RPC, and Jupiter quote simulation.
+    Priority: Birdeye (paid) → RugCheck (free) → Solana RPC → Jupiter
     """
 
     def __init__(self, solana_rpc_url: str = None):
-        self._rpc_url = solana_rpc_url or config.SOLANA_RPC_URL
-        self._session = requests.Session()
-        self._session.headers["User-Agent"] = "ai-trader-safety/1.0"
-        self._cache: dict = {}  # mint → (TokenSafetyReport, timestamp)
+        self._rpc_url  = solana_rpc_url or config.SOLANA_RPC_URL
+        self._session  = requests.Session()
+        self._session.headers["User-Agent"] = "ai-trader-safety/2.0"
+        self._cache: dict[str, tuple[TokenSafetyReport, float]] = {}
         self._cache_ttl = config.RUGCHECK_CACHE_TTL
         self._verified_tokens: Optional[set] = None
         self._verified_loaded_at = 0.0
 
-    # ─── Public API ──────────────────────────────────────────────────────────
+        # Lazy-import Birdeye client to avoid circular deps
+        self._birdeye = None
+
+    def _get_birdeye(self):
+        """Lazy-load Birdeye client."""
+        if self._birdeye is None and config.BIRDEYE_API_KEY:
+            try:
+                from birdeye import BirdeyeClient
+                self._birdeye = BirdeyeClient(config.BIRDEYE_API_KEY)
+            except Exception:
+                pass
+        return self._birdeye
+
+    # ─── Public API ────────────────────────────────────────────────────────────
 
     def check_token_safety(self, mint_address: str) -> TokenSafetyReport:
         """
-        Run all safety checks on a token and return a composite report.
-        Results are cached for RUGCHECK_CACHE_TTL seconds.
+        Run all safety checks and return a composite report.
+        Cached for RUGCHECK_CACHE_TTL seconds.
         """
-        # Check cache
+        now = time.time()
         if mint_address in self._cache:
             report, ts = self._cache[mint_address]
-            if time.time() - ts < self._cache_ttl:
+            if now - ts < self._cache_ttl:
                 return report
 
         score = 1.0
-        flags = []
+        flags: list[str] = []
 
-        # 1. RugCheck API
+        # ── 1. Birdeye security (preferred — richest data) ────────────────
+        birdeye_sec = None
+        be = self._get_birdeye()
+        if be:
+            try:
+                birdeye_sec = be.get_security(mint_address)
+            except Exception as e:
+                logger.debug("Birdeye security error %s: %s", mint_address[:12], e)
+
+        # ── 2. RugCheck (free fallback) ────────────────────────────────────
         rc = self._check_rugcheck(mint_address)
 
-        # 2. On-chain mint/freeze authority
+        # ── 3. On-chain RPC (ground truth for authorities) ─────────────────
         onchain = self._check_on_chain_mint(mint_address)
 
-        # 3. Jupiter verified list
+        # ── 4. Jupiter verified list ───────────────────────────────────────
         jup_verified = self._check_jupiter_verified(mint_address)
 
-        # 4. Sell simulation (honeypot detection)
-        sell_sim = self._simulate_sell(mint_address) if config.ENABLE_SELL_SIMULATION else {}
+        # ── 5. Sell simulation — honeypot detection ────────────────────────
+        sell_sim = (self._simulate_sell(mint_address)
+                    if config.ENABLE_SELL_SIMULATION else {})
 
-        # ── Scoring ──────────────────────────────────────────────────────
+        # ─── HARD BLOCK: Confirmed honeypot ─────────────────────────────────
+        # This check runs first. Nothing overrides it.
+        sell_passed = sell_sim.get("passed")
+        round_trip_tax = sell_sim.get("round_trip_tax_pct")
+        if sell_passed is False and config.BLOCK_HONEYPOTS:
+            report = TokenSafetyReport(
+                mint_address=mint_address,
+                safety_score=0.0,
+                is_safe_to_trade=False,
+                risk_level="CRITICAL",
+                sell_simulation_passed=False,
+                round_trip_tax_pct=1.0,
+                risk_flags=["HONEYPOT: sell simulation failed — no route"],
+                checked_at=now,
+            )
+            self._store(mint_address, report, now)
+            return report
+
+        # ─── Resolve authority data (Birdeye > RPC > RugCheck) ───────────────
+        mint_disabled   = self._resolve(birdeye_sec, "mint_authority",   onchain, rc, "mint_authority_disabled", invert=True)
+        freeze_disabled = self._resolve(birdeye_sec, "freeze_authority", onchain, rc, "freeze_authority_disabled", invert=True)
+        is_token_2022   = (birdeye_sec.is_token_2022 if birdeye_sec else
+                           onchain.get("is_token_2022", False))
 
         # Mint authority
-        mint_disabled = onchain.get("mint_authority_disabled")
-        if mint_disabled is None:
-            mint_disabled = rc.get("mint_authority_disabled")
         if mint_disabled is False:
-            score -= 0.25  # Balanced: penalize, don't hard-block
-            flags.append("Mint authority active (can inflate supply)")
+            score -= 0.25
+            flags.append("Mint authority active — can inflate supply")
+        elif mint_disabled is True and freeze_disabled is True:
+            score += 0.08  # Both disabled = clean
 
         # Freeze authority
-        freeze_disabled = onchain.get("freeze_authority_disabled")
-        if freeze_disabled is None:
-            freeze_disabled = rc.get("freeze_authority_disabled")
         if freeze_disabled is False:
             score -= 0.20
-            flags.append("Freeze authority active (can freeze wallets)")
+            flags.append("Freeze authority active — can freeze wallets")
 
-        # Both disabled = bonus
-        if mint_disabled is True and freeze_disabled is True:
-            score += 0.08
+        # ─── Creator concentration (Birdeye) ──────────────────────────────────
+        creator_pct = birdeye_sec.creator_balance_pct if birdeye_sec else None
+        if creator_pct is not None:
+            if creator_pct > 0.20:
+                score -= 0.30
+                flags.append(f"Creator holds {creator_pct:.0%} of supply (rug risk)")
+            elif creator_pct > 0.10:
+                score -= 0.12
+                flags.append(f"Creator holds {creator_pct:.0%}")
 
-        # Top holder concentration
-        top10 = rc.get("top_10_holder_pct")
+        # ─── Top holder concentration ──────────────────────────────────────────
+        # Birdeye is more accurate; fall back to RugCheck
+        top10 = (birdeye_sec.top10_holder_pct if birdeye_sec and birdeye_sec.top10_holder_pct
+                 else rc.get("top_10_holder_pct"))
         if top10 is not None:
             if top10 > 0.90:
                 score -= 0.45
                 flags.append(f"Top 10 holders own {top10:.0%} (extreme concentration)")
-            elif top10 > config.MAX_TOP10_HOLDER_PCT:
+            elif top10 > 0.70:
+                # Tighter than old 0.85 threshold — memecoins with 70%+ top10 = rug risk
                 score -= 0.30
                 flags.append(f"Top 10 holders own {top10:.0%} (high concentration)")
-            elif top10 > 0.60:
+            elif top10 > 0.55:
                 score -= 0.10
                 flags.append(f"Top 10 holders own {top10:.0%}")
 
-        # LP lock status
+        # ─── LP lock status ────────────────────────────────────────────────────
         lp_locked = rc.get("lp_locked")
         if lp_locked is True:
             score += 0.05
@@ -145,7 +219,7 @@ class TokenSafetyChecker:
             score -= 0.12
             flags.append("Liquidity not locked")
 
-        # RugCheck risk level
+        # ─── RugCheck risk level ───────────────────────────────────────────────
         rc_risk = rc.get("risk_level")
         if rc_risk == "Good":
             score += 0.08
@@ -156,23 +230,18 @@ class TokenSafetyChecker:
             score -= 0.08
             flags.append("RugCheck: WARNING rating")
 
-        # Data unavailability penalties
-        if not rc.get("available", False):
-            score -= 0.05
+        # ─── Data unavailability penalties ────────────────────────────────────
+        if not birdeye_sec and not rc.get("available", False):
+            score -= 0.08  # No data from either source
         if not onchain.get("available", False):
             score -= 0.05
 
-        # Jupiter verified bonus
+        # ─── Jupiter verified bonus ────────────────────────────────────────────
         if jup_verified:
             score += 0.05
 
-        # Honeypot / sell simulation
-        sell_passed = sell_sim.get("passed")
-        round_trip_tax = sell_sim.get("round_trip_tax_pct")
-        if sell_passed is False and config.BLOCK_HONEYPOTS:
-            score = 0.0  # Hard block: can't sell = confirmed honeypot
-            flags.append("HONEYPOT: sell simulation failed (no route)")
-        elif round_trip_tax is not None:
+        # ─── Round-trip tax penalty ────────────────────────────────────────────
+        if round_trip_tax is not None:
             if round_trip_tax > config.MAX_ROUND_TRIP_TAX_PCT:
                 score -= 0.30
                 flags.append(f"High tax: {round_trip_tax:.0%} round-trip loss")
@@ -180,17 +249,15 @@ class TokenSafetyChecker:
                 score -= 0.10
                 flags.append(f"Moderate tax: {round_trip_tax:.0%} round-trip")
 
-        # Clamp score
+        # ─── Clamp and classify ────────────────────────────────────────────────
         score = max(0.0, min(1.0, score))
-
-        # Risk level
-        if score >= 0.8:
+        if score >= 0.80:
             risk_level = "SAFE"
-        elif score >= 0.6:
+        elif score >= 0.60:
             risk_level = "LOW"
-        elif score >= 0.4:
+        elif score >= 0.45:
             risk_level = "MEDIUM"
-        elif score >= 0.2:
+        elif score >= 0.25:
             risk_level = "HIGH"
         else:
             risk_level = "CRITICAL"
@@ -203,25 +270,21 @@ class TokenSafetyChecker:
             mint_authority_disabled=mint_disabled,
             freeze_authority_disabled=freeze_disabled,
             is_jupiter_verified=jup_verified,
+            is_token_2022=bool(is_token_2022),
             rugcheck_risk=rc_risk,
             rugcheck_score=rc.get("score"),
             top_10_holder_pct=top10,
+            creator_pct=creator_pct,
             lp_locked=lp_locked,
             sell_simulation_passed=sell_passed,
             round_trip_tax_pct=round_trip_tax,
             risk_flags=flags,
-            checked_at=time.time(),
+            checked_at=now,
         )
-
-        now = time.time()
-        self._cache[mint_address] = (report, now)
-        # Evict expired entries when cache grows large (prevents unbounded growth)
-        if len(self._cache) > 500:
-            self._cache = {k: v for k, v in self._cache.items()
-                           if now - v[1] < self._cache_ttl}
+        self._store(mint_address, report, now)
         return report
 
-    # ─── Sub-Checks ──────────────────────────────────────────────────────
+    # ─── Data sources ──────────────────────────────────────────────────────────
 
     def _check_rugcheck(self, mint_address: str) -> dict:
         """Query RugCheck API for token risk assessment."""
@@ -235,67 +298,62 @@ class TokenSafetyChecker:
 
             data = resp.json()
             risks = data.get("risks", [])
-            risk_names = [r.get("name", "") for r in risks]
 
-            # Parse top holder concentration from risks or topHolders
+            # Top-10 holder concentration
             top10_pct = None
             top_holders = data.get("topHolders", [])
             if top_holders:
-                total_pct = sum(h.get("pct", 0) for h in top_holders[:10])
-                top10_pct = total_pct / 100.0 if total_pct > 1 else total_pct
+                total = sum(h.get("pct", 0) for h in top_holders[:10])
+                # RugCheck returns % as 0-100 if total > 1, else 0-1
+                top10_pct = total / 100.0 if total > 1 else total
 
-            # Determine overall risk level
-            score = data.get("score", 0)
-            if score >= 800:
+            # Risk level from numeric score
+            score_val = data.get("score", 0)
+            if score_val >= 800:
                 risk_level = "Good"
-            elif score >= 400:
+            elif score_val >= 400:
                 risk_level = "Warning"
             else:
                 risk_level = "Danger"
 
-            # Check mint/freeze from RugCheck data
-            mint_disabled = None
-            freeze_disabled = None
+            # Mint/freeze from tokenMeta
+            mint_disabled = freeze_disabled = None
             token_meta = data.get("tokenMeta", {})
             if "mintAuthority" in token_meta:
                 mint_disabled = token_meta["mintAuthority"] is None
             if "freezeAuthority" in token_meta:
                 freeze_disabled = token_meta["freezeAuthority"] is None
 
-            # LP lock status
+            # LP lock from risk names
             lp_locked = None
             for r in risks:
                 name = r.get("name", "").lower()
                 if "lp" in name and "unlocked" in name:
                     lp_locked = False
-                elif "lp" in name and "locked" in name:
+                elif "lp" in name and ("locked" in name or "burned" in name):
                     lp_locked = True
-                elif "lp" in name and "burned" in name:
-                    lp_locked = True  # Burned LP = permanently locked
 
             return {
-                "available": True,
-                "score": score,
-                "risk_level": risk_level,
-                "risk_names": risk_names,
-                "top_10_holder_pct": top10_pct,
+                "available":               True,
+                "score":                   score_val,
+                "risk_level":              risk_level,
+                "top_10_holder_pct":       top10_pct,
                 "mint_authority_disabled": mint_disabled,
                 "freeze_authority_disabled": freeze_disabled,
-                "lp_locked": lp_locked,
+                "lp_locked":               lp_locked,
             }
         except Exception as e:
-            logger.debug("RugCheck API error for %s: %s", mint_address[:12], e)
+            logger.debug("RugCheck error for %s: %s", mint_address[:12], e)
             return {"available": False}
 
     def _check_on_chain_mint(self, mint_address: str) -> dict:
         """
-        Check token mint account on-chain via Solana RPC.
-        Parses SPL Token mint layout to verify mint/freeze authority.
+        Parse SPL Token mint account on-chain via Solana RPC.
+        Supports both legacy SPL Token (82 bytes) and Token-2022 (>82 bytes).
         """
         try:
             payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
+                "jsonrpc": "2.0", "id": 1,
                 "method": "getAccountInfo",
                 "params": [mint_address, {"encoding": "base64"}],
             }
@@ -307,57 +365,50 @@ class TokenSafetyChecker:
                 return {"available": False}
 
             result = resp.json().get("result", {})
-            value = result.get("value")
+            value  = result.get("value")
             if not value:
                 return {"available": False}
+
+            # Detect Token-2022 by owner program
+            owner = value.get("owner", "")
+            is_t22 = (owner == _TOKEN_2022_PROGRAM)
 
             data_b64 = value.get("data", [None])[0]
             if not data_b64:
                 return {"available": False}
 
             raw = base64.b64decode(data_b64)
-            if len(raw) < 82:
+            if len(raw) < _SPL_MINT_MIN_LEN:
                 return {"available": False}
 
-            # SPL Token Mint layout:
-            # [0:4]   mintAuthorityOption (u32, COption)
-            # [4:36]  mintAuthority (Pubkey, 32 bytes)
-            # [36:44] supply (u64)
-            # [44:45] decimals (u8)
-            # [45:46] isInitialized (bool)
-            # [46:50] freezeAuthorityOption (u32, COption)
-            # [50:82] freezeAuthority (Pubkey, 32 bytes)
-
-            mint_auth_option = struct.unpack_from("<I", raw, 0)[0]
-            freeze_auth_option = struct.unpack_from("<I", raw, 46)[0]
+            # Both SPL Token and Token-2022 share the same first 82-byte layout
+            mint_auth_option   = struct.unpack_from("<I", raw, _SPL_MINT_AUTH_OPTION)[0]
+            freeze_auth_option = struct.unpack_from("<I", raw, _SPL_FREEZE_AUTH_OPTION)[0]
 
             return {
-                "available": True,
+                "available":               True,
                 "mint_authority_disabled": mint_auth_option == 0,
                 "freeze_authority_disabled": freeze_auth_option == 0,
+                "is_token_2022":           is_t22,
             }
         except Exception as e:
-            logger.debug("On-chain mint check error for %s: %s", mint_address[:12], e)
+            logger.debug("On-chain mint check error %s: %s", mint_address[:12], e)
             return {"available": False}
 
     def _check_jupiter_verified(self, mint_address: str) -> bool:
-        """Check if token is on Jupiter's verified token list."""
+        """Check if token is on Jupiter's verified token list (cached 1h)."""
         try:
-            # Lazy load & cache for 1 hour
             now = time.time()
             if self._verified_tokens is None or now - self._verified_loaded_at > 3600:
-                resp = self._session.get(JUPITER_TOKEN_LIST_URL, timeout=15)
+                resp = self._session.get(JUPITER_TOKEN_LIST, timeout=15)
                 if resp.status_code == 200:
                     tokens = resp.json()
                     self._verified_tokens = {
-                        t.get("address", "") for t in tokens
-                        if t.get("address")
+                        t.get("address", "") for t in tokens if t.get("address")
                     }
-                    self._verified_loaded_at = now
                 else:
                     self._verified_tokens = set()
-                    self._verified_loaded_at = now
-
+                self._verified_loaded_at = now
             return mint_address in (self._verified_tokens or set())
         except Exception as e:
             logger.debug("Jupiter token list error: %s", e)
@@ -365,55 +416,87 @@ class TokenSafetyChecker:
 
     def _simulate_sell(self, mint_address: str) -> dict:
         """
-        Honeypot detection: simulate a buy then sell via Jupiter quotes.
-        If the sell quote fails (no route), the token is a honeypot.
-        High round-trip loss indicates excessive taxes.
+        Honeypot detection: simulate buy → sell via Jupiter quotes.
+        No sell route = confirmed honeypot.
+        High round-trip loss = excessive taxes.
         """
         try:
-            # Amount: $1 worth of USDC (6 decimals)
             buy_amount = int(config.SELL_SIM_AMOUNT_USD * 1_000_000)
 
-            # Step 1: Quote USDC -> Token
-            buy_quote = self._session.get(JUPITER_QUOTE_URL, params={
-                "inputMint": USDC_MINT,
+            # Step 1: Quote USDC → Token
+            buy_resp = self._session.get(JUPITER_QUOTE_URL, params={
+                "inputMint":  USDC_MINT,
                 "outputMint": mint_address,
-                "amount": str(buy_amount),
+                "amount":     str(buy_amount),
                 "slippageBps": "500",
             }, timeout=config.SAFETY_CHECK_TIMEOUT)
 
-            if buy_quote.status_code != 200:
-                return {"passed": None}  # Can't determine
+            if buy_resp.status_code != 200:
+                return {"passed": None}
 
-            buy_data = buy_quote.json()
+            buy_data   = buy_resp.json()
             out_amount = buy_data.get("outAmount")
             if not out_amount or int(out_amount) <= 0:
                 return {"passed": False, "round_trip_tax_pct": 1.0}
 
-            # Step 2: Quote Token -> USDC (reverse)
-            sell_quote = self._session.get(JUPITER_QUOTE_URL, params={
-                "inputMint": mint_address,
+            # Step 2: Quote Token → USDC
+            sell_resp = self._session.get(JUPITER_QUOTE_URL, params={
+                "inputMint":  mint_address,
                 "outputMint": USDC_MINT,
-                "amount": str(out_amount),
+                "amount":     str(out_amount),
                 "slippageBps": "500",
             }, timeout=config.SAFETY_CHECK_TIMEOUT)
 
-            if sell_quote.status_code != 200:
+            if sell_resp.status_code != 200:
                 # No sell route = honeypot
                 return {"passed": False, "round_trip_tax_pct": 1.0}
 
-            sell_data = sell_quote.json()
-            sell_out = sell_data.get("outAmount")
+            sell_data = sell_resp.json()
+            sell_out  = sell_data.get("outAmount")
             if not sell_out or int(sell_out) <= 0:
                 return {"passed": False, "round_trip_tax_pct": 1.0}
 
-            # Calculate round-trip loss
-            round_trip_tax = 1.0 - (int(sell_out) / buy_amount)
-            round_trip_tax = max(0.0, round_trip_tax)
-
+            round_trip_tax = max(0.0, 1.0 - int(sell_out) / buy_amount)
             return {
-                "passed": True,
+                "passed":            True,
                 "round_trip_tax_pct": round(round_trip_tax, 4),
             }
         except Exception as e:
-            logger.debug("Sell simulation error for %s: %s", mint_address[:12], e)
+            logger.debug("Sell simulation error %s: %s", mint_address[:12], e)
             return {"passed": None}
+
+    # ─── Helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _resolve(birdeye_sec, be_attr: str,
+                 onchain: dict, rc: dict, rc_key: str,
+                 invert: bool = False) -> Optional[bool]:
+        """
+        Resolve an authority status with Birdeye > RPC > RugCheck priority.
+        For 'mint_authority': birdeye returns the key string or None.
+        invert=True → None means disabled=True.
+        """
+        # Birdeye: attribute is the key string (None = disabled)
+        if birdeye_sec is not None:
+            val = getattr(birdeye_sec, be_attr, "MISSING")
+            if val != "MISSING":
+                return (val is None) if invert else val
+
+        # On-chain RPC (most reliable after Birdeye)
+        if onchain.get("available") and rc_key in onchain:
+            return onchain[rc_key]
+
+        # RugCheck fallback
+        if rc.get("available") and rc_key in rc:
+            return rc[rc_key]
+
+        return None
+
+    def _store(self, mint_address: str, report: TokenSafetyReport, now: float):
+        """Store report in cache with eviction."""
+        self._cache[mint_address] = (report, now)
+        if len(self._cache) > 500:
+            self._cache = {
+                k: v for k, v in self._cache.items()
+                if now - v[1] < self._cache_ttl
+            }
