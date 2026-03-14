@@ -310,9 +310,14 @@ class RiskManager:
 
         # 4. Caps
         size = min(size, config.DEX_MAX_POSITION_USD)
-        size = min(size, equity * config.MAX_POSITION_PCT)
+        # Equity cap: scale up for small wallets so DEX_MIN_POSITION_USD is always achievable.
+        # On a $51 wallet MAX_POSITION_PCT (10%) = $5.10 < $8 minimum → zero trades.
+        # Dynamic cap: at least 1.5× min position as percentage of equity, hard ceiling 25%.
+        _min_pct = (config.DEX_MIN_POSITION_USD / equity) * 1.5 if equity > 0 else 0.25
+        _equity_cap_pct = max(config.MAX_POSITION_PCT, min(_min_pct, 0.25))
+        size = min(size, equity * _equity_cap_pct)
         size = min(size, liquidity_usd * config.MIN_LIQUIDITY_RATIO)
-        size = min(size, self.portfolio.cash * 0.20)  # Up from 0.10 — allows trades on small wallets
+        size = min(size, self.portfolio.cash * 0.25)
 
         if size < config.DEX_MIN_POSITION_USD:
             return 0.0

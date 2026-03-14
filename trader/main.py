@@ -721,7 +721,7 @@ class AITrader:
                     price_change_h1=token.price_change_h1,
                     price_change_h6=token.price_change_h6,
                 )
-                size_usd = min(size_usd, budget * 0.20, config.DEX_MAX_POSITION_USD)
+                size_usd = min(size_usd, config.DEX_MAX_POSITION_USD)  # dex_position_size_usd already handles equity/cash caps
                 if size_usd < config.DEX_MIN_POSITION_USD:
                     logger.debug("SKIP %s: size $%.2f below min $%.2f",
                                  token.base_symbol, size_usd, config.DEX_MIN_POSITION_USD)
