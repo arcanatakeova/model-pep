@@ -6,7 +6,7 @@ import os
 
 # ─── Trading Mode ─────────────────────────────────────────────────────────────
 PAPER_TRADING = True          # Set False to enable live trading (requires API keys)
-INITIAL_CAPITAL = 10_000.0    # Starting capital in USD (overridden by wallet balance)
+INITIAL_CAPITAL = 100_000.0   # Starting capital in USD (overridden by wallet balance)
 
 # ─── Risk Management ──────────────────────────────────────────────────────────
 MAX_POSITION_PCT = 0.10       # Max 10% of portfolio per position

@@ -531,7 +531,12 @@ def render():
     total_ret   = (equity - initial_cap) / initial_cap * 100 if initial_cap else 0
     drawdown    = (peak_equity - equity) / peak_equity * 100 if peak_equity > 0 else 0
     open_pos    = portfolio.get("open_positions", {})
-    closed      = portfolio.get("closed_trades", [])
+    # Recent trades: prefer bot_state.json (updated every cycle, always current)
+    # over trades.json (only updated periodically, may lag by up to 5 min).
+    # Fall back to trades.json for win-rate / PF stats which need all trades.
+    recent_trades = state.get("recent_trades", None)
+    all_closed    = portfolio.get("closed_trades", [])
+    closed        = recent_trades if recent_trades is not None else all_closed
     mode        = state.get("mode", "paper")
     cycle       = state.get("cycle", 0)
     cycle_ms    = state.get("last_cycle_ms", 0)
@@ -540,10 +545,10 @@ def render():
     last_ts     = state.get("last_cycle_ts", 0)
     age_sec     = time.time() - last_ts if last_ts else 999
 
-    wins      = [t for t in closed if t.get("pnl_usd", 0) > 0]
-    losses    = [t for t in closed if t.get("pnl_usd", 0) <= 0]
-    wr        = len(wins) / len(closed) * 100 if closed else 0
-    total_pnl = sum(t.get("pnl_usd", 0) for t in closed)
+    wins      = [t for t in all_closed if t.get("pnl_usd", 0) > 0]
+    losses    = [t for t in all_closed if t.get("pnl_usd", 0) <= 0]
+    wr        = len(wins) / len(all_closed) * 100 if all_closed else 0
+    total_pnl = sum(t.get("pnl_usd", 0) for t in all_closed)
     w_pnl     = sum(t.get("pnl_usd", 0) for t in wins)
     l_pnl     = abs(sum(t.get("pnl_usd", 0) for t in losses))
     pf        = w_pnl / l_pnl if l_pnl > 0 else float("inf")
@@ -598,7 +603,7 @@ def render():
                  f"{len(open_pos)} CEX · {len(dex_pos)} DEX",
                  True),
         kpi_html("Win Rate", f"{wr:.1f}%",
-                 f"{len(closed)} trades · PF {pf:.2f}" if pf != float('inf') else f"{len(closed)} trades",
+                 f"{len(all_closed)} trades · PF {pf:.2f}" if pf != float('inf') else f"{len(all_closed)} trades",
                  wr >= 50),
         kpi_html("Drawdown", f"{drawdown:.2f}%",
                  f"Peak {fmt_usd(peak_equity)}",
@@ -952,7 +957,7 @@ def render():
                  TV["green"] if pf_s >= 1.5 else TV["yellow"] if pf_s >= 1 else TV["red"]) +
             srow("Scale Factor",  f"{scale_f:.2f}x",
                  TV["blue"] if scale_f > 1 else TV["text2"]) +
-            srow("Trades Total",  str(len(closed)))
+            srow("Trades Total",  str(state.get("total_trades", len(all_closed))))
         )
 
         grid_state = load("grid_state.json", {})

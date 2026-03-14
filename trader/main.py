@@ -502,6 +502,9 @@ class AITrader:
                 "profit_factor": perf.get("profit_factor", 0),
                 "max_drawdown_pct": perf.get("max_drawdown_pct", 0),
                 "total_pnl_usd": perf.get("total_pnl_usd", 0),
+                # Recent closed trades (last 30) — written every cycle so dashboard
+                # is always current, regardless of trades.json save frequency.
+                "recent_trades": list(self.portfolio.closed_trades)[-30:],
                 # Signal scanner table for dashboard heatmap
                 "signal_table": signal_table,
                 # Compound engine stats
