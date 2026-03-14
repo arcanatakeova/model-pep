@@ -105,12 +105,18 @@ class SolanaWallet:
             from solders.keypair import Keypair
             from solana.rpc.api import Client
 
+            # Phantom exports as base58 string — try that first (most common)
             try:
-                key_bytes = base64.b58decode(self.private_key_b58)
+                self._keypair = Keypair.from_base58_string(self.private_key_b58)
             except Exception:
-                key_bytes = bytes(json.loads(self.private_key_b58))
-
-            self._keypair = Keypair.from_bytes(key_bytes)
+                # Fallback: JSON byte array [12, 34, 56, ...]
+                try:
+                    key_bytes = bytes(json.loads(self.private_key_b58))
+                    self._keypair = Keypair.from_bytes(key_bytes)
+                except Exception:
+                    # Last resort: raw base64
+                    key_bytes = base64.b64decode(self.private_key_b58)
+                    self._keypair = Keypair.from_bytes(key_bytes)
             self._pubkey  = str(self._keypair.pubkey())
 
             # Prefer Helius RPC URL for priority fee estimates & reliability
