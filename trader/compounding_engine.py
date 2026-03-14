@@ -39,11 +39,9 @@ class CompoundingEngine:
         self.risk_manager = risk_manager
 
         # Market type allocations (fraction of total equity)
-        # Only ACTIVE markets — forex/futures/CEX/grid/scalp all disabled in config.
+        # DEX only — all other markets disabled.
         self.allocations = {
-            "crypto_dex":  0.60,   # Solana DEX / on-chain tokens (primary)
-            "polymarket":  0.20,   # Prediction markets
-            "stocks":      0.20,   # Stocks / ETFs
+            "crypto_dex":  1.0,    # Solana DEX / on-chain tokens (100%)
         }
 
         # Performance tracking per market type
@@ -205,74 +203,12 @@ class CompoundingEngine:
             stats["win_rate"] = stats["wins"] / n if n > 0 else 0.5
 
     def _market_to_key(self, market: str) -> str:
-        mapping = {
-            "dex":         "crypto_dex",
-            "solana":      "crypto_dex",
-            "crypto_dex":  "crypto_dex",
-            # Disabled markets map to dex (nearest active market)
-            "crypto":      "crypto_dex",
-            "cex":         "crypto_dex",
-            "crypto_cex":  "crypto_dex",
-            "futures":     "crypto_dex",
-            "funding_arb": "crypto_dex",
-            "forex":       "crypto_dex",
-            "polymarket":  "polymarket",
-            "stocks":      "stocks",
-            "etf":         "stocks",
-        }
-        return mapping.get(market.lower(), "crypto_dex")
+        # Everything maps to dex — only active market.
+        return "crypto_dex"
 
     def _rebalance_allocations(self):
-        """
-        Dynamically rebalance market allocations based on performance.
-        Reward markets that are making money, reduce losing markets.
-        Uses a softmax-style reweighting.
-        """
-        import numpy as np
-
-        # Performance scores per market
-        scores = {}
-        for key, stats in self.market_stats.items():
-            n = stats["trades"]
-            if n < 3:
-                scores[key] = 0.5   # Not enough data, neutral
-            else:
-                # Combine win rate and total PnL
-                wr_score = stats["win_rate"]
-                pnl_score = np.clip(stats["total_pnl"] / (self.portfolio.equity() + 1) * 10 + 0.5, 0.1, 1.0)
-                scores[key] = 0.6 * wr_score + 0.4 * pnl_score
-
-        # Softmax reweighting with temperature=2 (soft/diversifying).
-        # T<1 concentrates into best performer; T>1 spreads more evenly.
-        # With min/max bounds already enforced below, soft softmax is correct here.
-        score_array = np.array(list(scores.values()))
-        score_array = np.nan_to_num(score_array, nan=0.5, posinf=0.5, neginf=0.5)
-        exp_scores  = np.exp(score_array / 2)  # Temperature = 2.0 (diversifying)
-        total_exp   = exp_scores.sum()
-        if total_exp == 0 or np.isnan(total_exp):
-            return  # Bad data — skip rebalance this cycle
-        weights     = exp_scores / total_exp
-
-        # Enforce min/max allocation bounds (3 active markets)
-        min_alloc = 0.10
-        max_alloc = 0.80
-        weights = np.clip(weights, min_alloc, max_alloc)
-        weights = weights / weights.sum()  # Renormalize
-
-        old_alloc = dict(self.allocations)
-        for key, w in zip(scores.keys(), weights):
-            # Smooth update: blend 30% new, 70% old
-            self.allocations[key] = 0.7 * self.allocations[key] + 0.3 * float(w)
-
-        # Renormalize
-        total = sum(self.allocations.values())
-        self.allocations = {k: v / total for k, v in self.allocations.items()}
-
-        # Log changes
-        for k in self.allocations:
-            if abs(self.allocations[k] - old_alloc.get(k, 0)) > 0.02:
-                logger.info("Rebalance %s: %.1f%% → %.1f%%",
-                            k, old_alloc.get(k, 0) * 100, self.allocations[k] * 100)
+        """No-op — single market (DEX), always 100% allocated."""
+        pass
 
     def _check_milestones(self, equity: float):
         """Log milestone achievements."""
