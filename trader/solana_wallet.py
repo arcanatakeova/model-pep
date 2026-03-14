@@ -131,15 +131,19 @@ class SolanaWallet:
 
             logger.info("Solana wallet connected: %s…%s",
                         self._pubkey[:6], self._pubkey[-4:])
-            self._check_jupiter_connectivity()
+            self._check_dex_connectivity()
         except ImportError:
             logger.warning("solana/solders not installed — Solana trading disabled.")
             logger.warning("Install: pip install solana solders")
         except Exception as e:
             logger.error("Wallet init failed: %s", e)
 
-    def _check_jupiter_connectivity(self):
-        """Warn at startup if Jupiter API is unreachable (geo-block / DNS issue)."""
+    def _check_dex_connectivity(self):
+        """Check Jupiter and Raydium reachability at startup. Both are tried at swap time
+        (Jupiter first, Raydium fallback), so trading is possible if either is up."""
+        jupiter_ok = False
+        raydium_ok = False
+
         try:
             resp = requests.get(
                 "https://quote-api.jup.ag/v6/quote",
@@ -151,13 +155,35 @@ class SolanaWallet:
                 },
                 timeout=5,
             )
-            if resp.ok:
-                logger.info("Jupiter API reachable — DEX trading enabled")
-            else:
-                logger.warning("Jupiter API returned %s — swaps may fail", resp.status_code)
+            jupiter_ok = resp.ok
         except Exception:
+            pass
+
+        try:
+            resp = requests.get(
+                RAYDIUM_COMPUTE_URL,
+                params={
+                    "inputMint":  "So11111111111111111111111111111111111111112",
+                    "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "amount":     "1000000",
+                    "slippageBps":"50",
+                    "txVersion":  "V0",
+                },
+                timeout=5,
+            )
+            raydium_ok = resp.ok
+        except Exception:
+            pass
+
+        if jupiter_ok and raydium_ok:
+            logger.info("DEX routing: Jupiter ✓  Raydium ✓")
+        elif jupiter_ok:
+            logger.info("DEX routing: Jupiter ✓  Raydium ✗ (will use Jupiter only)")
+        elif raydium_ok:
+            logger.info("DEX routing: Jupiter ✗  Raydium ✓ (fallback active)")
+        else:
             logger.error(
-                "Jupiter API unreachable — DEX buys will FAIL until fixed.\n"
+                "DEX routing: Jupiter ✗  Raydium ✗ — both unreachable, buys will fail.\n"
                 "  Likely cause: geo-block or DNS issue.\n"
                 "  Fix: enable a VPN (e.g. Cloudflare WARP: https://one.one.one.one/)\n"
                 "       or set HTTPS_PROXY=socks5://localhost:PORT before starting."
