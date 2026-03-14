@@ -108,6 +108,10 @@ class RiskManager:
         if self._max_drawdown_triggered():
             return False, "Maximum drawdown limit reached (50%)"
 
+        # Daily loss circuit breaker
+        if self._daily_loss_triggered():
+            return False, "Daily loss limit reached — no new positions today"
+
         # Already in this position
         if self.portfolio.has_position(asset_id):
             return False, f"Already holding position in {asset_id}"

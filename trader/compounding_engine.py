@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -69,6 +68,7 @@ class CompoundingEngine:
 
         self._equity_at_last_rebalance = 0.0
         self._cycle_count = 0
+        self._stats_processed_count = 0   # Incremental cursor for market stats
 
         self.load_state()
 
@@ -176,20 +176,30 @@ class CompoundingEngine:
     # ─── Performance Tracking ─────────────────────────────────────────────────
 
     def _update_market_stats(self):
-        """Sync market stats from portfolio's closed trades."""
-        # Reset stats
-        for k in self.market_stats:
-            self.market_stats[k] = {"trades": 0, "wins": 0, "total_pnl": 0.0, "win_rate": 0.5}
+        """
+        Incrementally sync market stats from portfolio's closed trades.
+        Only processes new trades since the last call — O(new trades) not O(all trades).
+        On restart (cursor > actual trades), falls back to full rescan.
+        """
+        trades = self.portfolio.closed_trades
+        total = len(trades)
 
-        for trade in self.portfolio.closed_trades:
-            market = trade.get("market", "crypto_cex")
-            # Map market types to allocation keys
-            key = self._market_to_key(market)
+        # If the trade list shrank (e.g. archive rotation), do a full rescan
+        if self._stats_processed_count > total:
+            for k in self.market_stats:
+                self.market_stats[k] = {"trades": 0, "wins": 0, "total_pnl": 0.0, "win_rate": 0.5}
+            self._stats_processed_count = 0
+
+        # Process only new trades
+        for trade in trades[self._stats_processed_count:]:
+            key = self._market_to_key(trade.get("market", "crypto_cex"))
             stats = self.market_stats[key]
             stats["trades"] += 1
             stats["total_pnl"] += trade.get("pnl_usd", 0)
             if trade.get("pnl_usd", 0) > 0:
                 stats["wins"] += 1
+
+        self._stats_processed_count = total
 
         for k, stats in self.market_stats.items():
             n = stats["trades"]
@@ -322,11 +332,14 @@ class CompoundingEngine:
             "allocations": self.allocations,
             "market_stats": self.market_stats,
             "cycle_count": self._cycle_count,
+            "stats_processed_count": self._stats_processed_count,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
-            with open(self.ALLOCATION_FILE, "w") as f:
+            tmp = self.ALLOCATION_FILE + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(state, f, indent=2)
+            os.replace(tmp, self.ALLOCATION_FILE)
         except Exception as e:
             logger.warning("Failed to save compounding state: %s", e)
 
@@ -334,10 +347,12 @@ class CompoundingEngine:
         try:
             with open(self.ALLOCATION_FILE) as f:
                 state = json.load(f)
-            self.allocations   = state.get("allocations", self.allocations)
-            self.market_stats  = state.get("market_stats", self.market_stats)
-            self._cycle_count  = state.get("cycle_count", 0)
-            logger.info("Compounding state loaded (cycle #%d)", self._cycle_count)
+            self.allocations             = state.get("allocations", self.allocations)
+            self.market_stats            = state.get("market_stats", self.market_stats)
+            self._cycle_count            = state.get("cycle_count", 0)
+            self._stats_processed_count  = state.get("stats_processed_count", 0)
+            logger.info("Compounding state loaded (cycle #%d, %d trades processed)",
+                        self._cycle_count, self._stats_processed_count)
         except FileNotFoundError:
             pass
         except Exception as e:
