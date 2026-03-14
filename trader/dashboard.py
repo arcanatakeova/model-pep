@@ -195,6 +195,43 @@ def load(filename: str, default):
     except Exception:
         return default
 
+PAPER_INITIAL_CAPITAL = 100_000.0  # Fresh paper account balance
+
+def _reset_paper_now():
+    """
+    Immediately wipe all paper trading state from disk.
+    Works even if the bot is not running.
+    Writes a clean trades.json with $100k so the dashboard shows it instantly.
+    """
+    import json, os
+    from datetime import datetime, timezone
+
+    # Files to delete outright
+    for fname in ("dex_positions.json", "equity_curve.json", "bot_state.json"):
+        try:
+            (TRADER_DIR / fname).unlink()
+        except FileNotFoundError:
+            pass
+
+    # Write a clean portfolio (trades.json) so dashboard shows $100k immediately
+    clean_portfolio = {
+        "cash":             PAPER_INITIAL_CAPITAL,
+        "initial_capital":  PAPER_INITIAL_CAPITAL,
+        "peak_equity":      PAPER_INITIAL_CAPITAL,
+        "open_positions":   {},
+        "closed_trades":    [],
+        "saved_at":         datetime.now(timezone.utc).isoformat(),
+    }
+    tmp = TRADER_DIR / "trades.json.tmp"
+    with open(tmp, "w") as f:
+        json.dump(clean_portfolio, f, indent=2)
+    tmp.replace(TRADER_DIR / "trades.json")
+
+    # Also tell the bot to reset (in case it IS running)
+    settings = load("settings.json", {"live_mode": False})
+    settings["reset_paper"] = True
+    save_settings(settings)
+
 def save_settings(s: dict):
     tmp = TRADER_DIR / "settings.json.tmp"
     with open(tmp, "w") as f:
@@ -516,10 +553,9 @@ def render():
         with c2:
             if not cur_live:
                 if st.button("↺ Reset Paper", use_container_width=True,
-                             help="Wipe all paper trades and restart with initial capital"):
-                    settings["reset_paper"] = True
-                    save_settings(settings)
-                    st.toast("Paper account reset queued — takes effect on next cycle", icon="↺")
+                             help="Immediately wipe all paper trades and restart with $100k"):
+                    _reset_paper_now()
+                    st.rerun()
 
         # ── BOT STATUS ────────────────────────────────────────────────────────
         st.markdown(f'<div class="sec-hdr">Bot Status</div>', unsafe_allow_html=True)

@@ -143,9 +143,22 @@ class AITrader:
         self._cex_signals_cache = []    # Shared between CEX scan + futures swing scan
         self._market_snapshot: dict = {}  # Latest market overview (BTC dom, sentiment)
 
-        # Load saved state
-        self.portfolio.load()
-        self._load_dex_positions()
+        # Load saved state — live mode preserves history; paper mode is always a fresh session
+        if live:
+            self.portfolio.load()
+            self._load_dex_positions()
+        else:
+            # Paper trading is session-based: always start clean at INITIAL_CAPITAL.
+            # Previous paper sessions are irrelevant — this prevents stale data bleeding in.
+            logger.info("Paper mode: starting fresh session at $%.0f (no history loaded)",
+                        config.INITIAL_CAPITAL)
+            # Wipe any leftover paper files so the dashboard shows a clean slate immediately
+            for fname in ("trades.json", "dex_positions.json", "equity_curve.json"):
+                try:
+                    os.unlink(fname)
+                except FileNotFoundError:
+                    pass
+            self.portfolio.save()   # Write clean $100k state right away
         self.risk_mgr.reset_daily_loss_tracker()
         # Write portfolio immediately so dashboard has data before cycle 1 finishes
         self.portfolio.save()
