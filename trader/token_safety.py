@@ -166,12 +166,12 @@ class TokenSafetyChecker:
             except Exception: sell_sim = {"passed": None}
 
         # ─── HARD BLOCK: Confirmed honeypot ─────────────────────────────────
-        # This check runs first. Nothing overrides it.
-        sell_passed = sell_sim.get("passed")
+        # Only hard-block when we KNOW it's a honeypot:
+        #   False  = buy route exists but sell route doesn't → can buy, can't sell = honeypot
+        #   None   = API error / new token not yet indexed  → inconclusive, apply penalty only
+        sell_passed    = sell_sim.get("passed")
         round_trip_tax = sell_sim.get("round_trip_tax_pct")
-        # Fail SAFE: block if sell simulation returned False (honeypot) OR None (API timeout).
-        # Only allow if sell explicitly passed (True). Never trade when uncertain.
-        if sell_passed is not True and config.BLOCK_HONEYPOTS:
+        if sell_passed is False and config.BLOCK_HONEYPOTS:
             report = TokenSafetyReport(
                 mint_address=mint_address,
                 safety_score=0.0,
@@ -179,11 +179,16 @@ class TokenSafetyChecker:
                 risk_level="CRITICAL",
                 sell_simulation_passed=False,
                 round_trip_tax_pct=1.0,
-                risk_flags=["HONEYPOT: sell simulation failed — no route"],
+                risk_flags=["HONEYPOT: buy route exists but no sell route"],
                 checked_at=now,
             )
             self._store(mint_address, report, now)
             return report
+        # Inconclusive sell sim (None = timeout / new token not yet indexed by Jupiter)
+        # → apply a -0.25 safety penalty but do not hard-block
+        if sell_passed is None:
+            score -= 0.25
+            flags.append("Sell simulation inconclusive (new token or API timeout)")
 
         # ─── Resolve authority data (Birdeye > RPC > RugCheck) ───────────────
         mint_disabled   = self._resolve(birdeye_sec, "mint_authority",   onchain, rc, "mint_authority_disabled", invert=True)
@@ -458,9 +463,12 @@ class TokenSafetyChecker:
             buy_data   = buy_resp.json()
             out_amount = buy_data.get("outAmount")
             if not out_amount or int(out_amount) <= 0:
-                return {"passed": False, "round_trip_tax_pct": 1.0}
+                # No buy route — token not yet indexed by Jupiter (brand-new token).
+                # This is NOT a honeypot signal; return None so the caller applies a
+                # soft penalty instead of a hard block.
+                return {"passed": None}
 
-            # Step 2: Quote Token → USDC
+            # Buy route confirmed. Now check if we can sell back.
             sell_resp = self._session.get(JUPITER_QUOTE_URL, params={
                 "inputMint":  mint_address,
                 "outputMint": USDC_MINT,
@@ -469,7 +477,7 @@ class TokenSafetyChecker:
             }, timeout=config.SAFETY_CHECK_TIMEOUT)
 
             if sell_resp.status_code != 200:
-                # No sell route = honeypot
+                # Buy route exists but no sell route → confirmed honeypot
                 return {"passed": False, "round_trip_tax_pct": 1.0}
 
             sell_data = sell_resp.json()

@@ -274,8 +274,8 @@ class DexScreener:
         """
         # Run both in parallel since they hit different API endpoints
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            f_trend = ex.submit(self.get_trending_tokens, 0.38)
-            f_new   = ex.submit(self.get_new_pairs, 48, 0.38)
+            f_trend = ex.submit(self.get_trending_tokens, config.DEX_MIN_SCORE)
+            f_new   = ex.submit(self.get_new_pairs, 48, config.DEX_MIN_SCORE)
             trending  = f_trend.result(timeout=30)
             new_pairs = f_new.result(timeout=30)
 
@@ -375,6 +375,12 @@ class DexScreener:
             token.score = 0.0
             return 0.0
         if token.market_cap > MAX_MARKET_CAP:
+            token.score = 0.0
+            return 0.0
+        # Mcap/liquidity ratio: > 200x means only 0.5% of market cap is actually
+        # tradeable — buying this is buying exit liquidity from whales.
+        if (token.market_cap > 0 and token.liquidity_usd > 0 and
+                token.market_cap / token.liquidity_usd > 200):
             token.score = 0.0
             return 0.0
 

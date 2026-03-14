@@ -312,7 +312,7 @@ class RiskManager:
         size = min(size, config.DEX_MAX_POSITION_USD)
         size = min(size, equity * config.MAX_POSITION_PCT)
         size = min(size, liquidity_usd * config.MIN_LIQUIDITY_RATIO)
-        size = min(size, self.portfolio.cash * 0.10)
+        size = min(size, self.portfolio.cash * 0.20)  # Up from 0.10 — allows trades on small wallets
 
         if size < config.DEX_MIN_POSITION_USD:
             return 0.0
