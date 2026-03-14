@@ -228,8 +228,12 @@ class CompoundingEngine:
 
         # Softmax reweighting
         score_array = np.array(list(scores.values()))
+        score_array = np.nan_to_num(score_array, nan=0.5, posinf=0.5, neginf=0.5)
         exp_scores  = np.exp(score_array * 2)  # Temperature = 0.5
-        weights     = exp_scores / exp_scores.sum()
+        total_exp   = exp_scores.sum()
+        if total_exp == 0 or np.isnan(total_exp):
+            return  # Bad data — skip rebalance this cycle
+        weights     = exp_scores / total_exp
 
         # Enforce min/max allocation bounds
         min_alloc = 0.05
