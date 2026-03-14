@@ -268,12 +268,14 @@ class AITrader:
         logger.info("Compound allocations: " + " | ".join(
             f"{k}: ${v:.0f}" for k, v in alloc.items()))
 
-        # ── 13. Equity snapshot ───────────────────────────────────────────
+        # ── 13. Equity snapshot (cap in-memory at 2880 = 24h of 30s cycles) ──
         self._equity_curve.append({
             "ts": datetime.now(timezone.utc).isoformat(),
             "equity": round(equity, 2),
             "cycle": self._cycle,
         })
+        if len(self._equity_curve) > 2_880:
+            self._equity_curve = self._equity_curve[-2_880:]
 
         # ── 14. Risk report ───────────────────────────────────────────────
         risk = self.risk_mgr.risk_report()
@@ -310,8 +312,15 @@ class AITrader:
             actionable = [s for s in signals if s.signal != "HOLD"]
             logger.info("CEX scan: %d signals (%d actionable)",
                         len(signals), len(actionable))
+
+            # Diagnostics: log top 5 scores so we can see what's near the threshold
+            top5 = sorted(signals, key=lambda s: abs(s.score), reverse=True)[:5]
+            for s in top5:
+                logger.info("  [%s] %-12s score=%+.3f conv=%.2f regime=%-8s trend=%s",
+                            s.signal, s.symbol, s.score, s.conviction,
+                            s.regime, s.trend_direction)
+
             for sig in actionable[:8]:   # Top 8 by score
-                # Scale position size by compound engine
                 self._execute_cex_signal(sig)
         except Exception as e:
             logger.warning("CEX scan error: %s", e)
@@ -323,12 +332,12 @@ class AITrader:
         scale = self.compounder.get_position_scale_factor()
         scaled_risk = min(config.RISK_PER_TRADE_PCT * scale, 0.04)
 
-        # Temporarily patch on the executor level via a thread-local override
-        self.executor._risk_override = scaled_risk
+        # Thread-local override — safe for concurrent execution across threads
+        self.executor._tls.risk_override = scaled_risk
         try:
             self.executor.process_signal(signal)
         finally:
-            self.executor._risk_override = None
+            self.executor._tls.risk_override = None
 
     def _run_scalp_scan(self):
         """5-minute scalp signals on BTC/ETH/SOL → leveraged futures trades."""
@@ -420,6 +429,23 @@ class AITrader:
             if true_equity > self.portfolio.peak_equity:
                 self.portfolio.peak_equity = true_equity
             daily_pnl = round(true_equity - self._day_start_eq, 2)
+            perf = self.portfolio.performance_summary()
+            # Build signal table from latest CEX scan cache
+            signal_table = [
+                {
+                    "symbol": s.symbol,
+                    "market": s.market,
+                    "signal": s.signal,
+                    "score": round(s.score, 4),
+                    "conviction": round(s.conviction, 4),
+                    "price": s.current_price,
+                    "regime": s.regime,
+                    "trend": s.trend_direction,
+                    "components": {k: round(v, 3) for k, v in s.component_scores.items()},
+                }
+                for s in sorted(self._cex_signals_cache,
+                                 key=lambda x: abs(x.score), reverse=True)[:20]
+            ]
             state = {
                 "cycle": self._cycle,
                 "last_cycle_ts": time.time(),
@@ -437,6 +463,16 @@ class AITrader:
                 "dex_positions": len(self._dex_positions),
                 "peak_equity": round(self.portfolio.peak_equity, 2),
                 "total_trades": len(self.portfolio.closed_trades),
+                # Performance stats
+                "win_rate_pct": perf.get("win_rate_pct", 0),
+                "profit_factor": perf.get("profit_factor", 0),
+                "max_drawdown_pct": perf.get("max_drawdown_pct", 0),
+                "total_pnl_usd": perf.get("total_pnl_usd", 0),
+                # Signal scanner table for dashboard heatmap
+                "signal_table": signal_table,
+                # Compound engine stats
+                "allocations": self.compounder.allocations,
+                "scale_factor": round(self.compounder.get_position_scale_factor(), 3),
             }
             with open("bot_state.json", "w") as f:
                 json.dump(state, f)

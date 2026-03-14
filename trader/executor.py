@@ -10,6 +10,7 @@ Futures trading uses isolated margin mode. Each futures position tracks:
   - margin posted (collateral)
 """
 import logging
+import threading
 from typing import Optional
 from datetime import datetime, timezone
 
@@ -38,7 +39,7 @@ class TradeExecutor:
         self.risk = risk_manager
         self._exchange = None          # Binance spot (live only)
         self._futures_exchange = None  # Binance USDT-M futures (live only)
-        self._risk_override: Optional[float] = None  # Thread-local risk % override (bug fix)
+        self._tls = threading.local()  # Thread-local storage for risk override
 
         if not config.PAPER_TRADING:
             self._init_live_exchange()
@@ -130,10 +131,11 @@ class TradeExecutor:
         price   = signal.current_price
         stop_pct = abs(price - signal.stop_loss) / price if price > 0 else config.STOP_LOSS_PCT
 
-        # Pass risk override directly — no global config mutation (thread-safe)
+        # Thread-local risk override — safe for concurrent signal processing
+        risk_override = getattr(self._tls, "risk_override", None)
         size_usd = self.risk.position_size_usd(
             signal.score, signal.conviction, stop_pct, price,
-            risk_pct_override=self._risk_override,
+            risk_pct_override=risk_override,
         )
 
         if size_usd < 1.0:

@@ -710,6 +710,89 @@ def render():
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
+    # ── Signal Scanner Heatmap ────────────────────────────────────────────────
+    signal_table = state.get("signal_table", [])
+    if signal_table:
+        st.markdown(f'<div class="tv-section">Signal Scanner — Top Market Scores</div>',
+                    unsafe_allow_html=True)
+
+        def score_cell(v: float) -> str:
+            """Render an indicator score as a colored bar cell."""
+            pct = int(abs(v) * 100)
+            bg = TV["green_dim"] if v > 0 else TV["red_dim"]
+            fg = TV["green"] if v > 0 else TV["red"]
+            sign = "+" if v > 0 else ""
+            return (
+                f'<td style="padding:5px 8px;text-align:right;position:relative;">'
+                f'<div style="position:absolute;top:0;bottom:0;'
+                f'{"right" if v > 0 else "left"}:50%;width:{pct//2}%;'
+                f'background:{bg};"></div>'
+                f'<span style="position:relative;color:{fg};font-weight:600;'
+                f'font-size:11px;">{sign}{v:.3f}</span></td>'
+            )
+
+        def signal_badge(sig: str) -> str:
+            if sig == "BUY":
+                return f'<span style="background:{TV["green"]}22;color:{TV["green"]};padding:1px 6px;border-radius:3px;font-weight:700;font-size:11px;">▲ BUY</span>'
+            if sig == "SELL":
+                return f'<span style="background:{TV["red"]}22;color:{TV["red"]};padding:1px 6px;border-radius:3px;font-weight:700;font-size:11px;">▼ SELL</span>'
+            return f'<span style="color:{TV["text2"]};font-size:11px;">HOLD</span>'
+
+        indicators = ["rsi", "macd", "bollinger", "ema_cross", "momentum", "volume"]
+        ind_labels  = ["RSI", "MACD", "BB", "EMA✕", "MOM", "VOL"]
+
+        hdr = (
+            f'<tr style="border-bottom:1px solid {TV["border"]};">'
+            f'<th style="padding:6px 8px;text-align:left;color:{TV["text2"]};font-size:10px;font-weight:600;letter-spacing:1px;">SYMBOL</th>'
+            f'<th style="padding:6px 8px;color:{TV["text2"]};font-size:10px;">SIGNAL</th>'
+            f'<th style="padding:6px 8px;text-align:right;color:{TV["text2"]};font-size:10px;">SCORE</th>'
+            f'<th style="padding:6px 8px;text-align:right;color:{TV["text2"]};font-size:10px;">CONV</th>'
+            f'<th style="padding:6px 8px;text-align:right;color:{TV["text2"]};font-size:10px;">PRICE</th>'
+            f'<th style="padding:6px 8px;text-align:center;color:{TV["text2"]};font-size:10px;">REGIME</th>'
+        )
+        for lbl in ind_labels:
+            hdr += f'<th style="padding:6px 8px;text-align:right;color:{TV["text2"]};font-size:10px;">{lbl}</th>'
+        hdr += '</tr>'
+
+        rows_html = ""
+        for row in signal_table:
+            sig   = row.get("signal", "HOLD")
+            score = row.get("score", 0)
+            conv  = row.get("conviction", 0)
+            price = row.get("price", 0)
+            comps = row.get("components", {})
+            regime = row.get("regime", "—")
+            trend  = row.get("trend", "neutral")
+            score_c = TV["green"] if score > 0 else TV["red"] if score < 0 else TV["text2"]
+            trend_icon = "↑" if trend == "up" else "↓" if trend == "down" else "→"
+            reg_c = TV["blue"] if regime == "trending" else TV["yellow"] if regime == "volatile" else TV["text2"]
+            row_bg = f'{TV["green"]}08' if sig == "BUY" else f'{TV["red"]}08' if sig == "SELL" else "transparent"
+            comp_cells = "".join(score_cell(comps.get(ind, 0)) for ind in indicators)
+            rows_html += (
+                f'<tr style="border-bottom:1px solid {TV["bg3"]};background:{row_bg};">'
+                f'<td style="padding:5px 8px;font-weight:700;font-size:12px;">{row.get("symbol","?")}'
+                f'<span style="color:{TV["text2"]};font-size:10px;margin-left:4px;">{row.get("market","")}</span></td>'
+                f'<td style="padding:5px 8px;">{signal_badge(sig)}</td>'
+                f'<td style="padding:5px 8px;text-align:right;color:{score_c};font-weight:700;font-size:12px;">{score:+.4f}</td>'
+                f'<td style="padding:5px 8px;text-align:right;color:{TV["text2"]};font-size:11px;">{conv:.2f}</td>'
+                f'<td style="padding:5px 8px;text-align:right;font-size:11px;">{fmt_price(price)}</td>'
+                f'<td style="padding:5px 8px;text-align:center;font-size:10px;">'
+                f'<span style="color:{reg_c};">{regime}</span> '
+                f'<span style="color:{TV["text2"]};">{trend_icon}</span></td>'
+                f'{comp_cells}</tr>'
+            )
+
+        scanner_html = (
+            f'<div style="background:{TV["bg2"]};border:1px solid {TV["border"]};'
+            f'border-radius:6px;overflow:auto;max-height:320px;">'
+            f'<table style="width:100%;border-collapse:collapse;font-family:Inter,sans-serif;">'
+            f'<thead style="position:sticky;top:0;background:{TV["bg2"]};">{hdr}</thead>'
+            f'<tbody>{rows_html}</tbody>'
+            f'</table></div>'
+        )
+        st.markdown(scanner_html, unsafe_allow_html=True)
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
     # ── Bottom section: trades + status + feed ────────────────────────────────
     left, mid, right = st.columns([5, 4, 3])
 
@@ -782,20 +865,31 @@ def render():
         age_color  = TV["green"] if age_sec < 60 else TV["yellow"] if age_sec < 120 else TV["red"]
         cash_pct   = cash / equity * 100 if equity > 0 else 0
         deploy_pct = 100 - cash_pct
+        scale_f    = state.get("scale_factor", 1.0)
+        win_rate_s = state.get("win_rate_pct", wr)
+        pf_s       = state.get("profit_factor", pf)
+        dd_s       = state.get("max_drawdown_pct", drawdown)
+        pf_str     = "∞" if pf_s == float("inf") or pf_s == 0 else f"{pf_s:.2f}x"
 
         status_html = (
-            srow("Last Cycle",   f"{age_sec:.0f}s ago", age_color) +
-            srow("Cycle Speed",  f"{cycle_ms:.0f} ms") +
-            srow("WebSocket",    "Connected" if ws_ok else "REST fallback",
+            srow("Last Cycle",    f"{age_sec:.0f}s ago", age_color) +
+            srow("Cycle Speed",   f"{cycle_ms:.0f} ms") +
+            srow("WebSocket",     "Connected" if ws_ok else "REST fallback",
                  TV["green"] if ws_ok else TV["yellow"]) +
-            srow("Futures",      "Enabled" if fut_on else "Disabled",
+            srow("Futures",       "Enabled" if fut_on else "Disabled",
                  TV["blue"] if fut_on else TV["text2"]) +
-            srow("Deployed",     f"{deploy_pct:.0f}% · {fmt_usd(deployed)}",
+            srow("Deployed",      f"{deploy_pct:.0f}% · {fmt_usd(deployed)}",
                  TV["yellow"] if deploy_pct > 80 else TV["text"]) +
-            srow("Peak Equity",  f"${peak_equity:,.2f}") +
-            srow("Drawdown",     f"{drawdown:.2f}%",
-                 TV["red"] if drawdown > 10 else TV["text"]) +
-            srow("Trades Total", str(len(closed)))
+            srow("Peak Equity",   f"${peak_equity:,.2f}") +
+            srow("Max Drawdown",  f"{dd_s:.2f}%",
+                 TV["red"] if dd_s > 15 else TV["yellow"] if dd_s > 7 else TV["text"]) +
+            srow("Win Rate",      f"{win_rate_s:.1f}%",
+                 TV["green"] if win_rate_s >= 50 else TV["red"]) +
+            srow("Profit Factor", pf_str,
+                 TV["green"] if pf_s >= 1.5 else TV["yellow"] if pf_s >= 1 else TV["red"]) +
+            srow("Scale Factor",  f"{scale_f:.2f}x",
+                 TV["blue"] if scale_f > 1 else TV["text2"]) +
+            srow("Trades Total",  str(len(closed)))
         )
 
         grid_state = load("grid_state.json", {})

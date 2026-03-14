@@ -27,25 +27,54 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# ─── Simple in-memory cache ────────────────────────────────────────────────────
+# ─── Thread-safe in-memory cache with TTL eviction ────────────────────────────
 _cache: dict = {}
+_cache_lock = threading.Lock()
+_CACHE_MAX_ENTRIES = 500          # Hard cap to prevent memory leak
+_CACHE_EVICT_INTERVAL = 300       # Prune expired entries every 5 minutes
+_cache_last_evict = 0.0
+
 
 def _cached(key: str, ttl: int = config.DATA_CACHE_TTL):
-    if key in _cache:
-        value, ts = _cache[key]
-        if time.time() - ts < ttl:
-            return value
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry is not None:
+            value, ts = entry
+            if time.time() - ts < ttl:
+                return value
     return None
 
+
 def _store(key: str, value):
-    _cache[key] = (value, time.time())
+    global _cache_last_evict
+    now = time.time()
+    with _cache_lock:
+        _cache[key] = (value, now)
+        # Periodic eviction: remove expired + cap size
+        if now - _cache_last_evict > _CACHE_EVICT_INTERVAL or len(_cache) > _CACHE_MAX_ENTRIES:
+            _evict_cache(now)
+            _cache_last_evict = now
     return value
 
+
+def _evict_cache(now: float):
+    """Remove expired entries and cap total size. Must be called under _cache_lock."""
+    max_ttl = 3600  # Never keep anything older than 1 hour
+    expired = [k for k, (_, ts) in _cache.items() if now - ts > max_ttl]
+    for k in expired:
+        del _cache[k]
+    # If still over cap, evict oldest entries
+    if len(_cache) > _CACHE_MAX_ENTRIES:
+        sorted_keys = sorted(_cache, key=lambda k: _cache[k][1])
+        for k in sorted_keys[:len(_cache) - _CACHE_MAX_ENTRIES]:
+            del _cache[k]
+
+
 def _get(url: str, params: dict = None, timeout: int = 10) -> Optional[dict]:
-    """HTTP GET with basic error handling and rate-limit backoff."""
+    """HTTP GET with basic error handling, rate-limit backoff, and JSON validation."""
     for attempt in range(3):
         try:
-            headers = {"Accept": "application/json", "User-Agent": "ai-trader/2.0"}
+            headers = {"Accept": "application/json", "User-Agent": "ai-trader/3.0"}
             if config.COINGECKO_API_KEY and "coingecko" in url:
                 headers["x-cg-demo-api-key"] = config.COINGECKO_API_KEY
             resp = requests.get(url, params=params, headers=headers, timeout=timeout)
@@ -54,8 +83,21 @@ def _get(url: str, params: dict = None, timeout: int = 10) -> Optional[dict]:
                 logger.debug("Rate limited by %s, waiting %ds", url, wait)
                 time.sleep(wait)
                 continue
+            if resp.status_code >= 500:
+                logger.debug("Server error %d from %s", resp.status_code, url)
+                if attempt < 2:
+                    time.sleep(1 + attempt)
+                continue
             resp.raise_for_status()
-            return resp.json()
+            try:
+                return resp.json()
+            except ValueError:
+                logger.debug("Invalid JSON from %s", url)
+                return None
+        except requests.Timeout:
+            logger.debug("Timeout fetching %s (attempt %d)", url, attempt + 1)
+            if attempt < 2:
+                time.sleep(1)
         except requests.RequestException as e:
             logger.debug("Request failed (%s): %s", url, e)
             if attempt < 2:
@@ -519,15 +561,30 @@ def get_crypto_ohlcv_cc(symbol: str, limit: int = 100, currency: str = "USD") ->
         params={"fsym": symbol, "tsym": currency, "limit": limit},
     )
     if not data or data.get("Response") != "Success":
+        logger.debug("CC API error for %s: %s", symbol, data.get("Message", "unknown") if data else "no data")
         return _store(key, pd.DataFrame())
 
-    rows = data["Data"]["Data"]
-    df = pd.DataFrame(rows)
-    df["timestamp"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    df = df.rename(columns={"volumefrom": "volume"})[
-        ["timestamp", "open", "high", "low", "close", "volume"]
-    ]
-    df = df[df["close"] > 0].sort_values("timestamp").reset_index(drop=True)
+    rows = data.get("Data", {}).get("Data", [])
+    if not rows:
+        return _store(key, pd.DataFrame())
+
+    try:
+        df = pd.DataFrame(rows)
+        if "time" not in df.columns or "close" not in df.columns:
+            return _store(key, pd.DataFrame())
+        df["timestamp"] = pd.to_datetime(df["time"], unit="s", utc=True)
+        # volumefrom is the base currency volume; volumeto is quote (USD)
+        vol_col = "volumefrom" if "volumefrom" in df.columns else "volumeto" if "volumeto" in df.columns else None
+        if vol_col:
+            df = df.rename(columns={vol_col: "volume"})
+        else:
+            df["volume"] = 0.0
+        needed = [c for c in ["timestamp", "open", "high", "low", "close", "volume"] if c in df.columns]
+        df = df[needed]
+        df = df[df["close"] > 0].sort_values("timestamp").reset_index(drop=True)
+    except Exception as e:
+        logger.debug("CC OHLCV parse error for %s: %s", symbol, e)
+        return _store(key, pd.DataFrame())
     return _store(key, df)
 
 
