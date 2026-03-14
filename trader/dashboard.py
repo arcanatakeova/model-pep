@@ -820,8 +820,8 @@ def render():
         def _ticker_chips(items: list, positive: bool) -> str:
             chips = ""
             for item in items[:5]:
-                sym = item.get("symbol", "?")
-                chg = item.get("change_pct", item.get("pct_change", 0))
+                sym = item.get("symbol", "?").upper()
+                chg = item.get("change_pct", item.get("change_24h", item.get("pct_change", 0))) or 0
                 fg = TV["green"] if positive else TV["red"]
                 sign = "+" if chg >= 0 else ""
                 chips += (

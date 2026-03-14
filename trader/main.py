@@ -500,8 +500,7 @@ class AITrader:
                 "top_gainers": self._market_snapshot.get("top_gainers", [])[:5],
                 "top_losers": self._market_snapshot.get("top_losers", [])[:5],
             }
-            with open("bot_state.json", "w") as f:
-                json.dump(state, f)
+            self._atomic_json("bot_state.json", state)
             # Write equity curve every cycle so chart stays live (not just every 5 min)
             self._save_equity_curve()
             # Write portfolio + DEX positions every cycle for live position cards
@@ -513,13 +512,11 @@ class AITrader:
     def _save_strategy_states(self):
         """Persist grid and arb state for dashboard display."""
         try:
-            with open("grid_state.json", "w") as f:
-                json.dump(self.grid_trader.summary(), f, indent=2)
+            self._atomic_json("grid_state.json", self.grid_trader.summary(), indent=2)
         except Exception:
             pass
         try:
-            with open("arb_state.json", "w") as f:
-                json.dump(self.funding_arb.summary(), f, indent=2)
+            self._atomic_json("arb_state.json", self.funding_arb.summary(), indent=2)
         except Exception:
             pass
 
@@ -893,11 +890,18 @@ class AITrader:
         self._print_report()
         logger.info("Trader stopped cleanly.")
 
+    @staticmethod
+    def _atomic_json(path: str, data, indent: int = 0):
+        """Write JSON atomically: write to .tmp then os.replace — prevents corruption."""
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=indent or None)
+        os.replace(tmp, path)
+
     def _save_dex_positions(self):
         """Persist open DEX positions so they survive restarts."""
         try:
-            with open("dex_positions.json", "w") as f:
-                json.dump(self._dex_positions, f, indent=2)
+            self._atomic_json("dex_positions.json", self._dex_positions, indent=2)
         except Exception as e:
             logger.warning("Failed to save DEX positions: %s", e)
 
@@ -921,8 +925,7 @@ class AITrader:
 
     def _save_equity_curve(self):
         try:
-            with open("equity_curve.json", "w") as f:
-                json.dump(self._equity_curve[-10_000:], f, indent=2)
+            self._atomic_json("equity_curve.json", self._equity_curve[-10_000:], indent=2)
         except Exception:
             pass
 
