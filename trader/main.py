@@ -117,8 +117,8 @@ class AITrader:
         self.funding_arb  = FundingArbScanner(self.portfolio, self.executor)   # funding rate arb
         self.grid_trader  = GridTrader(self.portfolio, self.executor)           # grid trading
         self.dex_screener = DexScreener()                            # on-chain tokens
-        self.poly_trader  = PolymarketTrader(
-            private_key=config.POLYMARKET_PRIVATE_KEY)               # prediction markets
+        # Polymarket disabled until API keys are configured
+        # self.poly_trader = PolymarketTrader(private_key=config.POLYMARKET_PRIVATE_KEY)
         self.solana       = SolanaWallet(
             private_key_b58=config.PHANTOM_PRIVATE_KEY)              # Phantom wallet
 
@@ -130,7 +130,7 @@ class AITrader:
         self._cycle          = 0
         self._last_save      = 0        # 0 = save immediately on first cycle
         self._last_state     = now
-        self._last_poly      = now      # Stagger: run after first full interval
+        # self._last_poly is no longer used — Polymarket disabled
         self._last_dex       = 0.0     # DEX runs on cycle 1 (fast API)
         self._last_scalp     = 0.0     # Scalp runs on cycle 1 (fast API)
         self._last_futures   = 0.0     # Futures runs on cycle 1 (uses CEX cache)
@@ -149,6 +149,13 @@ class AITrader:
         self.risk_mgr.reset_daily_loss_tracker()
         # Write portfolio immediately so dashboard has data before cycle 1 finishes
         self.portfolio.save()
+
+        # Initialise settings.json if missing (preserve existing settings on restart)
+        if not os.path.exists("settings.json"):
+            self._atomic_json("settings.json", {
+                "live_mode": live,
+                "reset_paper": False,
+            })
 
         # Sync initial capital with Phantom wallet if connected
         if self.solana.is_connected and live:
@@ -192,6 +199,10 @@ class AITrader:
         self._cleanup()
 
     def _run_cycle(self):
+        # ── Dashboard settings + commands (live/paper toggle, close buttons) ─
+        self._apply_dashboard_settings()
+        self._process_dashboard_commands()
+
         # ── PAUSED check ──────────────────────────────────────────────────
         if os.path.exists("PAUSED"):
             logger.info("Bot is PAUSED (remove PAUSED file to resume)")
@@ -233,15 +244,14 @@ class AITrader:
         now_ts = time.time()
         _should_scalp   = config.SCALP_ENABLED and now_ts - self._last_scalp >= config.SCALP_INTERVAL_SEC
         _should_dex     = now_ts - self._last_dex  >= config.DEX_SCAN_INTERVAL_SEC
-        _should_poly    = now_ts - self._last_poly >= config.POLYMARKET_SCAN_INTERVAL_SEC
 
         par_tasks: dict[str, object] = {
             "snapshot": self._log_market_snapshot,
             "cex":      self._run_cex_scan,
         }
-        if _should_scalp: par_tasks["scalp"] = self._run_scalp_scan
-        if _should_dex:   par_tasks["dex"]   = self._run_dex_scan
-        if _should_poly:  par_tasks["poly"]  = self._run_polymarket_scan
+        if _should_scalp:  par_tasks["scalp"] = self._run_scalp_scan
+        if _should_dex:    par_tasks["dex"]   = self._run_dex_scan
+        # Polymarket disabled — no API keys configured yet
 
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=len(par_tasks), thread_name_prefix="scan") as exe:
@@ -257,7 +267,6 @@ class AITrader:
         now_ts = time.time()
         if _should_scalp: self._last_scalp = now_ts
         if _should_dex:   self._last_dex   = now_ts
-        if _should_poly:  self._last_poly  = now_ts
 
         # ── 5. Futures Swings: reads _cex_signals_cache set above (no HTTP) ─
         if config.FUTURES_ENABLED and now_ts - self._last_futures >= 60:
@@ -497,6 +506,9 @@ class AITrader:
                 "dex_positions": len(self._dex_positions),
                 "peak_equity": round(self.portfolio.peak_equity, 2),
                 "total_trades": len(self.portfolio.closed_trades),
+                # Solana wallet status (shown in dashboard mode control panel)
+                "wallet_connected": self.solana.is_connected,
+                "wallet_address":   str(self.solana.pubkey) if self.solana.is_connected else "",
                 # Performance stats
                 "win_rate_pct": perf.get("win_rate_pct", 0),
                 "profit_factor": perf.get("profit_factor", 0),
@@ -940,6 +952,132 @@ class AITrader:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=indent or None)
         os.replace(tmp, path)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Dashboard Settings Bridge
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _process_dashboard_commands(self):
+        """
+        Execute one-shot commands written by the dashboard (e.g. manual close).
+        Reads commands.json, processes all pending entries, then clears the list.
+        """
+        cmds_path = "commands.json"
+        try:
+            with open(cmds_path) as f:
+                cmds = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return
+
+        pending = cmds.get("pending", [])
+        if not pending:
+            return
+
+        for cmd in pending:
+            action = cmd.get("action")
+            pid    = cmd.get("id", "")
+            market = cmd.get("market", "")
+            reason = cmd.get("reason", "Dashboard manual close")
+
+            if action != "close":
+                logger.warning("Unknown dashboard command: %s", cmd)
+                continue
+
+            try:
+                if market == "dex":
+                    # Close DEX / Solana memecoin position
+                    pos = self._dex_positions.get(pid)
+                    if pos:
+                        current_price = (pos.get("current_price")
+                                         or pos.get("entry_price", 0))
+                        self._close_dex_position(pid, pos, current_price, reason)
+                        logger.info("MANUAL CLOSE DEX %s — %s", pos.get("symbol", pid), reason)
+                    else:
+                        logger.warning("Manual close: DEX position %s not found", pid)
+
+                else:
+                    # Close CEX / futures position
+                    pos = self.portfolio.open_positions.get(pid)
+                    if pos:
+                        symbol = pos.get("symbol", pid)
+                        current_price = (pos.get("current_price")
+                                         or pos.get("entry_price", 0))
+                        self.executor._execute_close(pid, current_price, reason)
+                        logger.info("MANUAL CLOSE CEX %s — %s", symbol, reason)
+                    else:
+                        logger.warning("Manual close: CEX position %s not found", pid)
+
+            except Exception as e:
+                logger.error("Error processing close command %s: %s", pid, e)
+
+        # Clear processed commands
+        cmds["pending"] = []
+        self._atomic_json(cmds_path, cmds)
+
+    def _apply_dashboard_settings(self):
+        """
+        Read settings.json written by the dashboard and apply any changes.
+        Handles: live/paper mode toggle and paper account reset.
+        Called at the top of every cycle — fast (local file read only).
+        """
+        try:
+            with open("settings.json") as f:
+                settings = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return
+
+        # ── Live / paper mode toggle ──────────────────────────────────────
+        want_live = bool(settings.get("live_mode", self.live))
+        if want_live != self.live:
+            if want_live and not self.solana.is_connected:
+                logger.warning(
+                    "Dashboard requested LIVE mode but no Phantom wallet connected "
+                    "(PHANTOM_PRIVATE_KEY not set) — staying in paper mode")
+                # Write back false so dashboard shows the correct state
+                settings["live_mode"] = False
+                self._atomic_json("settings.json", settings)
+            else:
+                self.live = want_live
+                config.PAPER_TRADING = not want_live
+                logger.info(
+                    "Mode switched to %s by dashboard", "LIVE" if want_live else "PAPER")
+
+        # ── Paper account reset ───────────────────────────────────────────
+        if settings.get("reset_paper", False) and not self.live:
+            self._reset_paper_account()
+            settings["reset_paper"] = False
+            self._atomic_json("settings.json", settings)
+
+    def _reset_paper_account(self):
+        """
+        Wipe all paper trading history and restart fresh with INITIAL_CAPITAL.
+        Does NOT affect live wallet funds — paper only.
+        """
+        logger.info("=== PAPER ACCOUNT RESET requested from dashboard ===")
+
+        # Close every open position without PnL recording
+        self.portfolio.open_positions.clear()
+        self.portfolio.closed_trades.clear()
+        self.portfolio.cash          = config.INITIAL_CAPITAL
+        self.portfolio.initial_capital = config.INITIAL_CAPITAL
+        self.portfolio.peak_equity   = config.INITIAL_CAPITAL
+        self._dex_positions.clear()
+        self._equity_curve.clear()
+        self._day_start_eq = config.INITIAL_CAPITAL
+
+        # Remove persisted files so nothing stale is loaded on restart
+        for fname in ("trades.json", "dex_positions.json", "equity_curve.json"):
+            try:
+                os.unlink(fname)
+            except FileNotFoundError:
+                pass
+
+        # Write clean initial state immediately
+        self.portfolio.save()
+        self._save_dex_positions()
+        logger.info(
+            "Paper account reset complete — starting fresh with $%.0f",
+            config.INITIAL_CAPITAL)
 
     def _save_dex_positions(self):
         """Persist open DEX positions so they survive restarts."""
