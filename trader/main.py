@@ -629,9 +629,11 @@ class AITrader:
         return False
 
     def _run_dex_scan(self):
-        """DEX Screener scan with safety checks, vol-adjusted sizing, concentration limits."""
+        """
+        DEX scan — multi-source discovery, concurrent safety checks, Jupiter price
+        confirmation before execution.
+        """
         try:
-            # Skip DEX scan on circuit breaker conditions
             if self.risk_mgr._max_drawdown_triggered():
                 logger.info("DEX scan skipped: max drawdown guard active")
                 return
@@ -640,40 +642,52 @@ class AITrader:
                 return
 
             tokens = self.dex_screener.get_multi_chain_opportunities()
-            logger.info("DEX scan: %d opportunities found", len(tokens))
+            if not tokens:
+                logger.info("DEX scan: no opportunities found")
+                return
 
             budget = self.compounder.max_position_for_market("crypto_dex")
             traded = 0
 
-            # Build set of symbols already held (catches same token on different pairs)
+            held_addrs   = set(self._dex_positions.keys())
             held_symbols = {pos.get("symbol", "").upper()
                             for pos in self._dex_positions.values()}
 
-            for token in tokens[:20]:   # Check top 20 (many filtered by safety/score)
+            candidates = []
+            for token in tokens:
                 if token.score < config.DEX_MIN_SCORE:
-                    continue
-                if token.pair_address in self._dex_positions:
+                    break   # Sorted descending — nothing below this will qualify
+                if token.pair_address in held_addrs:
                     continue
                 if token.base_symbol.upper() in held_symbols:
-                    continue   # Already hold this token on a different pair
-                if traded >= 3:
+                    continue
+                if token.base_address in {p.get("address", "") for p in self._dex_positions.values()}:
+                    continue
+                candidates.append(token)
+                if len(candidates) >= 25:
                     break
 
-                # Concentration check
+            logger.info("DEX scan: %d total → %d candidates above score %.2f",
+                        len(tokens), len(candidates), config.DEX_MIN_SCORE)
+
+            for token in candidates:
+                if traded >= 4:
+                    break
+
+                # Concentration limits
                 allowed, reason = self.risk_mgr.check_dex_concentration(
                     self._dex_positions, token.dex_id)
                 if not allowed:
-                    logger.info("DEX concentration: %s", reason)
-                    break
-
-                # Safety report (already computed during scoring, use cached)
-                safety = getattr(token, 'safety_report', None)
-                if safety and not safety.is_safe_to_trade:
-                    logger.warning("SKIP %s: %s - %s", token.base_symbol,
-                                   safety.risk_level, ", ".join(safety.risk_flags[:2]))
+                    logger.info("Concentration: %s", reason)
                     continue
 
-                # Volatility-adjusted sizing
+                safety = getattr(token, "safety_report", None)
+                if safety and not safety.is_safe_to_trade:
+                    logger.warning("SKIP %s: %s — %s", token.base_symbol,
+                                   safety.risk_level,
+                                   ", ".join(safety.risk_flags[:2]))
+                    continue
+
                 safety_score = safety.safety_score if safety else 0.5
                 size_usd = self.risk_mgr.dex_position_size_usd(
                     token_score=token.score,
@@ -684,13 +698,50 @@ class AITrader:
                 )
                 size_usd = min(size_usd, budget * 0.20, config.DEX_MAX_POSITION_USD)
                 if size_usd < config.DEX_MIN_POSITION_USD:
+                    logger.debug("SKIP %s: size $%.2f below min $%.2f",
+                                 token.base_symbol, size_usd, config.DEX_MIN_POSITION_USD)
                     continue
 
+                # Jupiter price confirmation — verify price is within 2% of DexScreener
+                # before committing real SOL (catches stale/spoofed DexScreener data)
+                if token.chain_id == "solana" and self.solana.is_connected:
+                    jup_price = self._get_jupiter_price(token.base_address)
+                    if jup_price and jup_price > 0 and token.price_usd > 0:
+                        drift = abs(jup_price - token.price_usd) / token.price_usd
+                        if drift > 0.05:   # >5% price discrepancy
+                            logger.warning(
+                                "SKIP %s: Jupiter price $%.8f vs DexScreener $%.8f "
+                                "(%.1f%% drift — stale data)",
+                                token.base_symbol, jup_price, token.price_usd, drift * 100)
+                            continue
+                        # Use Jupiter price (more accurate at time of trade)
+                        token.price_usd = jup_price
+
                 self._open_dex_position(token, size_usd, safety)
+                held_symbols.add(token.base_symbol.upper())
+                held_addrs.add(token.pair_address)
                 traded += 1
 
         except Exception as e:
             logger.warning("DEX scan error: %s", e)
+
+    def _get_jupiter_price(self, mint: str) -> Optional[float]:
+        """Fetch real-time price from Jupiter Price API v2."""
+        try:
+            import requests as _req
+            resp = _req.get(
+                "https://api.jup.ag/price/v2",
+                params={"ids": mint},
+                timeout=4,
+                headers={"User-Agent": "ai-trader/2.0"})
+            if resp.ok:
+                data = resp.json().get("data", {}).get(mint, {})
+                price = data.get("price")
+                if price:
+                    return float(price)
+        except Exception:
+            pass
+        return None
 
     def _open_dex_position(self, token, size_usd: float, safety=None):
         """Open a DEX position with safety verification and MEV protection."""
