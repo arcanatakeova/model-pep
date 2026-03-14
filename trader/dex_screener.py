@@ -106,6 +106,8 @@ class DexScreener:
     DEX Screener API client and token opportunity scorer.
     """
 
+    _CACHE_MAX = 200   # Max cache entries — prevents unbounded growth
+
     def __init__(self):
         self._cache: dict = {}
         self._cache_ttl = 60  # seconds
@@ -460,7 +462,19 @@ class DexScreener:
                     continue
                 resp.raise_for_status()
                 data = resp.json()
-                self._cache[cache_key] = (data, time.time())
+                now = time.time()
+                self._cache[cache_key] = (data, now)
+                # Evict expired entries when cache is full
+                if len(self._cache) > self._CACHE_MAX:
+                    expired = [k for k, (_, ts) in self._cache.items()
+                               if now - ts > self._cache_ttl]
+                    for k in expired:
+                        del self._cache[k]
+                    # If still over limit, evict oldest entries
+                    if len(self._cache) > self._CACHE_MAX:
+                        oldest = sorted(self._cache.items(), key=lambda x: x[1][1])
+                        for k, _ in oldest[:len(self._cache) - self._CACHE_MAX]:
+                            del self._cache[k]
                 return data
             except Exception as e:
                 logger.debug("DexScreener request error: %s", e)

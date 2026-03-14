@@ -588,10 +588,12 @@ class AITrader:
     def _run_dex_scan(self):
         """DEX Screener scan with safety checks, vol-adjusted sizing, concentration limits."""
         try:
-            # Skip DEX scan only if max drawdown guard fired (portfolio protection),
-            # NOT on daily loss — bot should always recover and keep trading
+            # Skip DEX scan on circuit breaker conditions
             if self.risk_mgr._max_drawdown_triggered():
                 logger.info("DEX scan skipped: max drawdown guard active")
+                return
+            if self.risk_mgr._daily_loss_triggered():
+                logger.info("DEX scan skipped: daily loss limit active")
                 return
 
             tokens = self.dex_screener.get_multi_chain_opportunities()
@@ -804,6 +806,10 @@ class AITrader:
             "opened_at": pos["opened_at"],
             "closed_at": datetime.now(timezone.utc).isoformat(),
         })
+        # Enforce memory cap (same as portfolio.close_position does for CEX trades)
+        from portfolio import _MAX_CLOSED_TRADES_MEMORY
+        if len(self.portfolio.closed_trades) > _MAX_CLOSED_TRADES_MEMORY:
+            self.portfolio._archive_old_trades()
 
     def _execute_partial_profit(self, pair_addr: str, pos: dict,
                                  fraction: float, reason: str):
