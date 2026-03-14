@@ -442,7 +442,7 @@ class SolanaWallet:
 
     def _get_jupiter_quote(self, input_mint: str, output_mint: str,
                            amount: int, slippage_bps: int) -> Optional[dict]:
-        """Fetch a fresh quote from Jupiter v6."""
+        """Fetch a fresh quote from Jupiter v6 (3 attempts with backoff)."""
         params = {
             "inputMint":           input_mint,
             "outputMint":          output_mint,
@@ -451,16 +451,20 @@ class SolanaWallet:
             "onlyDirectRoutes":    "false",
             "asLegacyTransaction": "false",
         }
-        try:
-            resp = requests.get(JUPITER_QUOTE_URL, params=params, timeout=8)
-            if resp.ok:
-                data = resp.json()
-                if data.get("error"):
-                    logger.debug("Jupiter quote error: %s", data["error"])
-                    return None
-                return data
-        except Exception as e:
-            logger.warning("Jupiter quote exception: %s", e)
+        for attempt in range(3):
+            try:
+                resp = requests.get(JUPITER_QUOTE_URL, params=params, timeout=10)
+                if resp.ok:
+                    data = resp.json()
+                    if data.get("error"):
+                        logger.debug("Jupiter quote error: %s", data["error"])
+                        return None
+                    return data
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)  # 1s, 2s
+                else:
+                    logger.warning("Jupiter quote exception: %s", e)
         return None
 
     # ─── Transaction signing / sending ────────────────────────────────────────
