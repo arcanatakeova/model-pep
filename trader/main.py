@@ -86,7 +86,7 @@ BANNER = """
 ╠══════════════════════════════════════════════════════════════════╣
 ║  CEX │ Futures(2-8x) │ Scalps(5m) │ DEX │ Poly │ Stocks │ Forex  ║
 ║  Mode: {mode:<8}    Capital: ${capital:<12,.0f}                  ║
-║  Scan: 30s cycle │ Scalp: 30s │ Futures: 60s │ DEX: 45s          ║
+║  Scan: 15s cycle │ Scalp: 30s │ Futures: 60s │ DEX: 45s          ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -561,8 +561,11 @@ class AITrader:
                 if pnl_pct < 0.03:
                     continue
 
-                # Need enough cash for a pyramid add
-                add_size = pos.get("position_usd", self.portfolio.equity() * 0.02) * 0.25
+                # Need enough cash for a pyramid add (25% of original position value)
+                pos_value = pos.get("qty", 0) * pos.get("entry_price", 0)
+                if pos_value <= 0:
+                    pos_value = self.portfolio.equity() * 0.02  # Fallback only
+                add_size = pos_value * 0.25
                 if add_size < 2.0 or self.portfolio.cash < add_size:
                     continue
 

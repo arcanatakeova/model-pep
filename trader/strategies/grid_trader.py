@@ -51,6 +51,7 @@ class GridLevel:
     fill_time: Optional[str] = None
     pnl_usd: float = 0.0
     order_id: Optional[str] = None
+    entry_buy_price: Optional[float] = None  # Actual buy fill price (for SELL PnL accuracy)
 
 
 @dataclass
@@ -179,12 +180,16 @@ class GridTrader:
         # Reserve cash for buy orders
         self.portfolio.cash -= total_needed
 
+        buy_levels  = [l for l in levels if l.side == "buy"]
+        sell_levels = [l for l in levels if l.side == "sell"]
         logger.info(
             "GRID OPEN %-6s center=$%.4f | %d levels @ %.3f%% spacing | "
             "buy range: $%.4f–$%.4f | sell range: $%.4f–$%.4f | total=$%.0f",
             symbol, center_price, n, spacing * 100,
-            levels[n - 1].price, levels[0].price,
-            levels[n].price, levels[-1].price,
+            buy_levels[-1].price if buy_levels else 0,
+            buy_levels[0].price  if buy_levels else 0,
+            sell_levels[0].price if sell_levels else 0,
+            sell_levels[-1].price if sell_levels else 0,
             total_needed,
         )
 
@@ -279,11 +284,13 @@ class GridTrader:
         level.fill_time  = datetime.now(timezone.utc).isoformat()
 
         # Place counter SELL one spacing above fill price
+        # Store entry_buy_price so _fill_sell can compute accurate PnL
         sell_price = fill_price * (1 + grid.spacing_pct)
         counter = GridLevel(
             price=round(sell_price, 6),
             side="sell",
             size_usd=level.size_usd,
+            entry_buy_price=fill_price,  # Actual buy fill — not reconstructed
         )
         grid.levels.append(counter)
         grid.fills += 1
@@ -293,9 +300,9 @@ class GridTrader:
 
     def _fill_sell(self, grid: Grid, level: GridLevel, fill_price: float):
         """Simulate/execute a sell fill and record the profit."""
-        # Find the corresponding buy that created this sell level
-        # Profit = (sell_price - buy_price) * qty
-        buy_price = fill_price / (1 + grid.spacing_pct)
+        # Use stored entry_buy_price for accuracy; fall back to reconstruction only
+        # for SELL levels that pre-existed before the entry_buy_price field was added.
+        buy_price = level.entry_buy_price or fill_price / (1 + grid.spacing_pct)
         qty       = level.size_usd / buy_price
         pnl       = (fill_price - buy_price) * qty
 

@@ -286,6 +286,9 @@ class ScalpingScanner:
         """Average per-bar price change over last N bars."""
         if len(closes) < bars + 1:
             return None
-        changes = [(closes[-i] - closes[-i - 1]) / closes[-i - 1]
-                   for i in range(1, bars + 1)]
-        return sum(changes) / len(changes)
+        changes = [
+            (closes[-i] - closes[-i - 1]) / closes[-i - 1]
+            for i in range(1, bars + 1)
+            if closes[-i - 1] != 0  # Guard against zero-price bars in test data
+        ]
+        return sum(changes) / len(changes) if changes else None

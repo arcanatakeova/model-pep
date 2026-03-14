@@ -403,4 +403,9 @@ class PolymarketTrader:
         return None
 
     def _store(self, key: str, val):
+        # Evict oldest entries when cache grows too large (memory leak prevention)
+        if len(self._cache) >= 200:
+            oldest = sorted(self._cache, key=lambda k: self._cache[k][1])
+            for k in oldest[:50]:
+                del self._cache[k]
         self._cache[key] = (val, time.time())

@@ -874,7 +874,13 @@ def render():
                 pnl  = t.get("pnl_usd", 0)
                 pct  = t.get("pnl_pct", 0)
                 sym  = t.get("symbol", "—")
-                mkt  = t.get("market", "—").upper()[:3]
+                _MKT_LABELS = {
+                    "crypto": "CEX", "cex": "CEX", "dex": "DEX",
+                    "forex": "FX", "stocks": "STK", "etf": "STK",
+                    "futures": "FUT", "funding_arb": "ARB", "polymarket": "POLY",
+                }
+                mkt  = _MKT_LABELS.get(t.get("market", "").lower(),
+                                       t.get("market", "—").upper()[:4])
                 rsn  = t.get("close_reason", "—")[:24]
                 ts   = t.get("closed_at", "")[:16].replace("T", " ")
                 c    = color(pnl)

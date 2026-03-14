@@ -217,7 +217,12 @@ class FundingArbScanner:
                 )
                 logger.info("ARB FUTURES SHORT sent: %s qty=%.6f", symbol, qty)
             except Exception as e:
-                logger.error("ARB futures leg failed for %s: %s", symbol, e)
+                logger.error("ARB futures leg failed for %s — aborting arb, refunding cash: %s",
+                             symbol, e)
+                # Roll back: remove position and return cash so capital isn't stranded
+                self.open_arbs.pop(symbol, None)
+                self.portfolio.cash += size_usd
+                return None
 
         return arb
 

@@ -207,12 +207,16 @@ class CompoundingEngine:
 
     def _market_to_key(self, market: str) -> str:
         mapping = {
-            "crypto": "crypto_cex",
-            "dex": "crypto_dex",
-            "solana": "crypto_dex",
-            "polymarket": "polymarket",
-            "stocks": "stocks",
-            "forex": "forex",
+            "crypto":      "crypto_cex",
+            "cex":         "crypto_cex",
+            "dex":         "crypto_dex",
+            "solana":      "crypto_dex",
+            "futures":     "crypto_cex",   # Futures trade CEX-listed assets
+            "funding_arb": "crypto_cex",   # Arb on CEX perpetuals
+            "polymarket":  "polymarket",
+            "stocks":      "stocks",
+            "etf":         "stocks",
+            "forex":       "forex",
         }
         return mapping.get(market.lower(), "crypto_cex")
 
@@ -236,10 +240,12 @@ class CompoundingEngine:
                 pnl_score = np.clip(stats["total_pnl"] / (self.portfolio.equity() + 1) * 10 + 0.5, 0.1, 1.0)
                 scores[key] = 0.6 * wr_score + 0.4 * pnl_score
 
-        # Softmax reweighting
+        # Softmax reweighting with temperature=2 (soft/diversifying).
+        # T<1 concentrates into best performer; T>1 spreads more evenly.
+        # With min/max bounds already enforced below, soft softmax is correct here.
         score_array = np.array(list(scores.values()))
         score_array = np.nan_to_num(score_array, nan=0.5, posinf=0.5, neginf=0.5)
-        exp_scores  = np.exp(score_array * 2)  # Temperature = 0.5
+        exp_scores  = np.exp(score_array / 2)  # Temperature = 2.0 (diversifying)
         total_exp   = exp_scores.sum()
         if total_exp == 0 or np.isnan(total_exp):
             return  # Bad data — skip rebalance this cycle
