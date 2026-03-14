@@ -42,21 +42,33 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-# Load .env — direct parse first (no dependency), then dotenv as bonus
+# Load .env — search repo root AND trader/ so both standard setups work.
+# .env.example lives at the repo root and says "cp .env.example .env",
+# so the user's .env is typically at model-pep/.env (root), not trader/.env.
+# trader/.env is checked second and overrides root if both exist.
 import os as _os, pathlib as _pathlib
-_env_file = _pathlib.Path(__file__).resolve().parent / ".env"
-if _env_file.exists():
-    for _ln in _env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+
+def _parse_env(path: "_pathlib.Path"):
+    if not path.exists():
+        return
+    for _ln in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         _ln = _ln.strip()
         if _ln and not _ln.startswith("#") and "=" in _ln:
             _k, _, _v = _ln.partition("=")
             _k = _k.strip()
-            _v = _v.strip().strip('"').strip("'")  # handle quoted values
+            _v = _v.strip().strip('"').strip("'")
             if _k:
-                _os.environ[_k] = _v  # always set — override any stale system env
+                _os.environ[_k] = _v
+
+_here = _pathlib.Path(__file__).resolve().parent   # model-pep/trader/
+_root = _here.parent                                # model-pep/
+_parse_env(_root / ".env")   # standard: user ran `cp .env.example .env` at root
+_parse_env(_here / ".env")   # server/CI override: trader/.env takes precedence
+
 try:
     from dotenv import load_dotenv as _load_dotenv
-    _load_dotenv(_env_file, override=True)  # picks up any dotenv-specific syntax
+    _load_dotenv(_root / ".env")
+    _load_dotenv(_here / ".env", override=True)
 except ImportError:
     pass
 
