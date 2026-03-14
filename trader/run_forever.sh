@@ -9,10 +9,12 @@
 #   nohup ./run_forever.sh --live > trader.log 2>&1 &   # background
 #
 # The script:
-#   1. Launches main.py with any args you pass
-#   2. On crash / exit: waits 5s then relaunches
-#   3. Logs restart events with timestamps
-#   4. Press Ctrl+C to stop cleanly
+#   1. Writes its PID + mode to files (used by update.sh)
+#   2. Launches main.py with any args you pass
+#   3. On crash / exit: waits 5s then relaunches
+#   4. Logs restart events with timestamps
+#   5. Removes PID file on clean exit
+#   6. Press Ctrl+C to stop cleanly
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -23,11 +25,28 @@ ARGS="${*:---}"  # pass --live or leave blank for paper mode
 [[ "$ARGS" == "--" ]] && ARGS=""
 
 LOGFILE="trader.log"
+PIDFILE="trader.pid"
+MODEFILE=".mode"
 RESTART_DELAY=5   # seconds between restarts
 MAX_RESTARTS=1000 # safety cap (prevents infinite tight crash loops)
 restart_count=0
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') [WATCHDOG] Starting AI Trader 24/7 | args: ${ARGS:-none}" | tee -a "$LOGFILE"
+# ── Write PID and mode files so update.sh can find us ────────────────────────
+echo $$ > "$PIDFILE"
+if [[ "$ARGS" == *"--live"* ]]; then
+    echo "live" > "$MODEFILE"
+else
+    echo "paper" > "$MODEFILE"
+fi
+
+# ── Cleanup on exit ───────────────────────────────────────────────────────────
+cleanup() {
+    rm -f "$PIDFILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [WATCHDOG] Stopped. PID file removed." | tee -a "$LOGFILE"
+}
+trap cleanup EXIT INT TERM
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') [WATCHDOG] Starting AI Trader 24/7 | PID=$$ | mode=${ARGS:+live} | args: ${ARGS:-none}" | tee -a "$LOGFILE"
 
 # Load .env if present
 if [[ -f ".env" ]]; then
