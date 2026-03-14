@@ -146,7 +146,7 @@ COINBASE_API_KEY = os.getenv("COINBASE_API_KEY", "")
 COINBASE_SECRET  = os.getenv("COINBASE_SECRET", "")
 
 # ─── Timing ───────────────────────────────────────────────────────────────────
-SCAN_INTERVAL_SEC = 30        # Scan markets every 30 seconds (was 60 — more active)
+SCAN_INTERVAL_SEC = 15        # Scan markets every 15 seconds (parallel cycle = faster)
 OHLCV_CANDLES = 100           # Number of candles to fetch for analysis
 CANDLE_INTERVAL = "1h"        # 1-hour candles for swing analysis
 DATA_CACHE_TTL = 25           # Cache market data for 25 seconds (shorter = fresher data)

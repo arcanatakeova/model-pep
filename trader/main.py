@@ -222,25 +222,42 @@ class AITrader:
                 if wallet_value > 10:
                     logger.info("Midnight wallet sync: $%.2f", wallet_value)
 
-        # ── 1. Update all open positions (stops, trailing, PnL) ───────────
+        # ── 1. Update all open positions (mark-to-market; exits handled by monitors)
         self.executor.update_all_positions()
         self._update_dex_positions()
-        self._save_dex_positions()   # Persist DEX state after every update (crash safety)
+        # Note: _save_dex_positions() removed from every cycle — periodic 5-min save is enough
 
-        # ── 2. Market overview ────────────────────────────────────────────
-        self._log_market_snapshot()
+        # ── 2–8. Fire all independent network operations in parallel ──────
+        now_ts = time.time()
+        _should_scalp   = config.SCALP_ENABLED and now_ts - self._last_scalp >= config.SCALP_INTERVAL_SEC
+        _should_dex     = now_ts - self._last_dex  >= config.DEX_SCAN_INTERVAL_SEC
+        _should_poly    = now_ts - self._last_poly >= config.POLYMARKET_SCAN_INTERVAL_SEC
 
-        # ── 3. CEX Scanner: Crypto + Stocks + Forex (1h signals) ─────────
-        self._run_cex_scan()
+        par_tasks: dict[str, object] = {
+            "snapshot": self._log_market_snapshot,
+            "cex":      self._run_cex_scan,
+        }
+        if _should_scalp: par_tasks["scalp"] = self._run_scalp_scan
+        if _should_dex:   par_tasks["dex"]   = self._run_dex_scan
+        if _should_poly:  par_tasks["poly"]  = self._run_polymarket_scan
+
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(par_tasks), thread_name_prefix="scan") as exe:
+            futs = {name: exe.submit(fn) for name, fn in par_tasks.items()}
+            for name, fut in futs.items():
+                try:
+                    fut.result(timeout=28)
+                except concurrent.futures.TimeoutError:
+                    logger.warning("Scan '%s' timed out (>28s) — skipping this cycle", name)
+                except Exception as e:
+                    logger.warning("Scan '%s' error: %s", name, e)
 
         now_ts = time.time()
+        if _should_scalp: self._last_scalp = now_ts
+        if _should_dex:   self._last_dex   = now_ts
+        if _should_poly:  self._last_poly  = now_ts
 
-        # ── 4. Scalping: 5m signals → Futures (every 30s) ────────────────
-        if config.SCALP_ENABLED and now_ts - self._last_scalp >= config.SCALP_INTERVAL_SEC:
-            self._run_scalp_scan()
-            self._last_scalp = now_ts
-
-        # ── 5. Futures Swings: 1h signals with leverage (every 60s) ──────
+        # ── 5. Futures Swings: reads _cex_signals_cache set above (no HTTP) ─
         if config.FUTURES_ENABLED and now_ts - self._last_futures >= 60:
             self._run_futures_swing_scan()
             self._last_futures = now_ts
@@ -248,25 +265,15 @@ class AITrader:
         # ── 6. Pyramid: Add to winning positions ──────────────────────────
         self._check_pyramiding()
 
-        # ── 7. DEX Screener: On-chain token sniping ───────────────────────
-        if now_ts - self._last_dex >= config.DEX_SCAN_INTERVAL_SEC:
-            self._run_dex_scan()
-            self._last_dex = now_ts
-
-        # ── 8. Polymarket: Prediction market edges ────────────────────────
-        if now_ts - self._last_poly >= config.POLYMARKET_SCAN_INTERVAL_SEC:
-            self._run_polymarket_scan()
-            self._last_poly = now_ts
-
-        # ── 10. Funding Rate Arbitrage ────────────────────────────────────
+        # ── 10. Funding Rate Arbitrage (in-memory, fast) ──────────────────
         if getattr(config, "FUNDING_ARB_ENABLED", False):
             if now_ts - self._last_arb >= getattr(config, "FUNDING_ARB_SCAN_INTERVAL_SEC", 600):
                 self._run_funding_arb_scan()
                 self._last_arb = now_ts
             else:
-                self.funding_arb.update_positions()  # Check exits/collect funding every cycle
+                self.funding_arb.update_positions()
 
-        # ── 11. Grid Trading ──────────────────────────────────────────────
+        # ── 11. Grid Trading (in-memory, fast) ────────────────────────────
         if getattr(config, "GRID_TRADING_ENABLED", False):
             if now_ts - self._last_grid >= getattr(config, "GRID_SCAN_INTERVAL_SEC", 60):
                 self._run_grid_management()
@@ -327,7 +334,7 @@ class AITrader:
     def _run_cex_scan(self):
         """CEX scan: crypto (CoinGecko/CC), stocks (yfinance), forex."""
         try:
-            signals = self.cex_scanner.scan_all(max_workers=10)
+            signals = self.cex_scanner.scan_all(max_workers=20)
             # Cache for futures swing scan + grid trader (avoids double API call)
             self._cex_signals_cache = signals
             actionable = [s for s in signals if s.signal != "HOLD"]
