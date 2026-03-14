@@ -649,14 +649,14 @@ class AITrader:
             held_symbols = {pos.get("symbol", "").upper()
                             for pos in self._dex_positions.values()}
 
-            for token in tokens[:8]:   # Check top 8 (some filtered by safety)
+            for token in tokens[:20]:   # Check top 20 (many filtered by safety/score)
                 if token.score < config.DEX_MIN_SCORE:
                     continue
                 if token.pair_address in self._dex_positions:
                     continue
                 if token.base_symbol.upper() in held_symbols:
                     continue   # Already hold this token on a different pair
-                if traded >= 2:
+                if traded >= 3:
                     break
 
                 # Concentration check

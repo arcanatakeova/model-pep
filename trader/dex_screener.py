@@ -124,7 +124,7 @@ class DexScreener:
 
     def __init__(self):
         self._cache: dict = {}
-        self._cache_ttl = 60  # seconds
+        self._cache_ttl = 30  # seconds — keep trending data fresh
         self._safety_checker = TokenSafetyChecker()
 
     # ─── Public API ───────────────────────────────────────────────────────────
@@ -132,18 +132,27 @@ class DexScreener:
     def get_trending_tokens(self, min_score: float = 0.5) -> list[DexToken]:
         """
         Find high-momentum tokens across all chains.
-        Combines boosted tokens + volume surge detection.
+        Combines boosted tokens + multi-query search + Birdeye trending.
         """
         tokens = []
 
-        # 1. Boosted / trending tokens
+        # 1. Boosted / trending tokens (latest + top, larger batch)
         boosted = self._fetch_boosted_tokens()
         tokens.extend(self._fetch_pairs_for_tokens(boosted))
 
-        # 2. Top gainers by search on preferred chains
-        for chain in PREFERRED_CHAINS[:4]:
-            gainers = self._search_top_pairs(chain)
-            tokens.extend(gainers)
+        # 2. Token profiles (separate endpoint — catches tokens not in boosted list)
+        profiles = self._fetch_token_profiles()
+        tokens.extend(self._fetch_pairs_for_tokens(profiles))
+
+        # 3. Multi-query search: USD pairs, SOL pairs, and pump.fun tokens
+        search_queries = ["SOL", "USD", "USDC", "PUMP"]
+        for chain in PREFERRED_CHAINS:
+            for query in search_queries:
+                gainers = self._search_top_pairs(chain, query=query, limit=50)
+                tokens.extend(gainers)
+
+        # 4. Birdeye trending tokens (real-time Solana data if key is set)
+        tokens.extend(self._fetch_birdeye_trending())
 
         # Deduplicate by pair address
         seen = set()
@@ -156,26 +165,41 @@ class DexScreener:
         # Score and filter
         scored = [t for t in unique if self._score_token(t) >= min_score]
         scored.sort(key=lambda t: t.score, reverse=True)
-        logger.info("DEX Screener: %d trending tokens (score >= %.2f)", len(scored), min_score)
+        logger.info("DEX Screener: %d trending tokens from %d candidates (score >= %.2f)",
+                    len(scored), len(unique), min_score)
         return scored
 
     def get_new_pairs(self, max_age_hours: float = MAX_PAIR_AGE_HOURS,
-                      min_score: float = 0.55) -> list[DexToken]:
+                      min_score: float = 0.50) -> list[DexToken]:
         """
         Find newly created pairs with strong early momentum.
         These can be 10-100x opportunities — also highest risk.
         """
         all_pairs = []
-        for chain in PREFERRED_CHAINS[:4]:
-            pairs = self._search_top_pairs(chain, limit=30)
-            new = [p for p in pairs
-                   if p.age_hours is not None and p.age_hours <= max_age_hours
-                   and p.liquidity_usd >= MIN_LIQUIDITY_USD]
-            all_pairs.extend(new)
+        # Search multiple terms to catch new pairs across all naming conventions
+        for chain in PREFERRED_CHAINS:
+            for query in ["SOL", "USD", "USDC"]:
+                pairs = self._search_top_pairs(chain, query=query, limit=50)
+                new = [p for p in pairs
+                       if p.age_hours is not None and p.age_hours <= max_age_hours
+                       and p.liquidity_usd >= MIN_LIQUIDITY_USD]
+                all_pairs.extend(new)
 
-        scored = [t for t in all_pairs if self._score_token(t) >= min_score]
+        # Also pull from Birdeye new listings (freshest pairs on Solana)
+        all_pairs.extend(self._fetch_birdeye_new_listings())
+
+        # Deduplicate
+        seen = set()
+        unique = []
+        for t in all_pairs:
+            if t.pair_address not in seen:
+                seen.add(t.pair_address)
+                unique.append(t)
+
+        scored = [t for t in unique if self._score_token(t) >= min_score]
         scored.sort(key=lambda t: t.score, reverse=True)
-        logger.info("DEX Screener: %d new pairs (< %.0fh old)", len(scored), max_age_hours)
+        logger.info("DEX Screener: %d new pairs from %d candidates (< %.0fh old)",
+                    len(scored), len(unique), max_age_hours)
         return scored
 
     def get_token_info(self, token_address: str, chain: str = "solana") -> Optional[DexToken]:
@@ -228,10 +252,10 @@ class DexScreener:
     def get_multi_chain_opportunities(self) -> list[DexToken]:
         """
         Full scan: trending + new pairs across all preferred chains.
-        Returns deduplicated, scored, and filtered list.
+        Returns deduplicated, scored, sorted list — no cap so callers decide cutoff.
         """
-        trending = self.get_trending_tokens(min_score=0.45)
-        new_pairs = self.get_new_pairs(max_age_hours=24, min_score=0.50)
+        trending  = self.get_trending_tokens(min_score=0.40)
+        new_pairs = self.get_new_pairs(max_age_hours=48, min_score=0.40)
 
         all_tokens = trending + new_pairs
         seen = set()
@@ -242,6 +266,7 @@ class DexScreener:
                 unique.append(t)
 
         unique.sort(key=lambda t: t.score, reverse=True)
+        logger.info("DEX full scan: %d unique opportunities total", len(unique))
         return unique
 
     # ─── Scoring ──────────────────────────────────────────────────────────────
@@ -391,20 +416,23 @@ class DexScreener:
 
     def _fetch_boosted_tokens(self) -> list[dict]:
         """Fetch trending/boosted tokens from DexScreener."""
-        # Latest boosted
-        data = self._get(f"{DEXSCREENER_BASE}/token-boosts/latest/v1")
+        data  = self._get(f"{DEXSCREENER_BASE}/token-boosts/latest/v1")
         boosted = data if isinstance(data, list) else []
-
-        # Top boosted
         data2 = self._get(f"{DEXSCREENER_BASE}/token-boosts/top/v1")
-        top = data2 if isinstance(data2, list) else []
+        top   = data2 if isinstance(data2, list) else []
+        return boosted[:40] + top[:40]
 
-        return boosted[:20] + top[:20]
+    def _fetch_token_profiles(self) -> list[dict]:
+        """Fetch latest token profiles — catches tokens not in boosted list."""
+        data = self._get(f"{DEXSCREENER_BASE}/token-profiles/latest/v1")
+        return data if isinstance(data, list) else []
 
     def _fetch_pairs_for_tokens(self, token_metas: list[dict]) -> list[DexToken]:
-        """Fetch pair data for a list of token metadata objects."""
+        """
+        Fetch pair data for a list of token metadata objects.
+        Uses batch endpoint (up to 30 addresses per call) to minimise API calls.
+        """
         tokens = []
-        # Group by chain to batch requests
         by_chain: dict[str, list[str]] = {}
         for t in token_metas:
             chain = t.get("chainId", "")
@@ -415,26 +443,30 @@ class DexScreener:
         for chain, addresses in by_chain.items():
             if chain not in PREFERRED_CHAINS:
                 continue
-            for addr in addresses[:10]:
-                data = self._get(f"{DEXSCREENER_BASE}/latest/dex/tokens/{addr}")
-                if data and data.get("pairs"):
-                    pairs = [p for p in data["pairs"] if p.get("chainId") == chain]
-                    if pairs:
-                        # Take highest-liquidity pair
-                        pairs.sort(key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
-                        token = self._parse_pair(pairs[0])
-                        if token:
-                            tokens.append(token)
-
+            # Batch up to 30 addresses per request (DexScreener supports comma-list)
+            addr_list = list(dict.fromkeys(addresses))[:30]  # dedup, cap at 30
+            batch_str = ",".join(addr_list)
+            data = self._get(f"{DEXSCREENER_BASE}/latest/dex/tokens/{batch_str}")
+            if data and data.get("pairs"):
+                pairs_by_addr: dict[str, list] = {}
+                for p in data["pairs"]:
+                    if p.get("chainId") != chain:
+                        continue
+                    addr = p.get("baseToken", {}).get("address", "")
+                    pairs_by_addr.setdefault(addr, []).append(p)
+                for addr_pairs in pairs_by_addr.values():
+                    # Take highest-liquidity pair per token
+                    addr_pairs.sort(key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
+                    token = self._parse_pair(addr_pairs[0])
+                    if token:
+                        tokens.append(token)
         return tokens
 
-    def _search_top_pairs(self, chain: str, query: str = "USD", limit: int = 20) -> list[DexToken]:
-        """Search for top pairs on a given chain."""
-        data = self._get(f"{DEXSCREENER_BASE}/latest/dex/search",
-                         params={"q": query})
+    def _search_top_pairs(self, chain: str, query: str = "SOL", limit: int = 50) -> list[DexToken]:
+        """Search for top pairs on a given chain by keyword."""
+        data = self._get(f"{DEXSCREENER_BASE}/latest/dex/search", params={"q": query})
         if not data or not data.get("pairs"):
             return []
-
         chain_pairs = [p for p in data["pairs"] if p.get("chainId") == chain]
         tokens = []
         for p in chain_pairs[:limit]:
@@ -442,6 +474,73 @@ class DexScreener:
             if token:
                 tokens.append(token)
         return tokens
+
+    def _fetch_birdeye_trending(self) -> list[DexToken]:
+        """Pull Birdeye trending Solana tokens and cross-reference via DexScreener."""
+        be = _get_birdeye()
+        if not be or not be.enabled:
+            return []
+        try:
+            trending = be.get_trending_tokens(limit=50, min_liquidity=MIN_LIQUIDITY_USD)
+            if not trending:
+                return []
+            # Batch-fetch pair data from DexScreener for all trending mints
+            mints = [t["address"] for t in trending if t.get("address")][:30]
+            if not mints:
+                return []
+            data = self._get(f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not data or not data.get("pairs"):
+                return []
+            tokens = []
+            seen = set()
+            for p in data["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                token = self._parse_pair(p)
+                if token:
+                    tokens.append(token)
+            logger.debug("Birdeye trending: %d Solana tokens", len(tokens))
+            return tokens
+        except Exception as e:
+            logger.debug("Birdeye trending fetch error: %s", e)
+            return []
+
+    def _fetch_birdeye_new_listings(self) -> list[DexToken]:
+        """Pull Birdeye new Solana listings and cross-reference via DexScreener."""
+        be = _get_birdeye()
+        if not be or not be.enabled:
+            return []
+        try:
+            new_listings = be.get_new_listings(limit=30, min_liquidity=MIN_LIQUIDITY_USD)
+            if not new_listings:
+                return []
+            mints = [t["address"] for t in new_listings if t.get("address")][:30]
+            if not mints:
+                return []
+            data = self._get(f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not data or not data.get("pairs"):
+                return []
+            tokens = []
+            seen = set()
+            for p in data["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                token = self._parse_pair(p)
+                if token:
+                    tokens.append(token)
+            logger.debug("Birdeye new listings: %d Solana tokens", len(tokens))
+            return tokens
+        except Exception as e:
+            logger.debug("Birdeye new listings fetch error: %s", e)
+            return []
 
     def _parse_pair(self, pair: dict) -> Optional[DexToken]:
         """Parse a DexScreener pair dict into a DexToken."""
