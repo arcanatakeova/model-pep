@@ -848,7 +848,6 @@ class AITrader:
 
                 prices = be.get_multi_price(mints)
 
-                # Update each position with fresh price
                 to_close = []
                 for pair_addr, pos in list(self._dex_positions.items()):
                     mint = pos.get("address")
@@ -861,26 +860,59 @@ class AITrader:
                     pnl_pct = (current - entry) / entry if entry > 0 else 0
                     pos["current_price"]   = current
                     pos["current_pnl_pct"] = pnl_pct
+                    pos["peak_price"]      = max(pos.get("peak_price", entry), current)
 
-                    # Spike exit: ≥15% surge in one 3s interval while in profit
                     prev = pos.get("fast_prev_price", entry)
-                    if prev > 0 and pnl_pct > 0:
-                        surge = (current - prev) / prev
-                        if surge >= 0.12:   # 12% in 3s = pump — capture it
-                            to_close.append(
-                                (pair_addr, pos, current,
-                                 f"FastMonitor spike: +{surge:.0%} in 3s (PnL +{pnl_pct:.0%})")
-                            )
-                            continue
                     pos["fast_prev_price"] = current
 
-                    # Instant stop-loss check
+                    # ── 1. Spike capture: exit at the top of sudden pumps ─────
+                    # 12% surge in one 3s tick = parabolic — sell immediately
+                    if prev > 0 and pnl_pct > 0 and current > prev:
+                        surge = (current - prev) / prev
+                        if surge >= 0.12:
+                            to_close.append((
+                                pair_addr, pos, current,
+                                f"FastMonitor spike: +{surge:.0%} in 3s (PnL +{pnl_pct:.0%})"))
+                            continue
+
+                    # ── 2. Reversal after peak: price dropped fast from ATH ───
+                    # If we're >15% off the peak while in profit, sell before
+                    # the dump wipes the gain
+                    peak = pos.get("peak_price", entry)
+                    if peak > entry and pnl_pct > 0:
+                        reversal = (peak - current) / peak
+                        if reversal >= 0.15 and pnl_pct > 0.05:
+                            to_close.append((
+                                pair_addr, pos, current,
+                                f"FastMonitor reversal: -{reversal:.0%} from peak "
+                                f"(PnL +{pnl_pct:.0%})"))
+                            continue
+
+                    # ── 3. Volume dry-up with stalled price ───────────────────
+                    # Track volume samples; if 24h vol drops >60% in 2 consecutive
+                    # ticks compared to entry-time volume → market is abandoning it
+                    if bp.volume_24h_usd > 0:
+                        entry_vol = pos.get("entry_volume_24h", 0)
+                        if entry_vol <= 0:
+                            pos["entry_volume_24h"] = bp.volume_24h_usd
+                        else:
+                            vol_drop = (entry_vol - bp.volume_24h_usd) / entry_vol
+                            prev_drop = pos.get("prev_vol_drop", 0.0)
+                            pos["prev_vol_drop"] = vol_drop
+                            # Two consecutive readings show major vol collapse
+                            if vol_drop > 0.60 and prev_drop > 0.60 and pnl_pct > 0:
+                                to_close.append((
+                                    pair_addr, pos, current,
+                                    f"FastMonitor vol dry-up: -{vol_drop:.0%} from entry "
+                                    f"(PnL +{pnl_pct:.0%} — locking in)"))
+                                continue
+
+                    # ── 4. Instant stop-loss ──────────────────────────────────
                     stop_pct = pos.get("stop_pct", 0.20)
                     if pnl_pct <= -stop_pct:
-                        to_close.append(
-                            (pair_addr, pos, current,
-                             f"FastMonitor stop-loss {pnl_pct:.0%}")
-                        )
+                        to_close.append((
+                            pair_addr, pos, current,
+                            f"FastMonitor stop-loss {pnl_pct:.0%}"))
 
                 for pair_addr, pos, current, reason in to_close:
                     if pair_addr in self._dex_positions:

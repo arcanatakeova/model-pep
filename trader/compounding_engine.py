@@ -39,12 +39,11 @@ class CompoundingEngine:
         self.risk_manager = risk_manager
 
         # Market type allocations (fraction of total equity)
+        # Only ACTIVE markets — forex/futures/CEX/grid/scalp all disabled in config.
         self.allocations = {
-            "crypto_cex":  0.35,   # CoinGecko/CryptoCompare signals (CEX)
-            "crypto_dex":  0.25,   # DEX Screener / on-chain tokens
-            "polymarket":  0.15,   # Prediction markets
-            "stocks":      0.15,   # Stocks / ETFs
-            "forex":       0.10,   # Forex pairs
+            "crypto_dex":  0.60,   # Solana DEX / on-chain tokens (primary)
+            "polymarket":  0.20,   # Prediction markets
+            "stocks":      0.20,   # Stocks / ETFs
         }
 
         # Performance tracking per market type
@@ -207,18 +206,21 @@ class CompoundingEngine:
 
     def _market_to_key(self, market: str) -> str:
         mapping = {
-            "crypto":      "crypto_cex",
-            "cex":         "crypto_cex",
             "dex":         "crypto_dex",
             "solana":      "crypto_dex",
-            "futures":     "crypto_cex",   # Futures trade CEX-listed assets
-            "funding_arb": "crypto_cex",   # Arb on CEX perpetuals
+            "crypto_dex":  "crypto_dex",
+            # Disabled markets map to dex (nearest active market)
+            "crypto":      "crypto_dex",
+            "cex":         "crypto_dex",
+            "crypto_cex":  "crypto_dex",
+            "futures":     "crypto_dex",
+            "funding_arb": "crypto_dex",
+            "forex":       "crypto_dex",
             "polymarket":  "polymarket",
             "stocks":      "stocks",
             "etf":         "stocks",
-            "forex":       "forex",
         }
-        return mapping.get(market.lower(), "crypto_cex")
+        return mapping.get(market.lower(), "crypto_dex")
 
     def _rebalance_allocations(self):
         """
@@ -251,9 +253,9 @@ class CompoundingEngine:
             return  # Bad data — skip rebalance this cycle
         weights     = exp_scores / total_exp
 
-        # Enforce min/max allocation bounds
-        min_alloc = 0.05
-        max_alloc = 0.45
+        # Enforce min/max allocation bounds (3 active markets)
+        min_alloc = 0.10
+        max_alloc = 0.80
         weights = np.clip(weights, min_alloc, max_alloc)
         weights = weights / weights.sum()  # Renormalize
 
@@ -353,8 +355,19 @@ class CompoundingEngine:
         try:
             with open(self.ALLOCATION_FILE) as f:
                 state = json.load(f)
-            self.allocations             = state.get("allocations", self.allocations)
-            self.market_stats            = state.get("market_stats", self.market_stats)
+
+            # Prune stale markets (forex/crypto_cex disabled) from saved state
+            active = set(self.allocations)
+            saved_alloc = {k: v for k, v in state.get("allocations", {}).items() if k in active}
+            if saved_alloc:
+                # Renormalize to 1.0
+                total = sum(saved_alloc.values())
+                self.allocations = {k: v / total for k, v in saved_alloc.items()}
+
+            saved_stats = {k: v for k, v in state.get("market_stats", {}).items() if k in active}
+            if saved_stats:
+                self.market_stats.update(saved_stats)
+
             self._cycle_count            = state.get("cycle_count", 0)
             self._stats_processed_count  = state.get("stats_processed_count", 0)
             logger.info("Compounding state loaded (cycle #%d, %d trades processed)",

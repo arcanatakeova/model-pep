@@ -40,11 +40,13 @@ JUPITER_SWAP_URL     = "https://quote-api.jup.ag/v6/swap"
 # Jito Block Engine — bundles are MEV-protected and tip-prioritised
 JITO_BUNDLE_URL      = "https://mainnet.block-engine.jito.labs.io/api/v1/bundles"
 JITO_TIP_ACCOUNTS    = [
+    # Official Jito tip accounts (base58 pubkeys, randomly selected per tx)
     "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
-    "HFqU5x63VTqvB8eLJMMyFgFastFF4zYzAqmsfoEp4Y9Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+    "HFqU5x63VTqvB8eLJMMyFgFastFF4zYzAqmsfoEp4Y9C",
     "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1MusExtP8bY",
     "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
     "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
 ]
 
 # Token mints
@@ -658,11 +660,11 @@ class SolanaWallet:
     # ─── Balance helpers ───────────────────────────────────────────────────────
 
     def _check_lamport_balance(self) -> bool:
-        """Return True if wallet has enough SOL to cover tx fees."""
+        """Return True if wallet has enough SOL to cover tx fees + Jito tip."""
         lamports = self.get_sol_balance_lamports()
         if lamports < MIN_SOL_RESERVE_LAMPORTS:
-            logger.warning("Low SOL balance: %.6f SOL (need ≥ 0.01 for fees)",
-                           lamports / 1e9)
+            logger.warning("Low SOL balance: %.6f SOL (need ≥ %.3f for fees + tip)",
+                           lamports / 1e9, MIN_SOL_RESERVE_LAMPORTS / 1e9)
             return False
         return True
 
@@ -720,33 +722,49 @@ class SolanaWallet:
             return int(usd_amount * 1e6)
 
     def _get_sol_price(self) -> float:
-        """Get current SOL/USD price with 30s cache."""
+        """
+        Get current SOL/USD price with 15s cache.
+        Sources tried in order: Birdeye → Jupiter Price API → CoinGecko.
+        Returns last known price on failure; falls back to $150 only if never fetched.
+        """
         price, ts = self._sol_price_cache
-        if price > 0 and time.time() - ts < 30:
+        if price > 0 and time.time() - ts < 15:
             return price
 
-        # Try Birdeye first (if key available)
-        try:
-            if config.BIRDEYE_API_KEY:
+        # 1. Birdeye (real-time, most accurate when key available)
+        if config.BIRDEYE_API_KEY:
+            try:
                 resp = requests.get(
                     "https://public-api.birdeye.so/defi/price",
                     params={"address": SOL_MINT},
-                    headers={
-                        "X-API-KEY": config.BIRDEYE_API_KEY,
-                        "x-chain": "solana",
-                    },
+                    headers={"X-API-KEY": config.BIRDEYE_API_KEY, "x-chain": "solana"},
                     timeout=4,
                 )
                 if resp.ok:
-                    d = resp.json().get("data", {})
-                    p = float(d.get("value", 0) or 0)
+                    p = float(resp.json().get("data", {}).get("value", 0) or 0)
                     if p > 0:
                         self._sol_price_cache = (p, time.time())
                         return p
+            except Exception:
+                pass
+
+        # 2. Jupiter Price API v2 (no key, real DEX price)
+        try:
+            resp = requests.get(
+                "https://api.jup.ag/price/v2",
+                params={"ids": SOL_MINT},
+                timeout=4,
+                headers={"User-Agent": "ai-trader/2.0"},
+            )
+            if resp.ok:
+                p = float(resp.json().get("data", {}).get(SOL_MINT, {}).get("price", 0) or 0)
+                if p > 0:
+                    self._sol_price_cache = (p, time.time())
+                    return p
         except Exception:
             pass
 
-        # Fallback: CoinGecko
+        # 3. CoinGecko (free, slightly delayed)
         try:
             resp = requests.get(
                 "https://api.coingecko.com/api/v3/simple/price",
@@ -761,10 +779,11 @@ class SolanaWallet:
         except Exception:
             pass
 
-        # Last-resort: return cached value even if stale
+        # Return stale cache if all sources fail — better than a hardcoded guess
         if price > 0:
+            logger.debug("All SOL price sources failed — using stale cache $%.2f", price)
             return price
-        logger.warning("SOL price unavailable — using $150 estimate")
+        logger.warning("SOL price unavailable — using $150 fallback estimate")
         return 150.0
 
     # ─── Quote helper (for safety checker / dry-run) ───────────────────────────

@@ -23,6 +23,7 @@ Any token that is a confirmed honeypot gets score=0 regardless of momentum.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import json
 import logging
 import struct
@@ -115,8 +116,11 @@ class TokenSafetyChecker:
 
     def check_token_safety(self, mint_address: str) -> TokenSafetyReport:
         """
-        Run all safety checks and return a composite report.
+        Run all safety checks concurrently and return a composite report.
         Cached for RUGCHECK_CACHE_TTL seconds.
+
+        All 4 external checks (Birdeye, RugCheck, RPC on-chain, sell simulation)
+        fire in parallel so total latency ≈ slowest single check (~8s) not sum (~32s).
         """
         now = time.time()
         if mint_address in self._cache:
@@ -127,27 +131,39 @@ class TokenSafetyChecker:
         score = 1.0
         flags: list[str] = []
 
-        # ── 1. Birdeye security (preferred — richest data) ────────────────
-        birdeye_sec = None
-        be = self._get_birdeye()
-        if be:
-            try:
-                birdeye_sec = be.get_security(mint_address)
-            except Exception as e:
-                logger.debug("Birdeye security error %s: %s", mint_address[:12], e)
+        # ── Run all checks concurrently ───────────────────────────────────
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5,
+                                                   thread_name_prefix="safety") as ex:
+            # Birdeye security
+            def _birdeye():
+                be = self._get_birdeye()
+                if be:
+                    try:
+                        return be.get_security(mint_address)
+                    except Exception as e:
+                        logger.debug("Birdeye security error %s: %s", mint_address[:12], e)
+                return None
 
-        # ── 2. RugCheck (free fallback) ────────────────────────────────────
-        rc = self._check_rugcheck(mint_address)
+            f_birdeye  = ex.submit(_birdeye)
+            f_rugcheck = ex.submit(self._check_rugcheck,         mint_address)
+            f_onchain  = ex.submit(self._check_on_chain_mint,    mint_address)
+            f_jup      = ex.submit(self._check_jupiter_verified, mint_address)
+            f_sell     = ex.submit(
+                self._simulate_sell if config.ENABLE_SELL_SIMULATION
+                else lambda _: {},
+                mint_address)
 
-        # ── 3. On-chain RPC (ground truth for authorities) ─────────────────
-        onchain = self._check_on_chain_mint(mint_address)
-
-        # ── 4. Jupiter verified list ───────────────────────────────────────
-        jup_verified = self._check_jupiter_verified(mint_address)
-
-        # ── 5. Sell simulation — honeypot detection ────────────────────────
-        sell_sim = (self._simulate_sell(mint_address)
-                    if config.ENABLE_SELL_SIMULATION else {})
+            timeout = config.SAFETY_CHECK_TIMEOUT + 2   # slight buffer over per-check timeout
+            try: birdeye_sec  = f_birdeye.result(timeout=timeout)
+            except Exception: birdeye_sec = None
+            try: rc           = f_rugcheck.result(timeout=timeout)
+            except Exception: rc = {"available": False}
+            try: onchain      = f_onchain.result(timeout=timeout)
+            except Exception: onchain = {"available": False}
+            try: jup_verified = f_jup.result(timeout=timeout)
+            except Exception: jup_verified = False
+            try: sell_sim     = f_sell.result(timeout=timeout)
+            except Exception: sell_sim = {"passed": None}
 
         # ─── HARD BLOCK: Confirmed honeypot ─────────────────────────────────
         # This check runs first. Nothing overrides it.
