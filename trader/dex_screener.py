@@ -9,6 +9,8 @@ Strategies:
 - Breakout detection (price action + transaction velocity)
 - Liquidity safety scoring (rug-pull risk filter)
 """
+from __future__ import annotations
+
 import logging
 import time
 import requests
@@ -163,6 +165,8 @@ class DexScreener:
             pairs = data["pairs"]
         # Return the highest liquidity pair
         pairs.sort(key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
+        if not pairs:
+            return None
         token = self._parse_pair(pairs[0])
         if token:
             self._score_token(token)

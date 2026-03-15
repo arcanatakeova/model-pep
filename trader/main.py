@@ -28,12 +28,14 @@ import sys
 import time
 from datetime import datetime, timezone
 
-# Load .env if available
+# .env is loaded in config.py; this is a backup in case config hasn't been imported yet
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass
+    import sys
+    print("WARNING: python-dotenv not installed. API keys from .env won't load.", file=sys.stderr)
+    print("Install: pip3 install python-dotenv", file=sys.stderr)
 
 import config
 from portfolio import Portfolio

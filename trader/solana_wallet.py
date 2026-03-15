@@ -23,11 +23,13 @@ from typing import Optional
 
 import requests
 
+import config as _cfg
+
 logger = logging.getLogger(__name__)
 
 JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
 JUPITER_SWAP_URL  = "https://quote-api.jup.ag/v6/swap"
-SOLANA_RPC_URL    = "https://api.mainnet-beta.solana.com"
+SOLANA_RPC_URL    = _cfg.SOLANA_RPC_URL
 
 # Common token mints
 SOL_MINT   = "So11111111111111111111111111111111111111112"
@@ -201,7 +203,7 @@ class SolanaWallet:
                 "quoteResponse": quote,
                 "userPublicKey": self._pubkey,
                 "wrapAndUnwrapSol": True,
-                "prioritizationFeeLamports": 10000,  # ~$0.001 priority fee
+                "prioritizationFeeLamports": _cfg.SOL_PRIORITY_FEE_LAMPORTS,
                 "dynamicComputeUnitLimit": True,
             }
             resp = requests.post(JUPITER_SWAP_URL, json=swap_payload, timeout=15)

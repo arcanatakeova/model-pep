@@ -2,6 +2,8 @@
 Market Scanner — Scans all watched markets and produces ranked trade signals.
 Covers: Crypto, Forex, Stocks/ETFs.
 """
+from __future__ import annotations
+
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional

@@ -1,5 +1,5 @@
 """
-Data Fetcher - Retrieves market data from free public APIs.
+Data Fetcher — Retrieves market data from free public APIs.
 
 Sources:
   - CoinGecko  : crypto OHLCV, market cap, volume (free, no key)
@@ -8,6 +8,8 @@ Sources:
   - ExchangeRate API: forex rates (free, no key)
   - Yahoo Finance (yfinance): stocks & ETFs (unofficial, no key)
 """
+from __future__ import annotations
+
 import time
 import logging
 import requests

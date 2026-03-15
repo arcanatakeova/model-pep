@@ -2,6 +2,8 @@
 Portfolio — Tracks cash, open positions, trade history, and P&L.
 Thread-safe for concurrent market scanning.
 """
+from __future__ import annotations
+
 import json
 import logging
 import threading

@@ -4,6 +4,13 @@ All trading parameters, API endpoints, and strategy weights.
 """
 import os
 
+# Load .env file early so all os.getenv() calls below pick up the values
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # ─── Trading Mode ─────────────────────────────────────────────────────────────
 PAPER_TRADING = True          # Set False to enable live trading (requires API keys)
 INITIAL_CAPITAL = 10_000.0    # Starting capital in USD (overridden by wallet balance)
