@@ -1041,44 +1041,24 @@ function updateStatus(s) {
 
 // ══ Portfolio / Hero ═══════════════════════════════════════════════════════════
 function updatePortfolio(p) {
-  const eq  = p.equity || 0;
+  // NOTE: hero equity, cash, return%, open P&L are owned by handleLiveEvent (SSE).
+  // This function only updates trade stats that change infrequently.
   const ret = p.total_return_pct || 0;
   const pnl = p.total_pnl_usd || 0;
   const wr  = p.win_rate_pct || 0;
   const dd  = p.max_drawdown_pct || 0;
   const pf  = p.profit_factor || 0;
 
-  // Equity hero with animation
-  const heroEl = $('hero-equity');
-  const prev = _prevEquity;
-  if(prev && Math.abs(eq-prev)/Math.max(prev,1) > 0.0001) {
-    animateVal(heroEl, prev, eq, 700, v => '$' + Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}));
-    heroEl.classList.remove('flash-up','flash-down');
-    heroEl.classList.add(eq >= prev ? 'flash-up' : 'flash-down');
-    setTimeout(() => heroEl.classList.remove('flash-up','flash-down'), 1200);
-  } else {
-    heroEl.textContent = fmt$(eq);
-  }
-  _prevEquity = eq;
+  // Starting capital (static — set once)
+  if(p.initial_capital) $('sub-initial').textContent = fmt$(p.initial_capital);
 
-  // Return
-  const retAbsEl = $('hero-ret-abs');
-  const retColor = ret>=0 ? 'var(--green)' : 'var(--red)';
-  $('hero-ret-arrow').textContent = ret>=0 ? '▲' : '▼';
-  $('hero-ret-arrow').style.color = retColor;
-  retAbsEl.textContent = (pnl>=0?'+':'')+fmt$(Math.abs(pnl));
-  retAbsEl.style.color = retColor;
-  $('hero-ret-pct').textContent = '(' + fmtPct(ret) + ')';
-  $('hero-ret-pct').style.color = retColor;
-  $('sub-initial').textContent = fmt$(p.initial_capital||0);
-  $('sub-cash').textContent    = fmt$(p.cash||0);
-
-  // Gauge
-  setGauge(wr);
-  $('cmd-pos').textContent    = p.open_positions||0;
+  // Trades count
   $('cmd-trades').textContent = p.total_trades||0;
 
-  // Hero stats
+  // Win-rate gauge
+  setGauge(wr);
+
+  // Hero stats (sidebar)
   $('h-wr').textContent      = wr.toFixed(1)+'%';
   $('h-pf').textContent      = pf ? pf.toFixed(2)+'×' : '—';
   $('h-pf').className        = 'hstat-val ' + (pf>=1.5?'pos': pf>=1?'neu':'neg');
@@ -1290,6 +1270,13 @@ function handleLiveEvent(data) {
 
   // ── Live ticker (real CoinCap prices) ─────────────────────────────────────
   buildTicker(data.ticker || [], data.positions || []);
+
+  // ── Stats bar (keep in sync with live equity) ─────────────────────────────
+  const retEl2 = $('sc-return');
+  retEl2.textContent = fmtPct(ret);
+  retEl2.className   = 'scard-val ' + (ret>=0?'pos':'neg');
+  const totalReturn = data.return_usd || 0;
+  $('sc-pnl').textContent = 'Total: ' + (totalReturn>=0?'+':'') + fmt$(totalReturn);
 
   // ── Command bar counts ─────────────────────────────────────────────────────
   $('cmd-pos').textContent = (data.positions || []).length;
