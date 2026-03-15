@@ -39,9 +39,9 @@ class CompoundingEngine:
         self.risk_manager = risk_manager
 
         # Market type allocations (fraction of total equity)
-        # DEX only — all other markets disabled.
         self.allocations = {
-            "crypto_dex":  1.0,    # Solana DEX / on-chain tokens (100%)
+            "crypto_dex":  0.85,   # Solana DEX / on-chain tokens (85%)
+            "polymarket":  0.15,   # Polymarket prediction markets (15%)
         }
 
         # Performance tracking per market type
@@ -203,12 +203,30 @@ class CompoundingEngine:
             stats["win_rate"] = stats["wins"] / n if n > 0 else 0.5
 
     def _market_to_key(self, market: str) -> str:
-        # Everything maps to dex — only active market.
+        if market == "polymarket":
+            return "polymarket"
         return "crypto_dex"
 
     def _rebalance_allocations(self):
-        """No-op — single market (DEX), always 100% allocated."""
-        pass
+        """Rebalance allocations based on market performance."""
+        # Only rebalance if we have enough data
+        total_trades = sum(s["trades"] for s in self.market_stats.values())
+        if total_trades < 20:
+            return
+        # Shift allocation toward better-performing market (max 10% shift)
+        for key, stats in self.market_stats.items():
+            if stats["trades"] < 5:
+                continue
+            wr = stats["win_rate"]
+            base = 0.85 if key == "crypto_dex" else 0.15
+            if wr > 0.55:
+                self.allocations[key] = min(base + 0.10, 0.95)
+            elif wr < 0.40:
+                self.allocations[key] = max(base - 0.10, 0.05)
+        # Renormalize
+        total = sum(self.allocations.values())
+        if total > 0:
+            self.allocations = {k: v / total for k, v in self.allocations.items()}
 
     def _check_milestones(self, equity: float):
         """Log milestone achievements."""

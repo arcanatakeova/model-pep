@@ -294,6 +294,24 @@ class RiskManager:
             return 0.0
         return round(size, 2)
 
+    def poly_position_size_usd(self, signal_score: float, edge_pct: float,
+                               available_cash: float, market_budget: float) -> float:
+        """Position sizing for Polymarket prediction market trades."""
+        equity = self.portfolio.equity()
+        if equity <= 0:
+            return 0.0
+
+        # Kelly-inspired sizing: edge_pct is our expected edge
+        kelly = edge_pct * signal_score
+        kelly = max(0, min(kelly, 0.10))  # Cap at 10% of equity
+
+        size = equity * kelly
+        size = min(size, config.POLYMARKET_MAX_POSITION_USD)
+        size = min(size, market_budget * 0.25)
+        size = min(size, available_cash * 0.05)  # Max 5% of cash per poly trade
+
+        return round(max(size, 0.0), 2)
+
     def dynamic_dex_stop_pct(self, price_change_h1: float, price_change_h6: float,
                               price_change_h24: float, safety_score: float) -> float:
         """
