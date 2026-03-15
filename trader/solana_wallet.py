@@ -46,7 +46,7 @@ _BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 
 # ─── Pump.fun on-chain constants (no PumpPortal dependency) ────────────────────
 _PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
-_ATA_PROG     = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bRS"
+_ATA_PROG     = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 _TOKEN_PROG   = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 _SYSTEM_PROG  = "11111111111111111111111111111111"
 _RENT_SYSVAR  = "SysvarRent111111111111111111111111111111111"
