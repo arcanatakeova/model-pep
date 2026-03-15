@@ -65,7 +65,7 @@ class Portfolio:
                 logger.warning("Invalid position params: qty=%.8f price=%.4f", qty, price)
                 return {}
             cost = qty * price
-            if side == "long" and cost > self.cash + 1e-6:
+            if side == "long" and cost > self.cash:
                 logger.warning("Insufficient cash: need $%.2f, have $%.2f", cost, self.cash)
                 return {}
             if side == "long":
@@ -111,7 +111,7 @@ class Portfolio:
                 pos["unrealized_pnl_pct"] = (current_price / entry - 1) * 100
             else:
                 pos["unrealized_pnl"] = (entry - current_price) * qty
-                pos["unrealized_pnl_pct"] = (entry / current_price - 1) * 100 if current_price > 0 else 0
+                pos["unrealized_pnl_pct"] = (entry - current_price) / entry * 100 if entry > 0 else 0
 
     def close_position(self, asset_id: str, price: float, reason: str = "") -> dict:
         """Close an open position and record the trade."""

@@ -187,8 +187,8 @@ MEV_MAX_SLIPPAGE_BPS = 100         # Tighter slippage (1%) for MEV protection
 MEV_PRIORITY_FEE_LAMPORTS = 50000  # Higher priority fee to front-run sandwich
 
 # ─── Concentration Limits ───────────────────────────────────────────────────
-MAX_DEX_POSITIONS = 15             # Max concurrent DEX/memecoin positions (up from 10)
-MAX_SAME_DEX_POSITIONS = 10        # Max positions on same DEX
+MAX_DEX_POSITIONS = 250            # Max concurrent DEX/memecoin positions
+MAX_SAME_DEX_POSITIONS = 100       # Max positions on same DEX
 MIN_LIQUIDITY_RATIO = 0.15         # Position must be < 15% of pool liquidity (up from 8%)
 
 # ─── Solana / Phantom Wallet ──────────────────────────────────────────────────

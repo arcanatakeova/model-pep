@@ -135,7 +135,6 @@ class RiskManager:
         trail_stop    = position.get("trailing_stop")
 
         if side == "long":
-            pnl_pct = (current_price - entry_price) / entry_price
             # Take profit
             if current_price >= take_profit:
                 return True, f"Take profit hit ({current_price:.4f} >= {take_profit:.4f})"
@@ -146,7 +145,6 @@ class RiskManager:
             if trail_stop and current_price <= trail_stop:
                 return True, f"Trailing stop hit ({current_price:.4f} <= {trail_stop:.4f})"
         else:  # short
-            pnl_pct = (entry_price - current_price) / entry_price
             if current_price <= take_profit:
                 return True, f"Take profit hit ({current_price:.4f} <= {take_profit:.4f})"
             if current_price >= stop_loss:
@@ -244,7 +242,7 @@ class RiskManager:
             liq = entry * (1 - (1 / leverage) + maintenance_margin)
             return max(liq, 0.0)
         else:
-            return entry * (1 + (1 / leverage) - maintenance_margin)
+            return max(entry * (1 + (1 / leverage) - maintenance_margin), 0.0)
 
     # ─────────────────────────────────────────────────────────────────────────
     # DEX / Memecoin-Specific Risk Controls
@@ -287,8 +285,8 @@ class RiskManager:
         # 5. Caps
         size = min(size, config.DEX_MAX_POSITION_USD)
         size = min(size, liquidity_usd * config.MIN_LIQUIDITY_RATIO)
-        # Cash cap: use up to 99% of available cash — wallet is the only real limit
-        size = min(size, self.portfolio.cash * 0.99)
+        # Cash cap: use up to 90% of available cash — leave room for tx fees
+        size = min(size, self.portfolio.cash * 0.90)
 
         if size < config.DEX_MIN_POSITION_USD:
             return 0.0

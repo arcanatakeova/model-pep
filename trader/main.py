@@ -212,20 +212,18 @@ class AITrader:
                 "reset_paper": False,
             })
 
-        # Sync capital with Phantom wallet whenever this is a fresh live start
-        # (no prior live trades.json) OR we just wiped paper data above.
-        _fresh_live = live and (not os.path.exists(config.TRADE_LOG_FILE) or _is_paper_data)
-        if self.solana.is_connected and _fresh_live:
+        # Always sync cash + initial_capital with the real Phantom wallet on every startup.
+        # This ensures position sizing and drawdown calculations reflect the true balance,
+        # not a stale saved value or the $100k config default.
+        if self.solana.is_connected and live:
             try:
                 sol_bal = self.solana.get_sol_balance()
                 sol_usd = self.solana.get_portfolio_value_usd()
                 if sol_usd > 0.50:
                     self.portfolio.cash            = sol_usd
                     self.portfolio.initial_capital  = sol_usd
-                    self.portfolio.peak_equity      = sol_usd
+                    self.portfolio.peak_equity      = max(self.portfolio.peak_equity, sol_usd)
                     self._day_start_eq              = sol_usd
-                    # Reset daily loss tracker AFTER wallet sync so the baseline
-                    # is the real SOL balance — not the fake $100k config default.
                     self.risk_mgr.reset_daily_loss_tracker()
                     logger.info("Phantom wallet synced: SOL=%.4f ($%.2f)", sol_bal, sol_usd)
             except Exception as e:
@@ -692,17 +690,20 @@ class AITrader:
             # ── Fast pre-filter: concentration + safety (in-memory, no I/O) ──
             # Build (token, size_usd) pairs for candidates that clear these gates.
             prefiltered = []
+            n_blocked_conc = n_blocked_safety = n_blocked_size = 0
             for token in candidates:
                 allowed, reason = self.risk_mgr.check_dex_concentration(
                     self._dex_positions, token.dex_id)
                 if not allowed:
-                    logger.info("Concentration: %s", reason)
+                    logger.info("Concentration block %s: %s", token.base_symbol, reason)
+                    n_blocked_conc += 1
                     continue
                 safety = getattr(token, "safety_report", None)
                 if safety and not safety.is_safe_to_trade:
                     logger.warning("SKIP %s: %s — %s", token.base_symbol,
                                    safety.risk_level,
                                    ", ".join(safety.risk_flags[:2]))
+                    n_blocked_safety += 1
                     continue
                 safety_score = safety.safety_score if safety else 0.5
                 size_usd = self.risk_mgr.dex_position_size_usd(
@@ -714,10 +715,18 @@ class AITrader:
                 )
                 size_usd = min(size_usd, config.DEX_MAX_POSITION_USD)
                 if size_usd < config.DEX_MIN_POSITION_USD:
-                    logger.warning("SKIP %s: size $%.2f below min $%.2f",
-                                   token.base_symbol, size_usd, config.DEX_MIN_POSITION_USD)
+                    logger.warning("SKIP %s: size $%.2f below min $%.2f (liq=$%.0f cash=$%.2f)",
+                                   token.base_symbol, size_usd, config.DEX_MIN_POSITION_USD,
+                                   token.liquidity_usd, self.portfolio.cash)
+                    n_blocked_size += 1
                     continue
+                logger.info("Prefilter OK %s: size=$%.2f score=%.2f safety=%.2f liq=$%.0f",
+                            token.base_symbol, size_usd, token.score, safety_score,
+                            token.liquidity_usd)
                 prefiltered.append((token, size_usd, safety))
+
+            logger.info("Prefilter: %d passed, %d conc-blocked, %d safety-blocked, %d size-blocked",
+                        len(prefiltered), n_blocked_conc, n_blocked_safety, n_blocked_size)
 
             # ── Parallel network validation: Jupiter price + Birdeye checks ──
             # Run all I/O-bound checks concurrently across candidates.
@@ -729,7 +738,7 @@ class AITrader:
                 tok, sz, sfty = args
 
                 # Holder count hard block — use data already fetched by safety checker
-                if sfty and sfty.holder_count and 0 < sfty.holder_count < 20:
+                if sfty and getattr(sfty, "holder_count", None) and 0 < sfty.holder_count < 20:
                     logger.warning("SKIP %s: only %d holders (rug risk)",
                                    tok.base_symbol, sfty.holder_count)
                     return None
@@ -748,9 +757,12 @@ class AITrader:
                             if result is not None:
                                 validated.append(result)
                         except Exception as e:
-                            logger.debug("Validate candidate error: %s", e)
+                            logger.warning("Validate candidate error: %s", e)
                 # Preserve score-descending order after concurrent collection
                 validated.sort(key=lambda x: x[0].score, reverse=True)
+
+            logger.info("Validated: %d/%d passed, executing up to 8 buys",
+                        len(validated), len(prefiltered))
 
             for token, size_usd, safety in validated:
                 if traded >= 8:   # Up from 6 — execute more per cycle
@@ -791,7 +803,7 @@ class AITrader:
                 return
 
             # ── Cash gate: ensure we can actually afford this ────────────────
-            if size_usd > self.portfolio.cash * 0.99:
+            if size_usd > self.portfolio.cash:
                 logger.warning("Insufficient cash $%.2f for DEX buy $%.2f — skipping",
                                self.portfolio.cash, size_usd)
                 return
@@ -799,9 +811,14 @@ class AITrader:
             # ── Live wallet: verify SOL balance using cached value (avoids RPC per trade)
             if token.chain_id == "solana" and self.solana.is_connected:
                 _sol, _usdc, _sol_usd, _cache_ts = self._wallet_balance_cache
-                # Use cached value if fresh (<10s), else fall back to portfolio.cash
-                sol_bal_usd = _sol_usd if (time.time() - _cache_ts) < 10 else self.portfolio.cash
-                if sol_bal_usd < size_usd * 1.05:   # Need trade size + ~5% for fees
+                # Use cached value if fresh (<10s), else fall back to portfolio.cash.
+                # Take max() to guard against the cache returning $0 during a 429 burst
+                # while portfolio.cash still holds the last good balance.
+                sol_bal_usd = max(
+                    _sol_usd if (time.time() - _cache_ts) < 10 else 0.0,
+                    self.portfolio.cash,
+                )
+                if sol_bal_usd < size_usd + 1.0:   # Need trade size + $1 flat for Solana fees
                     logger.warning("SOL balance $%.2f insufficient for $%.2f trade — skipping",
                                    sol_bal_usd, size_usd)
                     return
@@ -847,6 +864,13 @@ class AITrader:
                     safety_report=safety,
                     liquidity_usd=token.liquidity_usd,
                     pair_address=token.pair_address if token.dex_id == "pumpswap" else None)
+                if not tx:
+                    logger.warning("BUY skipped %s: safe_buy_token returned None "
+                                   "(check BUY FAILED / BLOCKED logs above)",
+                                   token.base_symbol)
+                elif tx.startswith("paper_"):
+                    logger.warning("BUY skipped %s: got paper tx in live mode — "
+                                   "solana.is_connected may have flipped", token.base_symbol)
                 if tx and not tx.startswith("paper_"):
                     pos_data["tx"] = tx
                     # Priority 1: parse on-chain transaction for exact fill price
@@ -1055,7 +1079,7 @@ class AITrader:
                     _last_token_reconcile = now_ts
                     try:
                         on_chain = self.solana.get_all_token_balances()
-                        if on_chain:
+                        if on_chain is not None:  # None = RPC error; {} = empty wallet (valid)
                             _skip = {SOL_MINT, USDC_MINT, USDT_MINT}
                             for pair_addr, pos in list(self._dex_positions.items()):
                                 mint = pos.get("address", "")
@@ -1122,21 +1146,81 @@ class AITrader:
 
                 token = self.dex_screener.get_token_info(pos["address"], pos["chain"])
                 if not token or token.price_usd <= 0:
+                    miss = pos.get("_price_miss", 0) + 1
+                    pos["_price_miss"] = miss
+                    if miss % 12 == 0:  # warn every ~60s
+                        logger.warning(
+                            "Cannot fetch price for %s (%d consecutive misses) — "
+                            "position exits blocked", pos.get("symbol", "?"), miss)
+                    if miss >= 72:  # 6 min of no price → force exit at last known price
+                        last = pos.get("current_price", pos.get("entry_price", 0))
+                        logger.error(
+                            "Force-closing %s after %d price misses (last=$%.8f)",
+                            pos.get("symbol", "?"), miss, last)
+                        self._try_close_dex_position(
+                            pair_addr, pos, last, f"No price data for {miss} cycles — force exit")
                     continue
+                pos["_price_miss"] = 0  # reset on successful fetch
 
                 entry   = pos["entry_price"]
                 current = token.price_usd
                 pnl_pct = (current - entry) / entry if entry > 0 else 0
                 pos["current_price"]  = current
                 pos["current_pnl_pct"] = pnl_pct
-                # Refresh liquidity for dynamic slippage calculations on exit
+                # Refresh live token signals for dynamic adjustment
                 if token.liquidity_usd > 0:
                     pos["liquidity_usd"] = token.liquidity_usd
+                pos["price_change_m5"]  = getattr(token, "price_change_m5",  0) or 0
+                pos["price_change_h1"]  = getattr(token, "price_change_h1",  0) or 0
+                pos["volume_24h"]       = getattr(token, "volume_24h",        0) or 0
+                pos["score"]            = getattr(token, "score", pos.get("score", 0))
 
                 # Update trailing high
                 pos["peak_price"] = max(pos.get("peak_price", entry), current)
                 peak = pos["peak_price"]
                 trail_pct = (peak - current) / peak if peak > 0 else 0
+
+                # ── DYNAMIC POSITION ADJUSTMENT based on live monitoring data ────
+                # 1. Pyramid add: position running well + strong 5m momentum
+                m5_now = getattr(token, "price_change_m5", 0) or 0
+                if (pnl_pct >= 0.20                          # 20%+ in profit
+                        and m5_now >= 3.0                    # 3%+ 5m momentum
+                        and pos.get("remaining_fraction", 1.0) >= 0.8   # haven't taken major partials
+                        and not pos.get("pyramided")         # only pyramid once per position
+                        and self.portfolio.cash > 2.0):      # have cash to add
+                    add_size = min(pos["size_usd"] * 0.30, self.portfolio.cash * 0.10,
+                                   config.DEX_MAX_POSITION_USD - pos["size_usd"])
+                    if add_size >= config.DEX_MIN_POSITION_USD:
+                        pos["size_usd"] += add_size
+                        self.portfolio.cash -= add_size
+                        pos["pyramided"] = True
+                        logger.info("PYRAMID %s +$%.2f (PnL=+%.0f%% 5m=+%.1f%%) → total $%.2f",
+                                    pos.get("symbol", "?"), add_size, pnl_pct * 100,
+                                    m5_now, pos["size_usd"])
+
+                # 2. Liquidity drain — exit early if pool liquidity dropped >40%
+                entry_liq = pos.get("entry_liquidity_usd", 0)
+                cur_liq   = token.liquidity_usd
+                if entry_liq <= 0:
+                    pos["entry_liquidity_usd"] = cur_liq  # record on first fetch
+                elif cur_liq > 0 and entry_liq > 0:
+                    liq_drop = (entry_liq - cur_liq) / entry_liq
+                    if liq_drop >= 0.40 and not pos.get("_liq_warned"):
+                        pos["_liq_warned"] = True
+                        logger.warning("TIGHTEN STOP %s: liquidity drained %.0f%% ($%.0f→$%.0f)",
+                                       pos.get("symbol", "?"), liq_drop * 100,
+                                       entry_liq, cur_liq)
+                        # Tighten stop by 40% (e.g. 30% stop → 18%)
+                        pos["stop_pct"] = pos.get("stop_pct", 0.20) * 0.60
+
+                # 3. Volume collapse — if 5m change is strongly negative while overall
+                # volume was previously strong, the momentum has flipped; tighten stop
+                if m5_now <= -5.0 and pnl_pct > 0 and not pos.get("_momentum_flip"):
+                    pos["_momentum_flip"] = True
+                    logger.info("MOMENTUM FLIP %s: 5m=%.1f%% PnL=+%.0f%% — tightening stop",
+                                pos.get("symbol", "?"), m5_now, pnl_pct * 100)
+                    pos["stop_pct"] = min(pos.get("stop_pct", 0.20),
+                                         max(0.08, pnl_pct * 0.30))  # protect 70% of gains
 
                 # 0. VOLATILITY SPIKE EXIT — sell at the top of a sudden pump
                 # If price surged ≥15% since the last cycle, we're likely at or near
@@ -1600,50 +1684,109 @@ class AITrader:
 
     def _reconcile_wallet_positions(self):
         """
-        Startup check: compare on-chain SPL holdings with _dex_positions.
-        Logs positions tracked but missing on-chain, and untracked on-chain tokens.
-        Only runs in live mode with a connected wallet.
+        Startup reconciliation — wallet is the source of truth.
+
+        1. Drop any saved positions whose token is no longer in the wallet
+           (externally sold, transferred, or rug-pulled to zero).
+        2. Add any on-chain tokens not in saved state as new positions,
+           using the current price as the entry (we lost the original entry).
+        3. Update qty in saved positions to match actual on-chain balance.
         """
         if not self.live or not self.solana.is_connected:
             return
         try:
             on_chain = self.solana.get_all_token_balances()
-            if not on_chain:
-                logger.debug("Wallet reconciliation: no token balances (no positions or RPC error)")
+            if on_chain is None:
+                logger.debug("Wallet reconciliation: RPC error — skipping")
                 return
 
-            on_chain_mints = set(on_chain.keys())
-            _skip_mints    = {SOL_MINT, USDC_MINT, USDT_MINT}
-            tracked_mints  = {pos.get("address", "") for pos in self._dex_positions.values()}
+            _skip  = {SOL_MINT, USDC_MINT, USDT_MINT}
+            now_ts = datetime.now(timezone.utc).isoformat()
 
-            # Positions we track but have no on-chain tokens for
-            ghost_count = 0
+            # ── 1. Drop ghost positions (tracked but zero on-chain balance) ──
             for pair_addr, pos in list(self._dex_positions.items()):
                 mint = pos.get("address", "")
-                if not mint or mint in _skip_mints:
+                if not mint or mint in _skip:
                     continue
-                if mint not in on_chain_mints:
-                    ghost_count += 1
+                if mint not in on_chain:
                     logger.warning(
-                        "STARTUP RECONCILE: %s (%s…) tracked but NO on-chain balance "
-                        "— may have been sold externally; live sync will reconcile.",
-                        pos.get("symbol", "?"), mint[:12])
+                        "RECONCILE DROP: %s — not in wallet, removing from tracker",
+                        pos.get("symbol", mint[:8]))
+                    with self._dex_lock:
+                        self._dex_positions.pop(pair_addr, None)
 
-            # Tokens on-chain but not tracked (excludes SOL/USDC/USDT)
-            untracked = on_chain_mints - tracked_mints - _skip_mints
-            for mint in untracked:
-                bal = on_chain[mint]
+            # ── 2. Sync qty for surviving positions ───────────────────────────
+            for pair_addr, pos in self._dex_positions.items():
+                mint = pos.get("address", "")
+                if mint and mint in on_chain:
+                    actual_qty = on_chain[mint]["ui_amount"]
+                    if actual_qty > 0:
+                        pos["qty"] = actual_qty
+
+            # ── 3. Add untracked on-chain tokens as new positions ─────────────
+            tracked_mints = {pos.get("address", "")
+                             for pos in self._dex_positions.values()}
+            untracked = {m: b for m, b in on_chain.items()
+                         if m not in _skip and m not in tracked_mints}
+
+            for mint, bal in untracked.items():
+                qty = bal["ui_amount"]
+                # Look up current price + pair info from DexScreener
+                token_info = self.dex_screener.get_token_info(mint, "solana")
+                if not token_info or token_info.price_usd <= 0:
+                    # Try Jupiter price as fallback
+                    price = self._get_jupiter_price(mint)
+                    if not price or price <= 0:
+                        logger.info("RECONCILE SKIP: %s… — cannot price, leaving untracked",
+                                    mint[:12])
+                        continue
+                    symbol     = mint[:8]
+                    pair_addr  = mint   # Use mint as key when no pair found
+                    liq_usd    = 0.0
+                    dex_id     = "unknown"
+                else:
+                    price     = token_info.price_usd
+                    symbol    = token_info.base_symbol
+                    pair_addr = token_info.pair_address or mint
+                    liq_usd   = token_info.liquidity_usd
+                    dex_id    = token_info.dex_id
+
+                value_usd = qty * price
+                if value_usd < 0.50:
+                    logger.debug("RECONCILE SKIP: %s dust $%.4f", symbol, value_usd)
+                    continue
+
+                pos = {
+                    "address":           mint,
+                    "symbol":            symbol,
+                    "chain":             "solana",
+                    "dex_id":            dex_id,
+                    "entry_price":       price,   # Current price — real entry unknown
+                    "current_price":     price,
+                    "size_usd":          value_usd,
+                    "qty":               qty,
+                    "liquidity_usd":     liq_usd,
+                    "remaining_fraction": 1.0,
+                    "peak_price":        price,
+                    "stop_pct":          config.TRAILING_STOP_PCT,
+                    "target_pct":        config.TAKE_PROFIT_PCT,
+                    "opened_at":         now_ts,
+                    "tx":                "recovered",   # Flag: recovered from wallet
+                    "current_pnl_pct":   0.0,
+                }
+                with self._dex_lock:
+                    self._dex_positions[pair_addr] = pos
                 logger.info(
-                    "STARTUP RECONCILE: untracked on-chain token %s… balance=%.6f",
-                    mint[:12], bal["ui_amount"])
+                    "RECONCILE ADD: %s qty=%.4f price=$%.8f value=$%.2f (recovered from wallet)",
+                    symbol, qty, price, value_usd)
 
-            logger.info(
-                "Wallet reconciliation: %d tracked, %d on-chain tokens, "
-                "%d ghost, %d untracked",
-                len(tracked_mints - {""}), len(on_chain_mints),
-                ghost_count, len(untracked))
+            total = len(self._dex_positions)
+            logger.info("Wallet reconciliation complete: %d active positions", total)
+            if total:
+                self._save_dex_positions()   # Persist the reconciled state immediately
+
         except Exception as e:
-            logger.debug("Wallet reconciliation error: %s", e)
+            logger.warning("Wallet reconciliation error: %s", e)
 
     def _sync_wallet_positions(self):
         """
@@ -1688,7 +1831,7 @@ class AITrader:
                 return
 
             on_chain = self.solana.get_all_token_balances()
-            if not on_chain:
+            if on_chain is None:
                 return  # RPC error — never remove positions on a failed read
 
             for pair_addr, pos in list(sol_positions.items()):
@@ -1775,7 +1918,7 @@ class AITrader:
                     data = json.load(f)
                 if isinstance(data, list) and data:
                     logger.info("Equity curve restored: %d points", len(data))
-                    return data[-2_880:]   # Cap at 24h
+                    return data[-17_280:]  # Cap at 24h (17280 × 5s = 86400s)
         except Exception:
             pass
         return []

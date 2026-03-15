@@ -539,7 +539,7 @@ class TradeExecutor:
             return
         side = pos.get("side", "long")
         if side == "long":
-            distance_pct = (current_price - liq) / current_price if current_price > 0 else 1.0
+            distance_pct = (current_price - liq) / liq if liq > 0 else 1.0
         else:
             distance_pct = (liq - current_price) / liq if liq > 0 else 1.0
 
