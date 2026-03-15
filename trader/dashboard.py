@@ -359,7 +359,7 @@ def equity_chart(eq_curve: list, initial_cap: float, tf: str) -> go.Figure:
 
 # ── Main render ───────────────────────────────────────────────────────────────
 
-REFRESH_SEC = 3
+REFRESH_SEC = 1
 
 
 def render():
@@ -465,10 +465,12 @@ def render():
 
     # ── KPI strip ─────────────────────────────────────────────────────────────
     k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
-    # Use wallet SOL value as primary equity if wallet is connected
-    display_equity = wallet_sol_usd if (wallet_ok and wallet_sol_usd > 0) else equity
-    wallet_label   = f"Wallet (SOL)" if wallet_ok else "Portfolio"
-    wallet_sub     = f"{wallet_sol:.4f} SOL" if wallet_ok else f"${equity:,.2f} tracked"
+    # True equity = bot-tracked cash + live DEX position values.
+    # wallet_sol_usd alone is wrong when tokens are held (it misses their value).
+    display_equity = equity
+    wallet_label   = "Portfolio"
+    wallet_sub     = (f"{wallet_sol:.4f} SOL + positions"
+                      if wallet_ok else f"${equity:,.2f} tracked")
     kpis = [
         (k1, kpi_html(wallet_label,   f"${display_equity:,.2f}", wallet_sub, True)),
         (k2, kpi_html("Today P&L",    fmt_usd(daily_pnl, True),
@@ -915,7 +917,7 @@ def render():
     st.markdown(
         f'<div style="text-align:right;color:{TV["text2"]};font-size:10px;'
         f'margin-top:8px;padding-top:5px;border-top:1px solid {TV["border"]};">'
-        f'AI Trader v4.0 · {now_str} · auto-refresh {REFRESH_SEC}s'
+        f'AI Trader v4.0 · {now_str} · live · {REFRESH_SEC}s refresh'
         f'</div>',
         unsafe_allow_html=True)
 

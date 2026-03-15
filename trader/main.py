@@ -336,14 +336,15 @@ class AITrader:
             self._last_dex = time.time()
 
         # ── 12. Compound: Reinvest + rebalance ────────────────────────────
-        # ── 13. Equity snapshot (cap in-memory at 2880 = 24h of 30s cycles) ──
+        # ── 13. Equity snapshot — cap at 17280 = 24h at 5s cadence ──────
+        # (live dashboard writer adds points every 5s; main cycle adds here too)
         self._equity_curve.append({
             "ts": datetime.now(timezone.utc).isoformat(),
             "equity": round(equity, 2),
             "cycle": self._cycle,
         })
-        if len(self._equity_curve) > 2_880:
-            self._equity_curve = self._equity_curve[-2_880:]
+        if len(self._equity_curve) > 17_280:
+            self._equity_curve = self._equity_curve[-17_280:]
 
         # ── 14. Risk report ───────────────────────────────────────────────
         risk = self.risk_mgr.risk_report()
@@ -1120,13 +1121,23 @@ class AITrader:
                     except Exception as e:
                         logger.debug("Live token reconcile error: %s", e)
 
-                # ── 3. Write live bot_state.json ──────────────────────────────
+                # ── 3. Compute live equity and append to curve ────────────────
                 dex_value = sum(
                     pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
                     * (1 + pos.get("current_pnl_pct", 0))
                     for pos in self._dex_positions.values()
                 )
                 equity = self.portfolio.cash + dex_value
+
+                # Add equity curve point every 5s so the chart is fully live
+                self._equity_curve.append({
+                    "ts":     datetime.now(timezone.utc).isoformat(),
+                    "equity": round(equity, 2),
+                })
+                if len(self._equity_curve) > 17_280:   # 24h at 5s cadence
+                    self._equity_curve = self._equity_curve[-17_280:]
+
+                # ── 4. Write live bot_state.json ──────────────────────────────
                 self._write_bot_state(equity, 0.0)
 
             except Exception as e:
@@ -1256,6 +1267,12 @@ class AITrader:
             if sell_result:
                 _sig, actual_usd = sell_result
                 self.portfolio.cash += actual_usd
+                # Use actual on-chain proceeds for PnL — eliminates slippage error
+                pnl_usd = actual_usd - size
+                pnl_pct = pnl_usd / size if size > 0 else 0
+                # Derive actual exit price from real proceeds
+                if pos.get("qty", 0) > 0:
+                    current_price = actual_usd / pos["qty"] if pos["qty"] > 0 else current_price
             else:
                 # Sell failed — keep position open for retry next cycle
                 # DO NOT credit cash (token still in wallet) — avoids double-counting
