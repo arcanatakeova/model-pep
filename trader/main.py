@@ -150,8 +150,9 @@ class AITrader:
         self.funding_arb  = FundingArbScanner(self.portfolio, self.executor)   # funding rate arb
         self.grid_trader  = GridTrader(self.portfolio, self.executor)           # grid trading
         self.dex_screener = DexScreener()                            # on-chain tokens
-        # Polymarket disabled until API keys are configured
-        # self.poly_trader = PolymarketTrader(private_key=config.POLYMARKET_PRIVATE_KEY)
+        # Polymarket — enabled when POLYMARKET_PRIVATE_KEY is set
+        if config.POLYMARKET_PRIVATE_KEY:
+            self.poly_trader = PolymarketTrader(private_key=config.POLYMARKET_PRIVATE_KEY)
         self.solana       = SolanaWallet(
             private_key_b58=config.PHANTOM_PRIVATE_KEY)              # Phantom wallet
 
