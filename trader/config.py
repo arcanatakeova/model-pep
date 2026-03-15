@@ -142,7 +142,7 @@ TRADE_LOG_FILE = "trades.json"
 PORTFOLIO_SNAPSHOT_INTERVAL = 300   # Save portfolio snapshot every 5 minutes
 
 # ─── DEX / On-Chain Settings ──────────────────────────────────────────────────
-DEX_MIN_SCORE = 0.36               # Quality gate — raised to cut marginal entries (was 0.30)
+DEX_MIN_SCORE = 0.33               # Quality gate — 0.36 yielded 0 opportunities; 0.33 filters bottom tier
 DEX_MAX_POSITION_USD = 750.0       # Max per DEX token (raised from $500)
 DEX_PREFERRED_CHAINS = ["solana"]  # Solana only
 DEX_SCAN_INTERVAL_SEC = 4          # Scan DEX every 4s — catch entries faster

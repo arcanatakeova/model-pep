@@ -575,7 +575,22 @@ class SolanaWallet:
             if not sig:
                 sig = self._sign_and_send_rpc(tx_b64)
 
-        if not sig or sig == "GRADUATED":
+        # PumpSwap AMM math overflow (0x1787) — the direct on-chain path can
+        # overflow for tokens with very large base_reserve * sol_in product.
+        # Jupiter uses a different routing mechanism that avoids this issue.
+        if sig == "PUMPSWAP_OVERFLOW":
+            logger.info("PumpSwap overflow fallback: retrying %s via Jupiter",
+                        output_mint[:12])
+            tx_b64, out_amount, price_impact = self._quote_and_build_jupiter(
+                input_mint, output_mint, raw_input_amount, slippage_bps)
+            if tx_b64 is None:
+                return SwapResult(success=False,
+                                  error="PumpSwap overflow — Jupiter fallback also failed")
+            sig = self._sign_and_send_jito(tx_b64, priority_fee)
+            if not sig:
+                sig = self._sign_and_send_rpc(tx_b64)
+
+        if not sig or sig in ("GRADUATED", "PUMPSWAP_OVERFLOW"):
             return SwapResult(success=False, error="Transaction send failed")
 
         # 5. Wait for FINALIZED (not just confirmed)
@@ -1641,6 +1656,9 @@ class SolanaWallet:
             if "0x1775" in err_str or "Custom(6005)" in err_str:
                 logger.info("Bonding curve complete (0x1775) — token graduated to PumpSwap")
                 return "GRADUATED"
+            if "0x1787" in err_str or "Custom(6023)" in err_str:
+                logger.warning("PumpSwap AMM math overflow (0x1787) — will retry via Jupiter")
+                return "PUMPSWAP_OVERFLOW"
             logger.error("RPC send error: %s", e)
             return None
 
