@@ -2,6 +2,7 @@
 Market Scanner — Scans all watched markets and produces ranked trade signals.
 Covers: Crypto, Forex, Stocks/ETFs.
 """
+from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
@@ -22,6 +23,8 @@ class MarketScanner:
     def __init__(self):
         self.engine = EnsembleSignal()
         self._symbol_map = {}   # coin_id → symbol (BTC, ETH, ...)
+        from strategies.forex_strategy import ForexAnalyzer
+        self._forex_analyzer = ForexAnalyzer()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Public API
@@ -120,23 +123,42 @@ class MarketScanner:
         return None
 
     def _analyze_crypto(self, coin_id: str) -> Optional[TradeSignal]:
-        # Primary: CryptoCompare hourly OHLCV (more reliable)
+        # Use CryptoCompare exclusively for OHLCV — fast, no rate limits
         symbol = self._symbol_map.get(coin_id, coin_id.upper().split("-")[0])
+        # Handle multi-word CoinGecko IDs → CC symbol (e.g. "avalanche-2" → "AVAX")
+        CC_OVERRIDES = {
+            "avalanche-2": "AVAX", "matic-network": "MATIC", "binancecoin": "BNB",
+            "shiba-inu": "SHIB", "wrapped-bitcoin": "WBTC", "staked-ether": "STETH",
+            "the-open-network": "TON", "injective-protocol": "INJ",
+            "uniswap": "UNI", "chainlink": "LINK", "arbitrum": "ARB",
+            "optimism": "OP", "sui": "SUI", "aptos": "APT",
+            "near": "NEAR", "polkadot": "DOT", "cosmos": "ATOM",
+            "internet-computer": "ICP", "hedera": "HBAR",
+            "render-token": "RNDR", "pepe": "PEPE", "dogecoin": "DOGE",
+        }
+        symbol = CC_OVERRIDES.get(coin_id, symbol)
         df = df_mod.get_crypto_ohlcv_cc(symbol, limit=config.OHLCV_CANDLES)
-        if df.empty:
-            # Fallback: CoinGecko
-            df = df_mod.get_coin_ohlcv(coin_id, days=14)
         if df.empty or len(df) < 30:
             return None
 
         return self.engine.analyze(df, asset_id=coin_id, market="crypto", symbol=symbol)
 
     def _analyze_forex(self, pair: str) -> Optional[TradeSignal]:
-        df = df_mod.get_forex_ohlcv(pair, limit=config.OHLCV_CANDLES)
-        if df.empty or len(df) < 30:
+        """
+        Institutional-quality forex analysis using the dedicated ForexAnalyzer:
+        multi-timeframe (1h entry + 4h trend), ATR stops, ADX trend filter,
+        session awareness, and Stochastic/RSI/MACD/Pivot confluence.
+        """
+        df_1h = df_mod.get_forex_ohlcv(pair, limit=200)
+        if df_1h.empty or len(df_1h) < 50:
             return None
-        symbol = pair.replace("/", "")
-        return self.engine.analyze(df, asset_id=pair, market="forex", symbol=symbol)
+
+        df_4h = df_mod.get_forex_ohlcv_4h(pair)  # optional; None is fine
+
+        sig = self._forex_analyzer.analyze(pair, df_1h, df_4h if not df_4h.empty else None)
+        if sig is None:
+            return None
+        return sig.to_trade_signal()
 
     def _analyze_stock(self, symbol: str) -> Optional[TradeSignal]:
         df = df_mod.get_stock_ohlcv(symbol, period="60d", interval="1h")

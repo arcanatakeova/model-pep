@@ -16,10 +16,10 @@ Philosophy:
 - Rotate capital into highest-performing market types
 - Scale aggression as the system proves itself
 """
+from __future__ import annotations
 import json
 import logging
 import os
-import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -39,12 +39,9 @@ class CompoundingEngine:
         self.risk_manager = risk_manager
 
         # Market type allocations (fraction of total equity)
+        # DEX only — all other markets disabled.
         self.allocations = {
-            "crypto_cex":  0.35,   # CoinGecko/CryptoCompare signals (CEX)
-            "crypto_dex":  0.25,   # DEX Screener / on-chain tokens
-            "polymarket":  0.15,   # Prediction markets
-            "stocks":      0.15,   # Stocks / ETFs
-            "forex":       0.10,   # Forex pairs
+            "crypto_dex":  1.0,    # Solana DEX / on-chain tokens (100%)
         }
 
         # Performance tracking per market type
@@ -68,6 +65,7 @@ class CompoundingEngine:
 
         self._equity_at_last_rebalance = 0.0
         self._cycle_count = 0
+        self._stats_processed_count = 0   # Incremental cursor for market stats
 
         self.load_state()
 
@@ -175,81 +173,42 @@ class CompoundingEngine:
     # ─── Performance Tracking ─────────────────────────────────────────────────
 
     def _update_market_stats(self):
-        """Sync market stats from portfolio's closed trades."""
-        # Reset stats
-        for k in self.market_stats:
-            self.market_stats[k] = {"trades": 0, "wins": 0, "total_pnl": 0.0, "win_rate": 0.5}
+        """
+        Incrementally sync market stats from portfolio's closed trades.
+        Only processes new trades since the last call — O(new trades) not O(all trades).
+        On restart (cursor > actual trades), falls back to full rescan.
+        """
+        trades = self.portfolio.closed_trades
+        total = len(trades)
 
-        for trade in self.portfolio.closed_trades:
-            market = trade.get("market", "crypto_cex")
-            # Map market types to allocation keys
-            key = self._market_to_key(market)
+        # If the trade list shrank (e.g. archive rotation), do a full rescan
+        if self._stats_processed_count > total:
+            for k in self.market_stats:
+                self.market_stats[k] = {"trades": 0, "wins": 0, "total_pnl": 0.0, "win_rate": 0.5}
+            self._stats_processed_count = 0
+
+        # Process only new trades
+        for trade in trades[self._stats_processed_count:]:
+            key = self._market_to_key(trade.get("market", "crypto_cex"))
             stats = self.market_stats[key]
             stats["trades"] += 1
             stats["total_pnl"] += trade.get("pnl_usd", 0)
             if trade.get("pnl_usd", 0) > 0:
                 stats["wins"] += 1
 
+        self._stats_processed_count = total
+
         for k, stats in self.market_stats.items():
             n = stats["trades"]
             stats["win_rate"] = stats["wins"] / n if n > 0 else 0.5
 
     def _market_to_key(self, market: str) -> str:
-        mapping = {
-            "crypto": "crypto_cex",
-            "dex": "crypto_dex",
-            "solana": "crypto_dex",
-            "polymarket": "polymarket",
-            "stocks": "stocks",
-            "forex": "forex",
-        }
-        return mapping.get(market.lower(), "crypto_cex")
+        # Everything maps to dex — only active market.
+        return "crypto_dex"
 
     def _rebalance_allocations(self):
-        """
-        Dynamically rebalance market allocations based on performance.
-        Reward markets that are making money, reduce losing markets.
-        Uses a softmax-style reweighting.
-        """
-        import numpy as np
-
-        # Performance scores per market
-        scores = {}
-        for key, stats in self.market_stats.items():
-            n = stats["trades"]
-            if n < 3:
-                scores[key] = 0.5   # Not enough data, neutral
-            else:
-                # Combine win rate and total PnL
-                wr_score = stats["win_rate"]
-                pnl_score = np.clip(stats["total_pnl"] / (self.portfolio.equity() + 1) * 10 + 0.5, 0.1, 1.0)
-                scores[key] = 0.6 * wr_score + 0.4 * pnl_score
-
-        # Softmax reweighting
-        score_array = np.array(list(scores.values()))
-        exp_scores  = np.exp(score_array * 2)  # Temperature = 0.5
-        weights     = exp_scores / exp_scores.sum()
-
-        # Enforce min/max allocation bounds
-        min_alloc = 0.05
-        max_alloc = 0.45
-        weights = np.clip(weights, min_alloc, max_alloc)
-        weights = weights / weights.sum()  # Renormalize
-
-        old_alloc = dict(self.allocations)
-        for key, w in zip(scores.keys(), weights):
-            # Smooth update: blend 30% new, 70% old
-            self.allocations[key] = 0.7 * self.allocations[key] + 0.3 * float(w)
-
-        # Renormalize
-        total = sum(self.allocations.values())
-        self.allocations = {k: v / total for k, v in self.allocations.items()}
-
-        # Log changes
-        for k in self.allocations:
-            if abs(self.allocations[k] - old_alloc.get(k, 0)) > 0.02:
-                logger.info("Rebalance %s: %.1f%% → %.1f%%",
-                            k, old_alloc.get(k, 0) * 100, self.allocations[k] * 100)
+        """No-op — single market (DEX), always 100% allocated."""
+        pass
 
     def _check_milestones(self, equity: float):
         """Log milestone achievements."""
@@ -317,11 +276,14 @@ class CompoundingEngine:
             "allocations": self.allocations,
             "market_stats": self.market_stats,
             "cycle_count": self._cycle_count,
+            "stats_processed_count": self._stats_processed_count,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
-            with open(self.ALLOCATION_FILE, "w") as f:
+            tmp = self.ALLOCATION_FILE + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(state, f, indent=2)
+            os.replace(tmp, self.ALLOCATION_FILE)
         except Exception as e:
             logger.warning("Failed to save compounding state: %s", e)
 
@@ -329,10 +291,23 @@ class CompoundingEngine:
         try:
             with open(self.ALLOCATION_FILE) as f:
                 state = json.load(f)
-            self.allocations   = state.get("allocations", self.allocations)
-            self.market_stats  = state.get("market_stats", self.market_stats)
-            self._cycle_count  = state.get("cycle_count", 0)
-            logger.info("Compounding state loaded (cycle #%d)", self._cycle_count)
+
+            # Prune stale markets (forex/crypto_cex disabled) from saved state
+            active = set(self.allocations)
+            saved_alloc = {k: v for k, v in state.get("allocations", {}).items() if k in active}
+            if saved_alloc:
+                # Renormalize to 1.0
+                total = sum(saved_alloc.values())
+                self.allocations = {k: v / total for k, v in saved_alloc.items()}
+
+            saved_stats = {k: v for k, v in state.get("market_stats", {}).items() if k in active}
+            if saved_stats:
+                self.market_stats.update(saved_stats)
+
+            self._cycle_count            = state.get("cycle_count", 0)
+            self._stats_processed_count  = state.get("stats_processed_count", 0)
+            logger.info("Compounding state loaded (cycle #%d, %d trades processed)",
+                        self._cycle_count, self._stats_processed_count)
         except FileNotFoundError:
             pass
         except Exception as e:

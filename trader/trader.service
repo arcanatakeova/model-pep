@@ -1,0 +1,32 @@
+[Unit]
+Description=AI Trader v3.0 — Autonomous 24/7 Leveraged Bot
+Documentation=https://github.com/arcanatakeova/model-pep
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/user/model-pep/trader
+
+# Change to your actual python path if needed: which python3
+ExecStart=/usr/bin/python3 main.py --live
+
+# Always restart on crash — this is the core of 24/7 operation
+Restart=always
+RestartSec=10s
+
+# Give the process time to shut down cleanly
+TimeoutStopSec=30s
+
+# Log everything to the log file (also captured by journald)
+StandardOutput=append:/home/user/model-pep/trader/trader.log
+StandardError=append:/home/user/model-pep/trader/trader.log
+
+# Ensure Python stdout is not buffered (so logs appear immediately)
+Environment="PYTHONUNBUFFERED=1"
+
+# Load secrets from .env file if present
+EnvironmentFile=-/home/user/model-pep/trader/.env
+
+[Install]
+WantedBy=multi-user.target

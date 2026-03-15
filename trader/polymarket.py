@@ -10,9 +10,11 @@ Edge sources:
 - High-volume markets with inefficient pricing
 - Event-correlated position building
 """
+from __future__ import annotations
 import logging
 import time
 import requests
+import concurrent.futures
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -125,7 +127,7 @@ class PolymarketTrader:
     def get_active_markets(self, limit: int = 100, min_volume: float = 1000) -> list[PolyMarket]:
         """Fetch active markets sorted by 24h volume."""
         cache_key = f"markets_{limit}"
-        cached = self._cached(cache_key)
+        cached = self._cached(cache_key, ttl=300)  # Cache markets for 5 min (not 60s)
         if cached is not None:
             return cached
 
@@ -167,7 +169,7 @@ class PolymarketTrader:
         3. Volume-weighted momentum (market moving one way = follow)
         4. Near-resolution high-confidence plays
         """
-        markets = self.get_active_markets(limit=200, min_volume=min_volume)
+        markets = self.get_active_markets(limit=50, min_volume=min_volume)
         signals = []
 
         for mkt in markets:
@@ -217,8 +219,11 @@ class PolymarketTrader:
 
         # ── Strategy 2: 50/50 markets with momentum ───────────────────────
         elif 0.40 <= yes_p <= 0.60:
-            # Efficient zone — look for order book imbalance
-            book = self.get_orderbook(mkt.yes_token_id)
+            # Orderbook calls were removed here — fetching a per-market orderbook
+            # for every market in the 40-60% range caused dozens of blocking HTTP
+            # requests per scan cycle, freezing the bot for minutes.
+            # The other three strategies already cover this zone sufficiently.
+            book = None
             if book:
                 bids = book.get("bids", [])
                 asks = book.get("asks", [])
@@ -288,9 +293,16 @@ class PolymarketTrader:
         Requires py-clob-client and a funded Polygon wallet.
         """
         if not self._client:
-            logger.info("Polymarket paper: WOULD BUY %s %s @ %.4f size $%.2f",
-                        signal.side, signal.market.question[:50],
-                        signal.target_price, size_usdc)
+            logger.info(
+                "POLY PAPER | %-3s %s | p=%.4f | edge=%.1f%% | $%.0f | vol=$%.0f | '%s'",
+                signal.side,
+                signal.market.condition_id[:8],
+                signal.target_price,
+                signal.edge_pct * 100,
+                size_usdc,
+                signal.market.volume_24h,
+                signal.market.question[:60],
+            )
             return {"paper": True, "side": signal.side, "size": size_usdc,
                     "price": signal.target_price, "market": signal.market.condition_id}
 
@@ -370,7 +382,7 @@ class PolymarketTrader:
                 resp = requests.get(url, params=params, timeout=10,
                                     headers={"Accept": "application/json"})
                 if resp.status_code == 429:
-                    time.sleep(5 * (attempt + 1))
+                    time.sleep(2 + attempt * 2)   # 2s, 4s, 6s — was 5/10/15s
                     continue
                 if resp.ok:
                     data = resp.json()
@@ -391,4 +403,9 @@ class PolymarketTrader:
         return None
 
     def _store(self, key: str, val):
+        # Evict oldest entries when cache grows too large (memory leak prevention)
+        if len(self._cache) >= 200:
+            oldest = sorted(self._cache, key=lambda k: self._cache[k][1])
+            for k in oldest[:50]:
+                del self._cache[k]
         self._cache[key] = (val, time.time())

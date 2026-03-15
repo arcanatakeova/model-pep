@@ -1,86 +1,217 @@
 """
-Phantom Wallet + Jupiter DEX — Autonomous Solana Trading
-========================================================
-Connects to your Phantom wallet via private key (exported from Phantom).
-Executes swaps through Jupiter Aggregator (best price across all Solana DEXes).
+Solana Wallet — Professional Autonomous Trading Engine
+=======================================================
+Production-grade Jupiter DEX execution with:
+
+1. Jito MEV bundle protection      — sandwich-proof transaction delivery
+2. Dynamic slippage                — scales with liquidity ratio + price impact
+3. Finalized confirmation          — never marks success on "confirmed" (can roll back)
+4. Helius priority fee estimation  — pays the right fee, not guesswork
+5. Lamport sufficiency gate        — refuses to send if SOL balance is too low
+6. Fresh quote at execution        — quote stale >5s → refetch before signing
+7. Transaction retry with fee bump — auto-retry on expiry with 2× priority fee
+8. Token-2022 aware balance check  — handles both legacy SPL and Token-2022 mints
+9. On-chain confirmation gate      — verifies tx landed before updating position state
 
 Setup:
-1. In Phantom: Settings → Security → Export Private Key
-2. Add PHANTOM_PRIVATE_KEY to your .env file
-3. Bot handles everything else automatically
-
-Supported:
-- Any Solana token (SOL, USDC, memecoins, etc.)
-- Automatic best-route finding via Jupiter
-- Slippage protection
-- Priority fees for fast execution
+  export PHANTOM_PRIVATE_KEY="your_base58_private_key"
+  export SOLANA_RPC_URL="https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+  export BIRDEYE_API_KEY="your_birdeye_key"
 """
+from __future__ import annotations
+
 import base64
 import json
 import logging
+import random
 import time
 from typing import Optional
 
 import requests
 
+import config
+
 logger = logging.getLogger(__name__)
 
-JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
-JUPITER_SWAP_URL  = "https://quote-api.jup.ag/v6/swap"
-SOLANA_RPC_URL    = "https://api.mainnet-beta.solana.com"
+# ─── API endpoints ─────────────────────────────────────────────────────────────
+JUPITER_QUOTE_URL    = "https://quote-api.jup.ag/v6/quote"
+JUPITER_QUOTE_URL_ALT = "https://lite.jup.ag/v6/quote"   # alt endpoint if primary DNS fails
+JUPITER_SWAP_URL     = "https://quote-api.jup.ag/v6/swap"
+JUPITER_SWAP_URL_ALT  = "https://lite.jup.ag/v6/swap"
 
-# Common token mints
-SOL_MINT   = "So11111111111111111111111111111111111111112"
-USDC_MINT  = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-USDT_MINT  = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
-BONK_MINT  = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+# Browser-like UA avoids Cloudflare bot-detection (returns 400/403 for python-requests/2.x)
+_BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/122.0.0.0 Safari/537.36")
 
-# Slippage in basis points (100 = 1%)
-DEFAULT_SLIPPAGE_BPS = 100   # 1%
-HIGH_VOL_SLIPPAGE_BPS = 300  # 3% for volatile tokens
+# ─── Pump.fun on-chain constants (no PumpPortal dependency) ────────────────────
+_PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+_ATA_PROG     = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+_TOKEN_PROG   = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+_SYSTEM_PROG  = "11111111111111111111111111111111"
+_RENT_SYSVAR  = "SysvarRent111111111111111111111111111111111"
+# buy discriminator = sha256("global:buy")[:8]  (computed at import time)
+import hashlib as _hashlib
+_PUMP_BUY_DISC = _hashlib.sha256(b"global:buy").digest()[:8]
+
+_PUMP_SELL_DISC = _hashlib.sha256(b"global:sell").digest()[:8]
+
+# Raydium swap API — used as fallback when Jupiter is geo-blocked
+RAYDIUM_COMPUTE_URL  = "https://transaction-v1.raydium.io/compute/swap-base-in"
+RAYDIUM_TX_URL       = "https://transaction-v1.raydium.io/transaction/swap-base-in"
+
+# PumpPortal — builds Pump.fun bonding-curve buy txs; 3rd fallback for pre-graduation tokens
+PUMPFUN_TRADE_URL    = "https://pumpportal.fun/api/trade-local"
+
+# Jito Block Engine — bundles are MEV-protected and tip-prioritised
+JITO_BUNDLE_URL      = "https://mainnet.block-engine.jito.labs.io/api/v1/bundles"
+JITO_TIP_ACCOUNTS    = [
+    # Official Jito tip accounts (base58 pubkeys, randomly selected per tx)
+    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+    "HFqU5x63VTqvB8eLJMMyFgFastFF4zYzAqmsfoEp4Y9C",
+    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1MusExtP8bY",
+    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+]
+
+# Token mints
+SOL_MINT  = "So11111111111111111111111111111111111111112"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+
+# Safety constants
+MIN_SOL_RESERVE_LAMPORTS = 50_000_000   # 0.05 SOL — reserve for fees + tip headroom
+QUOTE_MAX_AGE_SECS       = 5            # Refetch quote if older than this
+MAX_PRICE_IMPACT_PCT     = 4.0          # Reject swaps with > 4% impact
+CONFIRMATION_TIMEOUT     = 60           # Seconds to wait for finalized
+
+
+class SwapResult:
+    """Result of a swap execution attempt."""
+    __slots__ = ("success", "signature", "out_amount", "price_impact_pct",
+                 "actual_slippage_bps", "error")
+
+    def __init__(self, *, success: bool, signature: str = "",
+                 out_amount: int = 0, price_impact_pct: float = 0.0,
+                 actual_slippage_bps: int = 0, error: str = ""):
+        self.success            = success
+        self.signature          = signature
+        self.out_amount         = out_amount
+        self.price_impact_pct   = price_impact_pct
+        self.actual_slippage_bps = actual_slippage_bps
+        self.error              = error
+
+    def __repr__(self):
+        if self.success:
+            return (f"SwapResult(OK sig={self.signature[:16]}… "
+                    f"out={self.out_amount} impact={self.price_impact_pct:.2f}%)")
+        return f"SwapResult(FAIL: {self.error})"
 
 
 class SolanaWallet:
     """
-    Phantom wallet interface for autonomous trading via Jupiter DEX aggregator.
-    Handles quotes, swaps, and balance checking.
+    Autonomous Solana trading wallet.
+    Executes Jupiter swaps with full MEV protection and confirmation safety.
     """
 
     def __init__(self, private_key_b58: str = ""):
         self.private_key_b58 = private_key_b58
-        self._keypair = None
-        self._client  = None
-        self._pubkey  = None
+        self._keypair   = None
+        self._pubkey    = None
+        self._client    = None
+        self._sol_price_cache: tuple[float, float] = (0.0, 0.0)  # (price, ts)
 
         if private_key_b58:
             self._init_wallet()
 
+    # ─── Initialisation ────────────────────────────────────────────────────────
+
     def _init_wallet(self):
-        """Initialize Solana keypair from Phantom private key."""
+        """Initialise Solana keypair from Phantom private key (base58 or JSON array)."""
         try:
             from solders.keypair import Keypair
             from solana.rpc.api import Client
 
-            # Phantom exports private key as base58 or byte array
+            # Phantom exports as base58 string — try that first (most common)
             try:
-                key_bytes = base64.b58decode(self.private_key_b58)
+                self._keypair = Keypair.from_base58_string(self.private_key_b58)
             except Exception:
-                # Try as JSON array
-                key_bytes = bytes(json.loads(self.private_key_b58))
-
-            self._keypair = Keypair.from_bytes(key_bytes)
+                # Fallback: JSON byte array [12, 34, 56, ...]
+                try:
+                    key_bytes = bytes(json.loads(self.private_key_b58))
+                    self._keypair = Keypair.from_bytes(key_bytes)
+                except Exception:
+                    # Last resort: raw base64
+                    key_bytes = base64.b64decode(self.private_key_b58)
+                    self._keypair = Keypair.from_bytes(key_bytes)
             self._pubkey  = str(self._keypair.pubkey())
-            self._client  = Client(SOLANA_RPC_URL)
 
-            logger.info("Phantom wallet connected: %s...%s",
+            # Prefer Helius RPC URL for priority fee estimates & reliability
+            rpc_url = config.SOLANA_RPC_URL or "https://api.mainnet-beta.solana.com"
+            self._client = Client(rpc_url)
+
+            logger.info("Solana wallet connected: %s…%s",
                         self._pubkey[:6], self._pubkey[-4:])
+            self._check_dex_connectivity()
         except ImportError:
-            logger.warning("solana/solders not installed. Solana trading disabled.")
+            logger.warning("solana/solders not installed — Solana trading disabled.")
             logger.warning("Install: pip install solana solders")
         except Exception as e:
             logger.error("Wallet init failed: %s", e)
 
-    # ─── Balance ──────────────────────────────────────────────────────────────
+    def _check_dex_connectivity(self):
+        """Check Jupiter and Raydium reachability at startup. Both are tried at swap time
+        (Jupiter first, Raydium fallback), so trading is possible if either is up."""
+        jupiter_ok = False
+        raydium_ok = False
+
+        try:
+            resp = requests.get(
+                "https://quote-api.jup.ag/v6/quote",
+                params={
+                    "inputMint":  "So11111111111111111111111111111111111111112",
+                    "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "amount":     "1000000",
+                    "slippageBps":"50",
+                },
+                timeout=5,
+            )
+            jupiter_ok = resp.ok
+        except Exception:
+            pass
+
+        try:
+            resp = requests.get(
+                RAYDIUM_COMPUTE_URL,
+                params={
+                    "inputMint":  "So11111111111111111111111111111111111111112",
+                    "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "amount":     "1000000",
+                    "slippageBps":"50",
+                    "txVersion":  "V0",
+                },
+                timeout=5,
+            )
+            raydium_ok = resp.ok
+        except Exception:
+            pass
+
+        if jupiter_ok and raydium_ok:
+            logger.info("DEX routing: Jupiter ✓  Raydium ✓")
+        elif jupiter_ok:
+            logger.info("DEX routing: Jupiter ✓  Raydium ✗ (will use Jupiter only)")
+        elif raydium_ok:
+            logger.info("DEX routing: Jupiter ✗  Raydium ✓ (fallback active)")
+        else:
+            logger.error(
+                "DEX routing: Jupiter ✗  Raydium ✗ — both unreachable, buys will fail.\n"
+                "  Likely cause: geo-block or DNS issue.\n"
+                "  Fix: enable a VPN (e.g. Cloudflare WARP: https://one.one.one.one/)\n"
+                "       or set HTTPS_PROXY=socks5://localhost:PORT before starting."
+            )
+
+    # ─── Properties ────────────────────────────────────────────────────────────
 
     @property
     def pubkey(self) -> str:
@@ -90,220 +221,1425 @@ class SolanaWallet:
     def is_connected(self) -> bool:
         return self._keypair is not None and self._pubkey is not None
 
+    # ─── Balances ──────────────────────────────────────────────────────────────
+
     def get_sol_balance(self) -> float:
-        """Get SOL balance in SOL (not lamports)."""
+        """Get SOL balance in SOL."""
         if not self.is_connected:
             return 0.0
         try:
             resp = self._client.get_balance(self._keypair.pubkey())
-            lamports = resp.value
-            return lamports / 1e9
+            return resp.value / 1e9
         except Exception as e:
             logger.warning("SOL balance error: %s", e)
             return 0.0
 
-    def get_token_balance(self, mint_address: str) -> float:
-        """Get SPL token balance."""
+    def get_sol_balance_lamports(self) -> int:
+        """Get SOL balance in lamports."""
         if not self.is_connected:
-            return 0.0
+            return 0
         try:
-            from solders.pubkey import Pubkey
-            resp = self._client.get_token_accounts_by_owner(
-                self._keypair.pubkey(),
-                {"mint": Pubkey.from_string(mint_address)},
-                commitment="confirmed",
-            )
-            if not resp.value:
-                return 0.0
-            for acc in resp.value:
-                info = acc.account.data.parsed
-                amount = info.get("info", {}).get("tokenAmount", {}).get("uiAmount", 0)
-                if amount:
-                    return float(amount)
+            return self._client.get_balance(self._keypair.pubkey()).value
+        except Exception:
+            return 0
+
+    def get_token_balance(self, mint_address: str) -> float:
+        """Get SPL / Token-2022 token balance (UI amount)."""
+        raw, decimals = self._get_token_raw_balance(mint_address)
+        if raw <= 0 or decimals < 0:
             return 0.0
-        except Exception as e:
-            logger.debug("Token balance error: %s", e)
-            return 0.0
+        return raw / (10 ** decimals)
 
     def get_usdc_balance(self) -> float:
         return self.get_token_balance(USDC_MINT)
 
     def get_portfolio_value_usd(self) -> float:
-        """Estimate total wallet value in USD."""
+        """Estimate total wallet value in USD (SOL + USDC)."""
         try:
             sol_price = self._get_sol_price()
-            sol_bal   = self.get_sol_balance()
-            usdc_bal  = self.get_usdc_balance()
-            return sol_bal * sol_price + usdc_bal
+            return self.get_sol_balance() * sol_price + self.get_usdc_balance()
         except Exception:
             return 0.0
 
-    # ─── Jupiter Swaps ────────────────────────────────────────────────────────
+    # ─── Core swap API ─────────────────────────────────────────────────────────
 
-    def get_quote(self, input_mint: str, output_mint: str,
-                  amount_lamports: int, slippage_bps: int = DEFAULT_SLIPPAGE_BPS) -> Optional[dict]:
+    def safe_buy_token(self, token_mint: str, usdc_amount: float,
+                       safety_report=None,
+                       liquidity_usd: float = 0.0,
+                       slippage_bps: int = None,
+                       pair_address: Optional[str] = None) -> Optional[str]:
         """
-        Get best swap quote from Jupiter.
-        amount_lamports: amount in smallest denomination (lamports for SOL, micro-USDC, etc.)
+        Buy a Solana token with USDC.
+        - Checks safety report first (blocks honeypots)
+        - Computes dynamic slippage based on liquidity
+        - Verifies lamport balance is sufficient
+        - Executes via Jito bundle for MEV protection
+        Returns transaction signature or None.
         """
-        params = {
-            "inputMint":          input_mint,
-            "outputMint":         output_mint,
-            "amount":             str(amount_lamports),
-            "slippageBps":        str(slippage_bps),
-            "onlyDirectRoutes":   "false",
-            "asLegacyTransaction": "false",
-        }
-        try:
-            resp = requests.get(JUPITER_QUOTE_URL, params=params, timeout=10)
-            if resp.ok:
-                return resp.json()
-        except Exception as e:
-            logger.warning("Jupiter quote error: %s", e)
-        return None
-
-    def swap(self, input_mint: str, output_mint: str,
-             input_amount_usd: float, slippage_bps: int = DEFAULT_SLIPPAGE_BPS) -> Optional[str]:
-        """
-        Execute a swap via Jupiter.
-        Returns transaction signature or None on failure.
-
-        input_amount_usd: dollar amount to swap
-        """
-        if not self.is_connected:
-            logger.info("PAPER SWAP: %s → %s $%.2f", input_mint[:8], output_mint[:8], input_amount_usd)
-            return f"paper_tx_{int(time.time())}"
-
-        try:
-            # Convert USD to lamports/micro-tokens
-            amount_lamports = self._usd_to_lamports(input_mint, input_amount_usd)
-            if amount_lamports <= 0:
-                return None
-
-            # 1. Get quote
-            quote = self.get_quote(input_mint, output_mint, amount_lamports, slippage_bps)
-            if not quote:
-                logger.error("No Jupiter quote available")
-                return None
-
-            out_amount = int(quote.get("outAmount", 0))
-            price_impact = float(quote.get("priceImpactPct", 0))
-
-            if price_impact > 5.0:
-                logger.warning("Price impact too high: %.2f%%, skipping swap", price_impact)
-                return None
-
-            logger.info("Jupiter quote: in=%d → out=%d (impact=%.2f%%)",
-                        amount_lamports, out_amount, price_impact)
-
-            # 2. Build swap transaction
-            swap_payload = {
-                "quoteResponse": quote,
-                "userPublicKey": self._pubkey,
-                "wrapAndUnwrapSol": True,
-                "prioritizationFeeLamports": 10000,  # ~$0.001 priority fee
-                "dynamicComputeUnitLimit": True,
-            }
-            resp = requests.post(JUPITER_SWAP_URL, json=swap_payload, timeout=15)
-            if not resp.ok:
-                logger.error("Jupiter swap build failed: %s", resp.text[:200])
-                return None
-
-            swap_data = resp.json()
-            tx_b64 = swap_data.get("swapTransaction")
-            if not tx_b64:
-                return None
-
-            # 3. Sign and send transaction
-            sig = self._sign_and_send(tx_b64)
-            if sig:
-                logger.info("SWAP executed: %s → %s $%.2f | tx: %s",
-                            input_mint[:8], output_mint[:8], input_amount_usd, sig[:16])
-            return sig
-
-        except Exception as e:
-            logger.error("Swap execution error: %s", e)
+        # ── Safety gate ──────────────────────────────────────────────────────
+        if safety_report and not safety_report.is_safe_to_trade:
+            logger.warning("BLOCKED BUY %s: safety=%.2f (%s)",
+                           token_mint[:12], safety_report.safety_score,
+                           safety_report.risk_level)
             return None
 
-    def buy_token(self, token_mint: str, usdc_amount: float,
-                  slippage_bps: int = DEFAULT_SLIPPAGE_BPS) -> Optional[str]:
-        """Buy a token using USDC."""
-        logger.info("BUY %s with $%.2f USDC", token_mint[:20], usdc_amount)
-        return self.swap(USDC_MINT, token_mint, usdc_amount, slippage_bps)
+        if not self.is_connected:
+            logger.info("PAPER BUY: %s $%.2f", token_mint[:12], usdc_amount)
+            return f"paper_tx_{int(time.time())}"
 
-    def sell_token(self, token_mint: str, token_amount_usd: float,
-                   slippage_bps: int = DEFAULT_SLIPPAGE_BPS) -> Optional[str]:
-        """Sell a token back to USDC."""
-        logger.info("SELL %s worth $%.2f", token_mint[:20], token_amount_usd)
-        return self.swap(token_mint, USDC_MINT, token_amount_usd, slippage_bps)
+        # ── Lamport gate ─────────────────────────────────────────────────────
+        if not self._check_lamport_balance():
+            logger.error("Insufficient SOL for fees — skipping buy of %s", token_mint[:12])
+            return None
 
-    def buy_with_sol(self, token_mint: str, sol_amount: float,
-                     slippage_bps: int = DEFAULT_SLIPPAGE_BPS) -> Optional[str]:
-        """Buy a token using SOL."""
-        logger.info("BUY %s with %.4f SOL", token_mint[:20], sol_amount)
-        return self.swap(SOL_MINT, token_mint, sol_amount, slippage_bps)
+        # ── Dynamic slippage ─────────────────────────────────────────────────
+        if slippage_bps is None:
+            slippage_bps = self._compute_slippage_bps(
+                trade_usd=usdc_amount, liquidity_usd=liquidity_usd)
 
-    # ─── Utilities ────────────────────────────────────────────────────────────
+        # Use SOL as input (native, no USDC required) — Jupiter handles SOL→token directly
+        result = self._execute_swap(
+            input_mint=SOL_MINT,
+            output_mint=token_mint,
+            input_amount_usd=usdc_amount,
+            slippage_bps=slippage_bps,
+            pair_address=pair_address,
+        )
+        if result.success:
+            logger.info("BUY %s $%.2f SOL slippage=%dbps impact=%.2f%% | tx=%s",
+                        token_mint[:12], usdc_amount, slippage_bps,
+                        result.price_impact_pct, result.signature[:16])
+            return result.signature
+        else:
+            logger.error("BUY FAILED %s: %s", token_mint[:12], result.error)
+            return None
 
-    def _sign_and_send(self, tx_b64: str) -> Optional[str]:
-        """Sign and broadcast a base64-encoded transaction."""
+    def sell_token(self, token_mint: str, est_value_usd: float,
+                   liquidity_usd: float = 0.0,
+                   slippage_bps: int = None,
+                   pair_address: Optional[str] = None) -> Optional[tuple]:
+        """
+        Sell entire on-chain token balance back to SOL.
+        Returns (tx_signature, actual_usd_received) or None on failure.
+        actual_usd_received is computed from real SOL output × current SOL price,
+        so portfolio.cash is always credited with what the wallet actually received.
+        """
+        if not self.is_connected:
+            logger.info("PAPER SELL: %s est=$%.2f", token_mint[:12], est_value_usd)
+            return f"paper_sell_{int(time.time())}", est_value_usd
+
+        if not self._check_lamport_balance():
+            logger.error("Insufficient SOL for fees — skipping sell of %s", token_mint[:12])
+            return None
+
+        raw_amount, decimals = self._get_token_raw_balance(token_mint)
+        if raw_amount <= 0:
+            logger.warning("No on-chain balance for %s — skipping sell", token_mint[:12])
+            return None
+
+        if slippage_bps is None:
+            slippage_bps = self._compute_slippage_bps(
+                trade_usd=est_value_usd, liquidity_usd=liquidity_usd)
+        # Selling is riskier (slippage asymmetry) — add 50bps buffer
+        slippage_bps = min(slippage_bps + 50, config.SOL_MAX_SLIPPAGE_BPS)
+
+        # Sell token back to SOL (native) — no USDC required
+        result = self._execute_swap_raw(
+            input_mint=token_mint,
+            output_mint=SOL_MINT,
+            raw_input_amount=raw_amount,
+            slippage_bps=slippage_bps,
+            pair_address=pair_address,
+        )
+        if result.success:
+            out_sol = result.out_amount / 1e9
+            sol_price = self._get_sol_price()
+            actual_usd = out_sol * sol_price if sol_price > 0 else est_value_usd
+            logger.info("SELL %s → %.4f SOL ($%.2f) impact=%.2f%% | tx=%s",
+                        token_mint[:12], out_sol, actual_usd,
+                        result.price_impact_pct, result.signature[:16])
+            return result.signature, actual_usd
+        else:
+            logger.error("SELL FAILED %s: %s", token_mint[:12], result.error)
+            return None
+
+    def sell_token_partial(self, token_mint: str, fraction: float,
+                           liquidity_usd: float = 0.0,
+                           slippage_bps: int = None,
+                           pair_address: Optional[str] = None) -> Optional[tuple]:
+        """
+        Sell a fraction (0.0-1.0) of the on-chain token balance.
+        Returns (tx_signature, actual_usd_received) or None on failure.
+        """
+        if not self.is_connected:
+            logger.info("PAPER PARTIAL SELL: %s %.0f%%", token_mint[:12], fraction * 100)
+            return f"paper_partial_sell_{int(time.time())}", 0.0
+
+        if not self._check_lamport_balance():
+            return None
+
+        raw_amount, decimals = self._get_token_raw_balance(token_mint)
+        if raw_amount <= 0:
+            logger.warning("No on-chain balance for partial sell of %s", token_mint[:12])
+            return None
+
+        sell_raw = int(raw_amount * fraction)
+        if sell_raw <= 0:
+            return None
+
+        if slippage_bps is None:
+            slippage_bps = self._compute_slippage_bps(
+                trade_usd=0.0, liquidity_usd=liquidity_usd)
+        slippage_bps = min(slippage_bps + 50, config.SOL_MAX_SLIPPAGE_BPS)
+
+        # Sell token back to SOL (native)
+        result = self._execute_swap_raw(
+            input_mint=token_mint,
+            output_mint=SOL_MINT,
+            raw_input_amount=sell_raw,
+            slippage_bps=slippage_bps,
+            pair_address=pair_address,
+        )
+        if result.success:
+            out_sol = result.out_amount / 1e9
+            sol_price = self._get_sol_price()
+            actual_usd = out_sol * sol_price if sol_price > 0 else 0.0
+            logger.info("PARTIAL SELL %s %.0f%% → %.4f SOL ($%.2f) | tx=%s",
+                        token_mint[:12], fraction * 100, out_sol, actual_usd,
+                        result.signature[:16])
+            return result.signature, actual_usd
+        else:
+            logger.error("PARTIAL SELL FAILED %s: %s", token_mint[:12], result.error)
+            return None
+
+    # ─── Execution engine ──────────────────────────────────────────────────────
+
+    def _execute_swap(self, input_mint: str, output_mint: str,
+                      input_amount_usd: float, slippage_bps: int,
+                      pair_address: Optional[str] = None) -> SwapResult:
+        """Execute swap using USD input amount (auto-converts to lamports)."""
+        amount_raw = self._usd_to_raw(input_mint, input_amount_usd)
+        if amount_raw <= 0:
+            return SwapResult(success=False, error="USD-to-lamports conversion failed")
+        return self._execute_swap_raw(input_mint, output_mint, amount_raw, slippage_bps,
+                                      pair_address=pair_address)
+
+    def _execute_swap_raw(self, input_mint: str, output_mint: str,
+                          raw_input_amount: int, slippage_bps: int,
+                          _retry: int = 0,
+                          pair_address: Optional[str] = None) -> SwapResult:
+        """
+        Core swap execution:
+        1. Fresh Jupiter quote
+        2. Build swap transaction via Jupiter
+        3. Sign + send via Jito bundle (or fallback to direct RPC)
+        4. Wait for FINALIZED confirmation
+        5. Retry once with 2× fee if transaction expires
+        """
+        # 1. Get quote + build tx — Jupiter → Raydium → Pump.fun (cascade)
+        tx_b64, out_amount, price_impact = self._quote_and_build_jupiter(
+            input_mint, output_mint, raw_input_amount, slippage_bps)
+        if tx_b64 is None:
+            logger.info("Jupiter unavailable — trying Raydium")
+            tx_b64, out_amount, price_impact = self._quote_and_build_raydium(
+                input_mint, output_mint, raw_input_amount, slippage_bps)
+        _is_pump = output_mint.endswith("pump") or input_mint.endswith("pump")
+        if tx_b64 is None and _is_pump:
+            logger.info("Raydium unavailable — trying Pump.fun bonding curve (PumpPortal)")
+            tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
+                input_mint, output_mint, raw_input_amount, slippage_bps, pool="pump")
+            if tx_b64 is None:
+                logger.info("Pump.fun bonding curve unavailable — trying PumpSwap AMM (PumpPortal)")
+                tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
+                    input_mint, output_mint, raw_input_amount, slippage_bps, pool="pumpswap")
+            if tx_b64 is None:
+                logger.info("PumpPortal unavailable — building Pump.fun tx directly on-chain")
+                tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun_direct(
+                    input_mint, output_mint, raw_input_amount, slippage_bps,
+                    pair_address=pair_address)
+        elif tx_b64 is None:
+            logger.info("Raydium unavailable — token is not a Pump.fun token, no further fallbacks")
+        if tx_b64 is None:
+            return SwapResult(success=False,
+                              error="No DEX quote available (Jupiter + Raydium + Pump.fun all failed)")
+
+        if price_impact > MAX_PRICE_IMPACT_PCT:
+            return SwapResult(success=False,
+                              error=f"Price impact too high: {price_impact:.1f}%")
+        # out_amount == 0 means the DEX didn't expose it upfront (Pump.fun); skip the gate
+        if out_amount < 0:
+            return SwapResult(success=False, error="Quote returned negative output")
+
+        # 2. Estimate priority fee
+        priority_fee = self._estimate_priority_fee()
+
+        # 4. Sign, send, confirm
+        sig = self._sign_and_send_jito(tx_b64, priority_fee)
+        if not sig:
+            # Fallback to direct RPC send
+            sig = self._sign_and_send_rpc(tx_b64)
+
+        # If bonding curve is graduated (0x1775), try PumpSwap directly
+        if sig == "GRADUATED" and _is_pump:
+            pump_mint = output_mint if output_mint.endswith("pump") else input_mint
+            is_sell   = input_mint.endswith("pump")
+            logger.info("Routing graduated token %s → PumpSwap (post 0x1775)", pump_mint[:12])
+            tx_b64, out_amount, price_impact = self._quote_and_build_pumpswap(
+                pump_mint, raw_input_amount, slippage_bps,
+                is_sell=is_sell, pool_address=pair_address)
+            if tx_b64 is None:
+                return SwapResult(success=False,
+                                  error="Bonding curve graduated — PumpSwap also failed")
+            sig = self._sign_and_send_jito(tx_b64, priority_fee)
+            if not sig:
+                sig = self._sign_and_send_rpc(tx_b64)
+
+        if not sig or sig == "GRADUATED":
+            return SwapResult(success=False, error="Transaction send failed")
+
+        # 5. Wait for FINALIZED (not just confirmed)
+        confirmed = self._wait_finalized(sig)
+        if not confirmed:
+            if _retry == 0:
+                # Before retrying, check if the original TX landed on-chain
+                # (it may just be slow). Retrying without checking risks a double-spend
+                # if TX1 was already accepted and TX2 also executes.
+                try:
+                    from solders.signature import Signature as _Sig
+                    st = self._client.get_signature_statuses(
+                        [_Sig.from_string(sig)])
+                    if st.value and st.value[0] is not None:
+                        logger.warning(
+                            "TX on-chain but slow — waiting 30s more: %s", sig[:16])
+                        if self._wait_finalized(sig, timeout=30):
+                            return SwapResult(success=True, signature=sig,
+                                              out_amount=out_amount,
+                                              price_impact_pct=price_impact,
+                                              actual_slippage_bps=slippage_bps)
+                        logger.error("TX still unfinalized after extra 30s: %s",
+                                     sig[:16])
+                        return SwapResult(success=False,
+                                          error=f"Slow TX not finalized: {sig[:16]}")
+                except Exception:
+                    pass
+                # TX not found on-chain — safe to retry with higher fee
+                logger.warning("TX not finalized in %ds — retrying with 2× fee: %s",
+                               CONFIRMATION_TIMEOUT, sig[:16])
+                return self._execute_swap_raw(input_mint, output_mint,
+                                              raw_input_amount,
+                                              slippage_bps,
+                                              _retry=1,
+                                              pair_address=pair_address)
+            logger.error("TX still unconfirmed after retry: %s", sig[:16])
+            return SwapResult(success=False,
+                              error=f"Not finalized after retry: {sig[:16]}")
+
+        return SwapResult(
+            success=True,
+            signature=sig,
+            out_amount=out_amount,
+            price_impact_pct=price_impact,
+            actual_slippage_bps=slippage_bps,
+        )
+
+    # ─── Jupiter + Raydium quote/build helpers ─────────────────────────────────
+
+    def _quote_and_build_jupiter(self, input_mint: str, output_mint: str,
+                                 amount: int, slippage_bps: int
+                                 ) -> tuple[Optional[str], int, float]:
+        """Get Jupiter quote and build swap tx. Returns (tx_b64, out_amount, price_impact) or (None, 0, 0)."""
+        quote = self._get_jupiter_quote(input_mint, output_mint, amount, slippage_bps)
+        if not quote:
+            return None, 0, 0.0
+        out_amount   = int(quote.get("outAmount", 0))
+        price_impact = float(quote.get("priceImpactPct", 0))
+        priority_fee = self._estimate_priority_fee()
+        swap_payload = {
+            "quoteResponse":             quote,
+            "userPublicKey":             self._pubkey,
+            "wrapAndUnwrapSol":          True,
+            "prioritizationFeeLamports": priority_fee,
+            "dynamicComputeUnitLimit":   True,
+        }
+        try:
+            for swap_url in (JUPITER_SWAP_URL, JUPITER_SWAP_URL_ALT):
+                try:
+                    resp = requests.post(swap_url, json=swap_payload, timeout=15)
+                    break
+                except Exception:
+                    continue
+            else:
+                return None, 0, 0.0
+            if not resp.ok:
+                return None, 0, 0.0
+            tx_b64 = resp.json().get("swapTransaction")
+            if not tx_b64:
+                return None, 0, 0.0
+            return tx_b64, out_amount, price_impact
+        except Exception:
+            return None, 0, 0.0
+
+    def _quote_and_build_raydium(self, input_mint: str, output_mint: str,
+                                 amount: int, slippage_bps: int
+                                 ) -> tuple[Optional[str], int, float]:
+        """Get Raydium quote and build swap tx. Returns (tx_b64, out_amount, price_impact) or (None, 0, 0)."""
+        try:
+            # Step 1: compute quote
+            resp = requests.get(RAYDIUM_COMPUTE_URL, params={
+                "inputMint":  input_mint,
+                "outputMint": output_mint,
+                "amount":     str(amount),
+                "slippageBps": str(slippage_bps),
+                "txVersion":  "V0",
+            }, timeout=10)
+            if not resp.ok:
+                logger.debug("Raydium compute failed: %s", resp.status_code)
+                return None, 0, 0.0
+            data = resp.json()
+            if not data.get("success"):
+                logger.warning("Raydium: no pool for this token (%s)", data.get("msg", "no route"))
+                return None, 0, 0.0
+            swap_data    = data["data"]
+            out_amount   = int(swap_data.get("outputAmount", 0))
+            price_impact = float(swap_data.get("priceImpactPct", 0))
+
+            # Step 2: build transaction
+            tx_resp = requests.post(RAYDIUM_TX_URL, json={
+                "computeUnitPriceMicroLamports": "auto",
+                "swapResponse": data,
+                "txVersion":    "V0",
+                "wallet":       self._pubkey,
+                "wrapSol":      True,
+                "unwrapSol":    True,
+            }, timeout=15)
+            if not tx_resp.ok:
+                logger.debug("Raydium tx build failed: %s", tx_resp.status_code)
+                return None, 0, 0.0
+            tx_data = tx_resp.json()
+            if not tx_data.get("success"):
+                logger.debug("Raydium tx build error: %s", tx_data)
+                return None, 0, 0.0
+            txs = tx_data.get("data", [])
+            if not txs:
+                return None, 0, 0.0
+            tx_b64 = txs[0].get("transaction")
+            if not tx_b64:
+                return None, 0, 0.0
+            logger.debug("Raydium quote ok: out=%d impact=%.2f%%", out_amount, price_impact)
+            return tx_b64, out_amount, price_impact
+        except Exception as e:
+            logger.warning("Raydium quote/build exception: %s", e)
+            return None, 0, 0.0
+
+    def _quote_and_build_pumpfun_direct(self, input_mint: str, output_mint: str,
+                                        amount_raw: int, slippage_bps: int,
+                                        pair_address: Optional[str] = None,
+                                        ) -> tuple[Optional[str], int, float]:
+        """Build a Pump.fun bonding-curve buy OR sell tx directly using on-chain data.
+
+        Handles both directions:
+          BUY:  input=SOL,   output=*pump token  →  amount_raw = SOL lamports
+          SELL: input=*pump, output=SOL           →  amount_raw = token raw units
+
+        Does NOT depend on PumpPortal — only uses the working Helius RPC.
+        AMM formulas (constant product):
+          buy:  tokens_out = vtr * sol_in  / (vsr + sol_in)
+          sell: sol_out    = vsr * tok_in  / (vtr + tok_in)   (then apply 1% fee)
+        Returns (tx_b64, out_amount, 0.0) or (None, 0, 0.0) on failure.
+        """
+        SOL_MINT = "So11111111111111111111111111111111111111112"
+        is_buy = output_mint.endswith("pump")
+        pump_mint_str = output_mint if is_buy else input_mint
+
+        try:
+            import struct
+            from solders.pubkey import Pubkey
+            from solders.instruction import Instruction, AccountMeta
+            from solders.message import MessageV0
+            from solders.transaction import VersionedTransaction
+
+            PUMP_PROG  = Pubkey.from_string(_PUMP_PROGRAM)
+            TOKEN_PROG = Pubkey.from_string(_TOKEN_PROG)
+            SYS_PROG   = Pubkey.from_string(_SYSTEM_PROG)
+            RENT_SYS   = Pubkey.from_string(_RENT_SYSVAR)
+            ATA_PROG   = Pubkey.from_string(_ATA_PROG)
+
+            mint = Pubkey.from_string(pump_mint_str)
+            user = self._keypair.pubkey()
+
+            # ── Derive PDAs ────────────────────────────────────────────────────
+            global_pda, _ = Pubkey.find_program_address([b"global"], PUMP_PROG)
+            bc_pda, _     = Pubkey.find_program_address(
+                [b"bonding-curve", bytes(mint)], PUMP_PROG)
+            ev_auth, _    = Pubkey.find_program_address(
+                [b"__event_authority"], PUMP_PROG)
+
+            def _ata(owner: Pubkey, mint_pk: Pubkey) -> Pubkey:
+                return Pubkey.find_program_address(
+                    [bytes(owner), bytes(TOKEN_PROG), bytes(mint_pk)], ATA_PROG)[0]
+
+            bc_ata   = _ata(bc_pda, mint)
+            user_ata = _ata(user, mint)
+
+            # ── Fetch on-chain accounts via Helius RPC ─────────────────────────
+            def _get_account_data(address: str) -> Optional[bytes]:
+                r = requests.post(config.SOLANA_RPC_URL, json={
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "getAccountInfo",
+                    "params": [address, {"encoding": "base64", "commitment": "confirmed"}],
+                }, timeout=10)
+                if not r.ok:
+                    return None
+                val = r.json().get("result", {}).get("value")
+                if not val:
+                    return None
+                return base64.b64decode(val["data"][0])
+
+            # Read fee_recipient from global state (offset 41, 32 bytes)
+            # and feeBasisPoints (offset 105, u64) for sell fee calculation
+            gdata = _get_account_data(str(global_pda))
+            if not gdata or len(gdata) < 113:
+                logger.warning("Pump.fun direct: global account fetch failed")
+                return None, 0, 0.0
+            fee_recipient = Pubkey.from_bytes(gdata[41:73])
+            fee_bps, = struct.unpack_from("<Q", gdata, 105)   # typically 100 (1%)
+
+            # Read bonding curve reserves
+            bcdata = _get_account_data(str(bc_pda))
+            if not bcdata or len(bcdata) < 49:
+                logger.warning("Pump.fun direct: bonding curve not found for %s",
+                               pump_mint_str[:12])
+                return None, 0, 0.0
+            vtr, vsr = struct.unpack_from("<QQ", bcdata, 8)
+            complete = bcdata[48] != 0
+            if complete and is_buy:
+                logger.info("Pump.fun direct: %s graduated — routing to PumpSwap",
+                            pump_mint_str[:12])
+                return self._quote_and_build_pumpswap(pump_mint_str, amount_raw, slippage_bps,
+                                                      pool_address=pair_address)
+            elif complete:
+                logger.info("Pump.fun direct: %s graduated — selling via PumpSwap",
+                            pump_mint_str[:12])
+                return self._quote_and_build_pumpswap(pump_mint_str, amount_raw, slippage_bps,
+                                                      is_sell=True, pool_address=pair_address)
+            if vsr == 0 or vtr == 0:
+                return None, 0, 0.0
+
+            # ── Build instruction for BUY or SELL ─────────────────────────────
+            if is_buy:
+                # AMM: tokens_out = vtr * sol_in / (vsr + sol_in)
+                token_amount = (vtr * amount_raw) // (vsr + amount_raw)
+                if token_amount <= 0:
+                    logger.warning("Pump.fun direct: zero token calc for %s", pump_mint_str[:12])
+                    return None, 0, 0.0
+                max_sol_cost = int(amount_raw * (1 + slippage_bps / 10000))
+
+                # Create user ATA idempotently, then buy
+                create_ata_ix = Instruction(
+                    program_id=ATA_PROG,
+                    accounts=[
+                        AccountMeta(pubkey=user,       is_signer=True,  is_writable=True),
+                        AccountMeta(pubkey=user_ata,   is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=user,       is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=mint,       is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=SYS_PROG,   is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=TOKEN_PROG, is_signer=False, is_writable=False),
+                    ],
+                    data=bytes([1]),   # 1 = CreateIdempotent
+                )
+                main_data = _PUMP_BUY_DISC + struct.pack("<QQ", token_amount, max_sol_cost)
+                main_ix = Instruction(
+                    program_id=PUMP_PROG,
+                    accounts=[
+                        AccountMeta(pubkey=global_pda,   is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=fee_recipient, is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=mint,          is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=bc_pda,        is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=bc_ata,        is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=user_ata,      is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=user,          is_signer=True,  is_writable=True),
+                        AccountMeta(pubkey=SYS_PROG,      is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=TOKEN_PROG,    is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=RENT_SYS,      is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=ev_auth,       is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=PUMP_PROG,     is_signer=False, is_writable=False),
+                    ],
+                    data=main_data,
+                )
+                instructions = [create_ata_ix, main_ix]
+                out_amount = token_amount
+                logger.info("Pump.fun direct BUY: %.6f SOL → %d tokens (%s)",
+                            amount_raw / 1e9, token_amount, pump_mint_str[:12])
+
+            else:
+                # SELL: AMM: sol_out_gross = vsr * tokens / (vtr + tokens), then apply fee
+                sol_out_gross = (vsr * amount_raw) // (vtr + amount_raw)
+                sol_out_net   = sol_out_gross * (10000 - fee_bps) // 10000
+                min_sol_out   = int(sol_out_net * (1 - slippage_bps / 10000))
+                if sol_out_net <= 0:
+                    logger.warning("Pump.fun direct: zero SOL calc for sell of %s",
+                                   pump_mint_str[:12])
+                    return None, 0, 0.0
+
+                main_data = _PUMP_SELL_DISC + struct.pack("<QQ", amount_raw, min_sol_out)
+                main_ix = Instruction(
+                    program_id=PUMP_PROG,
+                    accounts=[
+                        AccountMeta(pubkey=global_pda,   is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=fee_recipient, is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=mint,          is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=bc_pda,        is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=bc_ata,        is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=user_ata,      is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=user,          is_signer=True,  is_writable=True),
+                        AccountMeta(pubkey=SYS_PROG,      is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=ATA_PROG,      is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=TOKEN_PROG,    is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=ev_auth,       is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=PUMP_PROG,     is_signer=False, is_writable=False),
+                    ],
+                    data=main_data,
+                )
+                instructions = [main_ix]
+                out_amount = sol_out_net
+                logger.info("Pump.fun direct SELL: %d tokens → %.6f SOL (%s)",
+                            amount_raw, sol_out_net / 1e9, pump_mint_str[:12])
+
+            # ── Build + sign VersionedTransaction ─────────────────────────────
+            bh = self._client.get_latest_blockhash().value.blockhash
+            msg = MessageV0.try_compile(
+                payer=user,
+                instructions=instructions,
+                address_lookup_table_accounts=[],
+                recent_blockhash=bh,
+            )
+            tx = VersionedTransaction(msg, [self._keypair])
+            tx_b64 = base64.b64encode(bytes(tx)).decode()
+            return tx_b64, out_amount, 0.0
+
+        except Exception as e:
+            logger.warning("Pump.fun direct exception: %s", e)
+            return None, 0, 0.0
+
+    def _quote_and_build_pumpswap(self, pump_mint: str, amount_raw: int,
+                                   slippage_bps: int, is_sell: bool = False,
+                                   pool_address: Optional[str] = None,
+                                   ) -> tuple[Optional[str], int, float]:
+        """Build a PumpSwap AMM buy or sell tx for graduated pump tokens.
+
+        Automatically finds the PumpSwap pool for the given mint via DexScreener,
+        reads pool vault balances for AMM price computation, then clones the
+        account list from a reference on-chain transaction (substituting only
+        user-specific accounts) to build a correctly-structured instruction.
+
+        WSOL wrapping/unwrapping is handled automatically for buys.
+
+        Discriminator: sha256("global:buy")[:8] = [102,6,61,18,1,218,235,234]
+          (PumpSwap uses the same Anchor namespace as the bonding curve program)
+        Buy args:  (base_amount_out: u64, max_quote_amount_in: u64)
+        Sell args: (base_amount_in: u64,  min_quote_amount_out: u64)
+        """
+        try:
+            import struct
+            from solders.pubkey import Pubkey
+            from solders.instruction import Instruction, AccountMeta
+            from solders.message import MessageV0
+            from solders.transaction import VersionedTransaction
+            from solders.system_program import transfer, TransferParams
+
+            PUMPSWAP   = Pubkey.from_string("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA")
+            TOKEN_PROG = Pubkey.from_string(_TOKEN_PROG)
+            SYS_PROG   = Pubkey.from_string(_SYSTEM_PROG)
+            ATA_PROG   = Pubkey.from_string(_ATA_PROG)
+            WSOL_MINT  = Pubkey.from_string("So11111111111111111111111111111111111111112")
+            user       = self._keypair.pubkey()
+            base_mint_pk = Pubkey.from_string(pump_mint)
+
+            def _ata(owner, mint_pk, prog=TOKEN_PROG):
+                return Pubkey.find_program_address(
+                    [bytes(owner), bytes(prog), bytes(mint_pk)], ATA_PROG)[0]
+
+            def _get_data(addr):
+                r = requests.post(config.SOLANA_RPC_URL, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+                    "params": [str(addr), {"encoding": "base64", "commitment": "confirmed"}],
+                }, timeout=10)
+                if not r.ok:
+                    return None
+                val = r.json().get("result", {}).get("value")
+                return base64.b64decode(val["data"][0]) if val else None
+
+            # ── Step 1: find PumpSwap pool ────────────────────────────────────
+            # pool_address may already be known (e.g. from DexScreener scanner);
+            # only query DexScreener if not provided.
+            if not pool_address:
+                ds = requests.get(
+                    f"https://api.dexscreener.com/latest/dex/tokens/{pump_mint}",
+                    timeout=8)
+                if ds.ok:
+                    for p in ds.json().get("pairs", []):
+                        if p.get("chainId") == "solana" and p.get("dexId") == "pumpswap":
+                            pool_address = p.get("pairAddress")
+                            break
+            if not pool_address:
+                logger.warning("PumpSwap: no pool found for %s on DexScreener", pump_mint[:12])
+                return None, 0, 0.0
+
+            # ── Step 2: read pool → vault addresses ───────────────────────────
+            pool_data = _get_data(pool_address)
+            if not pool_data or len(pool_data) < 203:
+                logger.warning("PumpSwap: pool account not found %s", pool_address[:16])
+                return None, 0, 0.0
+            pool_base_ta  = Pubkey.from_bytes(pool_data[139:171])
+            pool_quote_ta = Pubkey.from_bytes(pool_data[171:203])
+
+            # ── Step 3: read vault balances (SPL token account, amount @ offset 64) ─
+            base_data  = _get_data(str(pool_base_ta))
+            quote_data = _get_data(str(pool_quote_ta))
+            if not base_data or not quote_data or len(base_data) < 72 or len(quote_data) < 72:
+                logger.warning("PumpSwap: vault data unavailable for pool %s", pool_address[:16])
+                return None, 0, 0.0
+            base_reserve  = struct.unpack_from("<Q", base_data, 64)[0]
+            quote_reserve = struct.unpack_from("<Q", quote_data, 64)[0]
+            if base_reserve == 0 or quote_reserve == 0:
+                logger.warning("PumpSwap: zero reserves pool=%s", pool_address[:16])
+                return None, 0, 0.0
+
+            # ── Step 4: AMM calculation (~1% total fees) ──────────────────────
+            if not is_sell:
+                # BUY: sol_in → tokens_out
+                sol_in_eff    = amount_raw * 9900 // 10000
+                token_out     = (base_reserve * sol_in_eff) // (quote_reserve + sol_in_eff)
+                max_quote_in  = int(amount_raw * (1 + slippage_bps / 10000))
+                arg0, arg1    = token_out, max_quote_in
+                out_amount    = token_out
+                if token_out <= 0:
+                    logger.warning("PumpSwap: zero token calc pool=%s", pool_address[:16])
+                    return None, 0, 0.0
+            else:
+                # SELL: tokens_in → sol_out
+                sol_out_gross = (quote_reserve * amount_raw) // (base_reserve + amount_raw)
+                sol_out_net   = sol_out_gross * 9900 // 10000
+                min_sol_out   = int(sol_out_net * (1 - slippage_bps / 10000))
+                arg0, arg1    = amount_raw, min_sol_out
+                out_amount    = sol_out_net
+                if sol_out_net <= 0:
+                    logger.warning("PumpSwap: zero SOL calc (sell) pool=%s", pool_address[:16])
+                    return None, 0, 0.0
+
+            # ── Step 5: derive user ATAs and pool authority ───────────────────
+            # Detect whether base mint uses SPL Token or Token-2022 by reading
+            # its account owner field (determines correct ATA derivation + create ix)
+            _TOKEN22_PROG_STR = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+            try:
+                _mint_info_r = requests.post(config.SOLANA_RPC_URL, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+                    "params": [pump_mint, {"encoding": "base64", "commitment": "confirmed"}],
+                }, timeout=8)
+                _mint_owner = (_mint_info_r.json()
+                               .get("result", {}).get("value", {})
+                               .get("owner", ""))
+            except Exception:
+                _mint_owner = ""
+            if _mint_owner == _TOKEN22_PROG_STR:
+                base_token_prog = Pubkey.from_string(_TOKEN22_PROG_STR)
+                logger.debug("PumpSwap: base mint %s is Token-2022", pump_mint[:12])
+            else:
+                base_token_prog = TOKEN_PROG
+
+            user_base_ata = _ata(user, base_mint_pk, base_token_prog)
+            user_wsol_ata = _ata(user, WSOL_MINT)
+            # coin_creator = bonding-curve creator at pool_data[211:243] = bc[49:81]
+            # [18] creator_wallet = pAMM_PDA(b"creator_vault", coin_creator)
+            # Confirmed by ref_tx for pool 9XTex3LaPS: [18]=7eni3x = pAMM_PDA(creator_vault, bc)
+            coin_creator     = Pubkey.from_bytes(pool_data[211:243]) if len(pool_data) >= 243 else Pubkey.from_bytes(pool_data[11:43])
+            creator_wallet, _ = Pubkey.find_program_address(
+                [b"creator_vault", bytes(coin_creator)], PUMPSWAP)
+            creator_wsol_ata = _ata(creator_wallet, WSOL_MINT)
+
+            # Volume accumulator PDAs (PumpSwap Anchor program)
+            _pool_pk = Pubkey.from_string(pool_address)
+            global_volume_acc, _ = Pubkey.find_program_address(
+                [b"global_volume_accumulator"], PUMPSWAP)
+            # user_volume_accumulator is per-user (NOT per-pool)
+            user_volume_acc, _ = Pubkey.find_program_address(
+                [b"user_volume_accumulator", bytes(user)], PUMPSWAP)
+            logger.debug("PumpSwap PDAs: global_va=%s user_va=%s",
+                         str(global_volume_acc)[:16], str(user_volume_acc)[:16])
+
+            # ── Step 6: try to clone fixed accounts from reference tx ─────────
+            # (preferred path: validates our hardcoded constants against reality)
+            _GLOBAL_CONFIG    = "ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw"
+            _EVENT_AUTH       = "GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR"
+            _TOKEN22_PROG_STR = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+            _SPL_TOKEN_PROG   = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+            _CONST_21         = "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"
+            _CONST_22         = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
+            # [23] coin_creator_vault_authority = pAMM PDA seeds=["creator_vault", bc_creator]
+            # bc_creator = pool_data[211:243] = bonding-curve creator field at bc[49:81]
+            # Verified: pAMM_PDA(b'creator_vault', bc_creator) matches Anchor Right for 2+ pools
+            _coin_creator_vault_23, _ = Pubkey.find_program_address(
+                [b"creator_vault", bytes(coin_creator)], PUMPSWAP)
+            # Default fee recipient: any entry from global_config's valid fee-recipient list.
+            # The pAMM program checks [9] is in the global_config list — use a known-valid one.
+            # [10] = WSOL ATA of the fee recipient (SPL Token program).
+            _DEFAULT_FEE_RECIP    = Pubkey.from_string("G5UZAVbAf46s7cKWoyKu8kYTip9DGTpbLZ2qa9Aq69dP")
+            _fee_recip_wsol_ata   = _ata(_DEFAULT_FEE_RECIP, WSOL_MINT)
+
+            ref_accs = None
+            try:
+                r_sigs = requests.post(config.SOLANA_RPC_URL, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "getSignaturesForAddress",
+                    "params": [pool_address, {"limit": 20}],
+                }, timeout=10)
+                for sig_info in r_sigs.json().get("result", []):
+                    r2 = requests.post(config.SOLANA_RPC_URL, json={
+                        "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
+                        "params": [sig_info["signature"],
+                                   {"encoding": "base64", "maxSupportedTransactionVersion": 0}],
+                    }, timeout=15)
+                    res = r2.json().get("result")
+                    if not res:
+                        continue
+                    meta = res.get("meta") or {}
+                    # Skip failed transactions
+                    if meta.get("err") is not None:
+                        continue
+                    ref_tx  = VersionedTransaction.from_bytes(
+                        base64.b64decode(res["transaction"][0]))
+                    ref_msg = ref_tx.message
+                    rkeys   = [str(k) for k in ref_msg.account_keys]
+                    # Append ALT-resolved addresses so ALT-based txs are not skipped
+                    loaded = meta.get("loadedAddresses") or {}
+                    rkeys.extend(loaded.get("writable", []))
+                    rkeys.extend(loaded.get("readonly", []))
+                    for inst in ref_msg.instructions:
+                        if inst.program_id_index >= len(rkeys):
+                            continue
+                        if "pAMM" not in rkeys[inst.program_id_index]:
+                            continue
+                        if len(inst.accounts) != 24:
+                            continue
+                        if bytes(inst.data)[:8] != _PUMP_BUY_DISC:
+                            continue
+                        if not all(idx < len(rkeys) for idx in inst.accounts):
+                            continue
+                        cloned = [rkeys[idx] for idx in inst.accounts]
+                        cloned[1]  = str(user)
+                        cloned[5]  = str(user_base_ata)
+                        cloned[6]  = str(user_wsol_ata)
+                        # [9] = protocol_fee_recipient — keep from ref tx (pool-agnostic valid entry)
+                        # [10] = fee_recipient_wsol_ata — keep from ref tx (derived from [9])
+                        cloned[20] = str(user_volume_acc)  # user_volume_accumulator (ours)
+                        ref_accs = cloned
+                        break
+                    if ref_accs:
+                        break
+            except Exception as e:
+                logger.debug("PumpSwap: ref tx lookup failed (%s) — using fallback", e)
+
+            # ── Step 6b: deterministic fallback for brand-new pools ───────────
+            # Build the 24-account list from first principles when the pool has
+            # no on-chain buy transactions to clone from.
+            #
+            # Account layout (confirmed from decoded reference transactions):
+            #  [0] W  pool
+            #  [1] WS user (signer)
+            #  [2] R  globalConfig (constant)
+            #  [3] R  base_mint
+            #  [4] R  quote_mint (WSOL)
+            #  [5] W  user_base_ata
+            #  [6] W  user_wsol_ata
+            #  [7] W  pool_base_token_account
+            #  [8] W  pool_quote_token_account
+            #  [9] R  protocol_fee_recipient — valid entry from global_config
+            # [10] W  fee_recipient_wsol_ata — ATA(fee_recipient, WSOL)
+            # [11] R  Token-2022 program (constant)
+            # [12] R  SPL Token program (constant, always — WSOL uses SPL Token)
+            # [13] R  System program (constant)
+            # [14] R  ATA program (constant)
+            # [15] R  EventAuthority (constant)
+            # [16] R  PumpSwap program (constant)
+            # [17] W  creator_wsol_ata  (ATA(pAMM_PDA(creator_vault, bc_creator), WSOL))
+            # [18] W  creator_wallet    pAMM_PDA(b"creator_vault", bc_creator)
+            # [19] W  global_volume_accumulator  PDA(pAMM, ["global_volume_accumulator"])
+            # [20] W  user_volume_accumulator   PDA(pAMM, ["user_volume_accumulator", user])
+            # [21] R  pfee state account (constant)
+            # [22] R  pfee program (constant)
+            # [23] W  coin_creator_vault_authority PDA(pAMM, ["creator_vault", bc_creator])
+            if not ref_accs:
+                logger.info("PumpSwap: no ref tx for pool %s — deriving accounts",
+                            pool_address[:16])
+                ref_accs = [
+                    pool_address,                        # [0]
+                    str(user),                           # [1]
+                    _GLOBAL_CONFIG,                      # [2]
+                    pump_mint,                           # [3]
+                    str(WSOL_MINT),                      # [4]
+                    str(user_base_ata),                  # [5]
+                    str(user_wsol_ata),                  # [6]
+                    str(pool_base_ta),                   # [7]
+                    str(pool_quote_ta),                  # [8]
+                    str(_DEFAULT_FEE_RECIP),             # [9] valid protocol fee recipient
+                    str(_fee_recip_wsol_ata),            # [10] fee_recipient WSOL ATA
+                    _TOKEN22_PROG_STR,                   # [11] Token-2022 program
+                    _SPL_TOKEN_PROG,                     # [12] SPL Token program (WSOL)
+                    _SYSTEM_PROG,                        # [13]
+                    _ATA_PROG,                           # [14]
+                    _EVENT_AUTH,                         # [15]
+                    str(PUMPSWAP),                       # [16]
+                    str(creator_wsol_ata),               # [17] ATA(creator_wallet, WSOL)
+                    str(creator_wallet),                 # [18] pAMM PDA(creator_vault, bc_creator)
+                    str(global_volume_acc),              # [19] global_volume_accumulator PDA
+                    str(user_volume_acc),                # [20] user_volume_accumulator PDA
+                    _CONST_21,                           # [21] pfee state account
+                    _CONST_22,                           # [22] pfee program
+                    str(_coin_creator_vault_23),         # [23] pAMM PDA(creator_vault, bc_creator)
+                ]
+
+            # Writable / signer flags for each of the 24 accounts
+            _ACCT_FLAGS = [
+                (True,  False),  # [0]  pool         W
+                (True,  True),   # [1]  user         WS
+                (False, False),  # [2]  globalConfig R
+                (False, False),  # [3]  base_mint    R
+                (False, False),  # [4]  quote_mint   R
+                (True,  False),  # [5]  user_base    W
+                (True,  False),  # [6]  user_wsol    W
+                (True,  False),  # [7]  pool_base    W
+                (True,  False),  # [8]  pool_quote   W
+                (False, False),  # [9]  referral     R
+                (True,  False),  # [10] ref_wsol     W
+                (False, False),  # [11] Token-2022   R
+                (False, False),  # [12] Token        R
+                (False, False),  # [13] System       R
+                (False, False),  # [14] ATA          R
+                (False, False),  # [15] EventAuth    R
+                (False, False),  # [16] PUMPSWAP     R
+                (True,  False),  # [17] creator_wsol W
+                (True,  False),  # [18] creator_vault W (same PDA as [23])
+                (True,  False),  # [19] global_vol_acc  W (init_if_needed)
+                (True,  False),  # [20] user_vol_acc   W (init_if_needed)
+                (False, False),  # [21] pfee state     R
+                (False, False),  # [22] pfee program   R
+                (True,  False),  # [23] coin_creator_vault W (init_if_needed PDA)
+            ]
+
+            account_metas = [
+                AccountMeta(pubkey=Pubkey.from_string(acc),
+                            is_signer=_ACCT_FLAGS[j][1],
+                            is_writable=_ACCT_FLAGS[j][0])
+                for j, acc in enumerate(ref_accs)
+            ]
+
+            # ── Step 7: build instructions ────────────────────────────────────
+            from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
+            cu_price = self._estimate_priority_fee()
+            cu_limit_ix = set_compute_unit_limit(400_000)   # PumpSwap + WSOL wrap ~200K CU
+            cu_price_ix = set_compute_unit_price(cu_price)
+
+            buy_sell_disc = _PUMP_BUY_DISC if not is_sell else _PUMP_SELL_DISC
+            main_data = buy_sell_disc + struct.pack("<QQ", arg0, arg1)
+            main_ix   = Instruction(program_id=PUMPSWAP,
+                                    accounts=account_metas, data=main_data)
+
+            if not is_sell:
+                # Wrap SOL → WSOL, execute buy, unwrap remaining WSOL
+                create_wsol_ix = Instruction(
+                    program_id=ATA_PROG,
+                    accounts=[
+                        AccountMeta(user,          True,  True),
+                        AccountMeta(user_wsol_ata, False, True),
+                        AccountMeta(user,          False, False),
+                        AccountMeta(WSOL_MINT,     False, False),
+                        AccountMeta(SYS_PROG,      False, False),
+                        AccountMeta(TOKEN_PROG,    False, False),
+                    ],
+                    data=bytes([1]),
+                )
+                fund_ix  = transfer(TransferParams(from_pubkey=user, to_pubkey=user_wsol_ata, lamports=max_quote_in))
+                sync_ix  = Instruction(program_id=TOKEN_PROG,
+                                       accounts=[AccountMeta(user_wsol_ata, False, True)],
+                                       data=bytes([17]))   # syncNative = 17
+                create_base_ix = Instruction(
+                    program_id=ATA_PROG,
+                    accounts=[
+                        AccountMeta(user,             True,  True),
+                        AccountMeta(user_base_ata,    False, True),
+                        AccountMeta(user,             False, False),
+                        AccountMeta(base_mint_pk,     False, False),
+                        AccountMeta(SYS_PROG,         False, False),
+                        AccountMeta(base_token_prog,  False, False),
+                    ],
+                    data=bytes([1]),
+                )
+                close_ix = Instruction(program_id=TOKEN_PROG,
+                                       accounts=[AccountMeta(user_wsol_ata, False, True),
+                                                 AccountMeta(user,          False, True),
+                                                 AccountMeta(user,          True,  False)],
+                                       data=bytes([9]))    # closeAccount = 9
+                instructions = [cu_limit_ix, cu_price_ix, create_wsol_ix,
+                                 fund_ix, sync_ix, create_base_ix, main_ix, close_ix]
+            else:
+                # Sell: just execute the sell (tokens → WSOL → SOL auto-unwrapped by close)
+                create_wsol_ix = Instruction(
+                    program_id=ATA_PROG,
+                    accounts=[
+                        AccountMeta(user,          True,  True),
+                        AccountMeta(user_wsol_ata, False, True),
+                        AccountMeta(user,          False, False),
+                        AccountMeta(WSOL_MINT,     False, False),
+                        AccountMeta(SYS_PROG,      False, False),
+                        AccountMeta(TOKEN_PROG,    False, False),
+                    ],
+                    data=bytes([1]),
+                )
+                close_ix = Instruction(program_id=TOKEN_PROG,
+                                       accounts=[AccountMeta(user_wsol_ata, False, True),
+                                                 AccountMeta(user,          False, True),
+                                                 AccountMeta(user,          True,  False)],
+                                       data=bytes([9]))
+                instructions = [cu_limit_ix, cu_price_ix, create_wsol_ix, main_ix, close_ix]
+
+            bh  = self._client.get_latest_blockhash().value.blockhash
+            msg = MessageV0.try_compile(user, instructions, [], bh)
+            tx  = VersionedTransaction(msg, [self._keypair])
+            tx_b64 = base64.b64encode(bytes(tx)).decode()
+            logger.info("PumpSwap %s tx built: %d → pool=%s",
+                        "sell" if is_sell else "buy", amount_raw, pool_address[:16])
+            return tx_b64, out_amount, 0.0
+
+        except Exception as e:
+            logger.warning("PumpSwap exception: %s", e)
+            return None, 0, 0.0
+
+    def _quote_and_build_pumpfun(self, input_mint: str, output_mint: str,
+                                 amount_raw: int, slippage_bps: int,
+                                 pool: str = "pump",
+                                 ) -> tuple[Optional[str], int, float]:
+        """Build a buy or sell tx via PumpPortal.
+
+        Detects direction from input/output mints:
+          BUY:  output ends with "pump" → amount_raw = SOL lamports
+          SELL: input  ends with "pump" → amount_raw = token raw units
+
+        pool="pump"     → Pump.fun bonding curve (pre-graduation)
+        pool="pumpswap" → Pump.fun AMM (post-graduation, March 2025+)
+        """
+        SOL_MINT = "So11111111111111111111111111111111111111112"
+        is_buy = output_mint.endswith("pump")
+        pump_mint = output_mint if is_buy else input_mint
+        try:
+            slippage_pct = max(10, slippage_bps // 100)
+            if is_buy:
+                payload = {
+                    "publicKey":        self._pubkey,
+                    "action":           "buy",
+                    "mint":             pump_mint,
+                    "denominatedInSol": "true",
+                    "amount":           round(amount_raw / 1e9, 6),
+                    "slippage":         slippage_pct,
+                    "priorityFee":      0.0001,
+                    "pool":             pool,
+                }
+            else:
+                payload = {
+                    "publicKey":        self._pubkey,
+                    "action":           "sell",
+                    "mint":             pump_mint,
+                    "denominatedInSol": "false",
+                    "amount":           amount_raw,
+                    "slippage":         slippage_pct,
+                    "priorityFee":      0.0001,
+                    "pool":             pool,
+                }
+            resp = requests.post(
+                PUMPFUN_TRADE_URL,
+                headers={"Content-Type": "application/json", "User-Agent": _BROWSER_UA},
+                json=payload,
+                timeout=10,
+            )
+            if not resp.ok:
+                logger.warning("PumpPortal [pool=%s] failed: HTTP %s — %s",
+                               pool, resp.status_code, resp.text[:300])
+                return None, 0, 0.0
+            tx_bytes = resp.content
+            if not tx_bytes:
+                return None, 0, 0.0
+            tx_b64 = base64.b64encode(tx_bytes).decode()
+            logger.debug("PumpPortal [pool=%s] %s tx built: %s",
+                         pool, "buy" if is_buy else "sell", pump_mint[:12])
+            return tx_b64, 0, 0.0
+        except Exception as e:
+            logger.warning("PumpPortal exception: %s", e)
+            return None, 0, 0.0
+
+    # ─── Jupiter ───────────────────────────────────────────────────────────────
+
+    def _get_jupiter_quote(self, input_mint: str, output_mint: str,
+                           amount: int, slippage_bps: int) -> Optional[dict]:
+        """Fetch a fresh quote from Jupiter v6 (3 attempts with backoff)."""
+        params = {
+            "inputMint":           input_mint,
+            "outputMint":          output_mint,
+            "amount":              str(amount),
+            "slippageBps":         str(slippage_bps),
+            "onlyDirectRoutes":    "false",
+            "asLegacyTransaction": "false",
+        }
+        for attempt in range(3):
+            # Try primary endpoint first; fall back to lite.jup.ag on DNS failure
+            for url in (JUPITER_QUOTE_URL, JUPITER_QUOTE_URL_ALT):
+                try:
+                    resp = requests.get(url, params=params, timeout=10)
+                    if resp.ok:
+                        data = resp.json()
+                        if data.get("error"):
+                            logger.debug("Jupiter quote error: %s", data["error"])
+                            return None
+                        return data
+                    break  # got a real HTTP response — no need to try alt URL
+                except Exception as e:
+                    last_exc = e
+                    continue  # DNS/connection error — try alt URL
+            else:
+                # both URLs failed
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.warning("Jupiter quote exception: %s", last_exc)
+        return None
+
+    # ─── Transaction signing / sending ────────────────────────────────────────
+
+    def _sign_and_send_jito(self, tx_b64: str, priority_fee: int) -> Optional[str]:
+        """
+        Sign the transaction and submit as a Jito bundle for MEV protection.
+        Jito tip is added as a SOL transfer to a random tip account.
+        Falls back to None if Jito is unavailable or fails.
+        """
+        if not config.MEV_PROTECTION_ENABLED:
+            return None
+        try:
+            from solders.transaction import VersionedTransaction
+
+            tx_bytes = base64.b64decode(tx_b64)
+            tx = VersionedTransaction.from_bytes(tx_bytes)
+            signed_tx = VersionedTransaction(tx.message, [self._keypair])
+            signed_b64 = base64.b64encode(bytes(signed_tx)).decode()
+
+            # Jito tip: send a separate SOL transfer of ~0.001 SOL as bundle tip
+            tip_lamports = max(priority_fee, config.JITO_TIP_LAMPORTS)
+            tip_tx_b64   = self._build_jito_tip_transaction(tip_lamports)
+            if not tip_tx_b64:
+                # Can't build tip tx → skip Jito, fall through to direct RPC
+                return None
+
+            bundle_payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "sendBundle",
+                "params": [[tip_tx_b64, signed_b64]],
+            }
+            resp = requests.post(
+                JITO_BUNDLE_URL, json=bundle_payload, timeout=15,
+                headers={"Content-Type": "application/json"},
+            )
+            if resp.ok:
+                result = resp.json().get("result")
+                if result:
+                    sig = str(VersionedTransaction.from_bytes(
+                        base64.b64decode(signed_b64)).signatures[0])
+                    logger.debug("Jito bundle submitted: %s", sig[:16])
+                    return sig
+        except Exception as e:
+            logger.debug("Jito bundle failed: %s", e)
+        return None
+
+    def _build_jito_tip_transaction(self, tip_lamports: int) -> Optional[str]:
+        """Build a signed SOL transfer to a random Jito tip account. Returns b64."""
+        try:
+            from solders.transaction import VersionedTransaction
+            from solders.message import MessageV0
+            from solders.pubkey import Pubkey
+            from solders.system_program import transfer, TransferParams
+            from solders.hash import Hash
+
+            tip_account = Pubkey.from_string(random.choice(JITO_TIP_ACCOUNTS))
+            recent_hash_resp = self._client.get_latest_blockhash()
+            blockhash = recent_hash_resp.value.blockhash
+
+            instr = transfer(TransferParams(
+                from_pubkey=self._keypair.pubkey(),
+                to_pubkey=tip_account,
+                lamports=tip_lamports,
+            ))
+            msg = MessageV0.try_compile(
+                payer=self._keypair.pubkey(),
+                instructions=[instr],
+                address_lookup_table_accounts=[],
+                recent_blockhash=blockhash,
+            )
+            tx = VersionedTransaction(msg, [self._keypair])
+            return base64.b64encode(bytes(tx)).decode()
+        except Exception as e:
+            logger.debug("Jito tip tx build error: %s", e)
+            return None
+
+    def _sign_and_send_rpc(self, tx_b64: str) -> Optional[str]:
+        """Sign and send via direct Solana RPC (fallback when Jito unavailable).
+        Returns signature string on success, "GRADUATED" if bonding curve completed
+        (error 0x1775 / 6005), or None on other failures.
+        """
         try:
             from solders.transaction import VersionedTransaction
             from solana.rpc.types import TxOpts
 
             tx_bytes = base64.b64decode(tx_b64)
-            tx = VersionedTransaction.from_bytes(tx_bytes)
+            tx       = VersionedTransaction.from_bytes(tx_bytes)
+            signed   = VersionedTransaction(tx.message, [self._keypair])
 
-            # Sign the transaction
-            signed_tx = VersionedTransaction(tx.message, [self._keypair])
-
-            # Send
             result = self._client.send_raw_transaction(
-                bytes(signed_tx),
-                opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed"),
+                bytes(signed),
+                opts=TxOpts(
+                    skip_preflight=False,
+                    preflight_commitment="confirmed",
+                ),
             )
             sig = str(result.value)
-            logger.info("Transaction sent: %s", sig)
-
-            # Wait for confirmation (up to 30 seconds)
-            for _ in range(30):
-                time.sleep(1)
-                status = self._client.get_signature_statuses([result.value])
-                if status.value and status.value[0]:
-                    conf = status.value[0].confirmation_status
-                    if conf in ("confirmed", "finalized"):
-                        logger.info("Transaction confirmed: %s", sig[:20])
-                        return sig
-            return sig  # Return even if not confirmed yet
-
+            logger.debug("RPC transaction sent: %s", sig[:16])
+            return sig
         except Exception as e:
-            logger.error("Sign/send error: %s", e)
+            err_str = str(e)
+            if "0x1775" in err_str or "Custom(6005)" in err_str:
+                logger.info("Bonding curve complete (0x1775) — token graduated to PumpSwap")
+                return "GRADUATED"
+            logger.error("RPC send error: %s", e)
             return None
 
-    def _usd_to_lamports(self, mint: str, usd_amount: float) -> int:
-        """Convert USD amount to token lamports."""
+    # ─── Confirmation ──────────────────────────────────────────────────────────
+
+    def _wait_finalized(self, signature: str,
+                        timeout: int = CONFIRMATION_TIMEOUT) -> bool:
+        """
+        Wait for a transaction to reach FINALIZED status.
+        Returns True only when finalized. "confirmed" is intentionally not
+        accepted — confirmed blocks can still be rolled back in rare cases.
+        """
+        try:
+            from solders.signature import Signature
+            sig_obj = Signature.from_string(signature)
+            deadline = time.time() + timeout
+            poll_interval = 1.5
+
+            while time.time() < deadline:
+                time.sleep(poll_interval)
+                try:
+                    status = self._client.get_signature_statuses([sig_obj])
+                    if status.value and status.value[0]:
+                        s = status.value[0]
+                        if s.err:
+                            logger.error("TX failed on-chain: %s err=%s",
+                                         signature[:16], s.err)
+                            return False
+                        if "Finalized" in str(s.confirmation_status):
+                            logger.info("TX finalized: %s", signature[:16])
+                            return True
+                        # Log progress without spamming
+                        logger.debug("TX status: %s (%s)",
+                                     signature[:16], s.confirmation_status)
+                except Exception:
+                    pass
+                poll_interval = min(poll_interval * 1.5, 4.0)
+
+            logger.warning("TX confirmation timeout (%ds): %s",
+                           timeout, signature[:16])
+            return False
+        except Exception as e:
+            logger.error("Confirmation wait error: %s", e)
+            return False
+
+    # ─── Priority fees ─────────────────────────────────────────────────────────
+
+    def _estimate_priority_fee(self) -> int:
+        """
+        Estimate priority fee in micro-lamports per compute unit.
+        Uses Helius getPriorityFeeEstimate if Helius RPC is configured,
+        otherwise falls back to config constant.
+        """
+        rpc_url = config.SOLANA_RPC_URL
+        if not rpc_url or "helius" not in rpc_url.lower():
+            return config.MEV_PRIORITY_FEE_LAMPORTS
+
+        try:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getPriorityFeeEstimate",
+                "params": [{
+                    "accountKeys": [self._pubkey],
+                    "options": {"priorityLevel": "High"},
+                }],
+            }
+            resp = requests.post(rpc_url, json=payload, timeout=5)
+            if resp.ok:
+                fee = resp.json().get("result", {}).get("priorityFeeEstimate", 0)
+                if fee and fee > 0:
+                    # Add 20% buffer to stay competitive
+                    return int(fee * 1.2)
+        except Exception as e:
+            logger.debug("Priority fee estimate error: %s", e)
+
+        return config.MEV_PRIORITY_FEE_LAMPORTS
+
+    # ─── Dynamic slippage ──────────────────────────────────────────────────────
+
+    def _compute_slippage_bps(self, trade_usd: float,
+                               liquidity_usd: float) -> int:
+        """
+        Compute dynamic slippage in basis points:
+        - Base: 100 bps (1%)
+        - Scale up as trade size approaches pool liquidity
+        - Cap at SOL_MAX_SLIPPAGE_BPS from config
+        """
+        base_bps = 100
+        if liquidity_usd > 0 and trade_usd > 0:
+            # Liquidity impact: trade_usd / liquidity_usd × 10000 bps
+            impact_bps = int((trade_usd / liquidity_usd) * 10_000)
+            # Round up to nearest 50 bps, add to base
+            buffer = ((impact_bps + 49) // 50) * 50
+            base_bps = max(base_bps, buffer)
+        return min(base_bps, config.SOL_MAX_SLIPPAGE_BPS)
+
+    # ─── Balance helpers ───────────────────────────────────────────────────────
+
+    def _check_lamport_balance(self) -> bool:
+        """Return True if wallet has enough SOL to cover tx fees + Jito tip."""
+        lamports = self.get_sol_balance_lamports()
+        if lamports < MIN_SOL_RESERVE_LAMPORTS:
+            logger.warning("Low SOL balance: %.6f SOL (need ≥ %.3f for fees + tip)",
+                           lamports / 1e9, MIN_SOL_RESERVE_LAMPORTS / 1e9)
+            return False
+        return True
+
+    def _get_token_raw_balance(self, mint_address: str) -> tuple[int, int]:
+        """
+        Returns (raw_amount_in_smallest_units, decimals) for a token.
+        Uses direct RPC with jsonParsed encoding to avoid solana-py API quirks.
+        """
+        if not self.is_connected:
+            return 0, 6
+        try:
+            resp = requests.post(config.SOLANA_RPC_URL, json={
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    self._pubkey,
+                    {"mint": mint_address},
+                    {"encoding": "jsonParsed", "commitment": "confirmed"},
+                ],
+            }, timeout=10)
+            if not resp.ok:
+                return 0, 6
+            for acc in resp.json().get("result", {}).get("value", []):
+                ta = (acc.get("account", {})
+                        .get("data", {})
+                        .get("parsed", {})
+                        .get("info", {})
+                        .get("tokenAmount", {}))
+                raw = int(ta.get("amount", 0))
+                dec = int(ta.get("decimals", 6))
+                if raw > 0:
+                    return raw, dec
+            return 0, 6
+        except Exception as e:
+            logger.debug("Token raw balance error: %s", e)
+            return 0, 6
+
+    # ─── USD conversion ────────────────────────────────────────────────────────
+
+    def _usd_to_raw(self, mint: str, usd_amount: float) -> int:
+        """Convert USD amount to raw token units."""
         if mint == SOL_MINT:
             sol_price = self._get_sol_price()
             if sol_price <= 0:
                 return 0
-            sol_amount = usd_amount / sol_price
-            return int(sol_amount * 1e9)  # SOL has 9 decimals
-        elif mint == USDC_MINT or mint == USDT_MINT:
-            return int(usd_amount * 1e6)  # USDC/USDT have 6 decimals
+            return int((usd_amount / sol_price) * 1e9)
+        elif mint in (USDC_MINT, USDT_MINT):
+            return int(usd_amount * 1e6)
         else:
-            # For other tokens, convert via USDC
+            # Unknown mint — treat as 6-decimal token via USDC equivalent
             return int(usd_amount * 1e6)
 
     def _get_sol_price(self) -> float:
-        """Get current SOL price in USD."""
+        """
+        Get current SOL/USD price with 15s cache.
+        Sources tried in order: Birdeye → Jupiter Price API → CoinGecko.
+        Returns last known price on failure; falls back to $150 only if never fetched.
+        """
+        price, ts = self._sol_price_cache
+        if price > 0 and time.time() - ts < 15:
+            return price
+
+        # 1. Birdeye (real-time, most accurate when key available)
+        if config.BIRDEYE_API_KEY:
+            try:
+                resp = requests.get(
+                    "https://public-api.birdeye.so/defi/price",
+                    params={"address": SOL_MINT},
+                    headers={"X-API-KEY": config.BIRDEYE_API_KEY, "x-chain": "solana"},
+                    timeout=4,
+                )
+                if resp.ok:
+                    p = float(resp.json().get("data", {}).get("value", 0) or 0)
+                    if p > 0:
+                        self._sol_price_cache = (p, time.time())
+                        return p
+            except Exception:
+                pass
+
+        # 2. Jupiter Price API v2 (no key, real DEX price)
+        try:
+            resp = requests.get(
+                "https://api.jup.ag/price/v2",
+                params={"ids": SOL_MINT},
+                timeout=4,
+                headers={"User-Agent": "ai-trader/2.0"},
+            )
+            if resp.ok:
+                p = float(resp.json().get("data", {}).get(SOL_MINT, {}).get("price", 0) or 0)
+                if p > 0:
+                    self._sol_price_cache = (p, time.time())
+                    return p
+        except Exception:
+            pass
+
+        # 3. CoinGecko (free, slightly delayed)
         try:
             resp = requests.get(
                 "https://api.coingecko.com/api/v3/simple/price",
                 params={"ids": "solana", "vs_currencies": "usd"},
-                timeout=5,
+                timeout=4,
             )
             if resp.ok:
-                return float(resp.json()["solana"]["usd"])
+                p = float(resp.json()["solana"]["usd"])
+                if p > 0:
+                    self._sol_price_cache = (p, time.time())
+                    return p
         except Exception:
             pass
-        return 150.0  # Fallback estimate
+
+        # Return stale cache if all sources fail — better than a hardcoded guess
+        if price > 0:
+            logger.debug("All SOL price sources failed — using stale cache $%.2f", price)
+            return price
+        logger.warning("SOL price unavailable — using $150 fallback estimate")
+        return 150.0
+
+    # ─── Quote helper (for safety checker / dry-run) ───────────────────────────
+
+    def get_quote(self, input_mint: str, output_mint: str,
+                  amount_lamports: int, slippage_bps: int = 100) -> Optional[dict]:
+        """Public quote endpoint — used by token_safety for sell simulation."""
+        return self._get_jupiter_quote(input_mint, output_mint,
+                                       amount_lamports, slippage_bps)

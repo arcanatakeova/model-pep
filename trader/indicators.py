@@ -2,6 +2,7 @@
 Technical Indicators — pure NumPy/Pandas implementations.
 No external TA library required.
 """
+from __future__ import annotations
 import numpy as np
 import pandas as pd
 from typing import Optional
@@ -58,8 +59,6 @@ def rsi_signal(close: pd.Series) -> float:
     elif latest <= config.RSI_OVERSOLD:
         return 0.5 + 0.5 * (config.RSI_OVERSOLD - latest) / (config.RSI_OVERSOLD - 20)
     elif latest <= 50:
-        return 0.5 * (50 - latest) / (50 - config.RSI_OVERSOLD)
-    elif latest < 50:
         return 0.5 * (50 - latest) / (50 - config.RSI_OVERSOLD)
     elif latest < config.RSI_OVERBOUGHT:
         return -0.5 * (latest - 50) / (config.RSI_OVERBOUGHT - 50)
@@ -208,7 +207,7 @@ def momentum_signal(close: pd.Series, period: int = config.MOMENTUM_PERIOD) -> f
     if not _validate(close, period + 5):
         return 0.0
 
-    roc = (close.iloc[-1] / close.iloc[-period - 1] - 1) if close.iloc[-period - 1] != 0 else 0
+    roc = close.pct_change(periods=period).iloc[-1]  # rate-of-change over exactly `period` bars
     recent = close.tail(period)
     rng = recent.max() - recent.min()
     pos = (close.iloc[-1] - recent.min()) / rng if rng > 0 else 0.5

@@ -6,6 +6,7 @@ requests>=2.31.0            # HTTP client for all API calls
 pandas>=2.0.0               # Data manipulation and time series analysis
 numpy>=1.24.0               # Numerical computations for indicators
 python-dotenv>=1.0.0        # Load API keys from .env file
+websocket-client>=1.6.0     # Binance WebSocket feed (replaces manual socket impl)
 
 # ── Stock & ETF Data ─────────────────────────────────────────────────────────
 yfinance>=0.2.18            # Yahoo Finance (stocks, ETFs, indices)
@@ -16,12 +17,20 @@ solana>=0.30.2              # Solana Python SDK (RPC client)
 solders>=0.18.1             # Rust-based Solana types (Keypair, Pubkey, etc.)
 
 # ── Polymarket ────────────────────────────────────────────────────────────────
-# Required for live Polymarket prediction market trading
-py-clob-client>=0.12.0      # Official Polymarket CLOB client
+# Optional: only available on Linux x86_64. macOS users: skip or install manually.
+# pip3 install py-clob-client  (Linux only — not on PyPI for macOS/arm64)
+# py-clob-client>=0.12.0
 
 # ── CEX Live Trading (optional) ───────────────────────────────────────────────
 # Uncomment to enable live trading on Binance, Coinbase, etc.
-# ccxt>=4.0.0               # Unified crypto exchange API
+# ccxt>=4.0.0               # Unified crypto exchange API (Binance spot + futures)
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+streamlit>=1.30.0           # Real-time web dashboard (streamlit run trader/dashboard.py)
+plotly>=5.0.0               # Interactive charts in dashboard
+
+# ── Backtest ──────────────────────────────────────────────────────────────────
+matplotlib>=3.7.0           # Equity curve plots (python backtest.py --plot)
 
 # ── Development ───────────────────────────────────────────────────────────────
 # pytest>=7.0.0
