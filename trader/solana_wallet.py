@@ -949,11 +949,18 @@ class SolanaWallet:
 
             user_base_ata = _ata(user, base_mint_pk, base_token_prog)
             user_wsol_ata = _ata(user, WSOL_MINT)
-            # Pool authority = owner of the vault (SPL token account offset 32)
-            pool_authority = Pubkey.from_bytes(base_data[32:64])
             # Creator wallet and WSOL ATA from pool data (offset 11)
             creator_wallet  = Pubkey.from_bytes(pool_data[11:43])
             creator_wsol_ata = _ata(creator_wallet, WSOL_MINT)
+
+            # Volume accumulator PDAs (PumpSwap Anchor program)
+            _pool_pk = Pubkey.from_string(pool_address)
+            global_volume_acc, _ = Pubkey.find_program_address(
+                [b"global_volume_accumulator"], PUMPSWAP)
+            user_volume_acc, _ = Pubkey.find_program_address(
+                [b"user_volume_accumulator", bytes(user), bytes(_pool_pk)], PUMPSWAP)
+            logger.debug("PumpSwap PDAs: global_va=%s user_va=%s",
+                         str(global_volume_acc)[:16], str(user_volume_acc)[:16])
 
             # ── Step 6: try to clone fixed accounts from reference tx ─────────
             # (preferred path: validates our hardcoded constants against reality)
@@ -1039,8 +1046,8 @@ class SolanaWallet:
             # [16] R  PumpSwap program (constant)
             # [17] W  creator_wsol_ata  (ATA(creator, WSOL))
             # [18] R  creator_wallet    (pool_data[11:43])
-            # [19] R  pool_authority    (SPL vault owner = base_data[32:64])
-            # [20] W  referral_base_ata → user_base_ata (self-referral)
+            # [19] W  global_volume_accumulator  PDA(pAMM, ["global_volume_accumulator"])
+            # [20] W  user_volume_accumulator   PDA(pAMM, ["user_volume_accumulator", user, pool])
             # [21] R  constant
             # [22] R  constant
             # [23] R  constant
@@ -1065,13 +1072,13 @@ class SolanaWallet:
                     _ATA_PROG,               # [14]
                     _EVENT_AUTH,             # [15]
                     str(PUMPSWAP),           # [16]
-                    str(creator_wsol_ata),   # [17]
-                    str(creator_wallet),     # [18]
-                    str(pool_authority),     # [19] vault owner PDA
-                    str(user_base_ata),      # [20] referral_base = user_base (self)
-                    _CONST_21,               # [21]
-                    _CONST_22,               # [22]
-                    _CONST_23,               # [23]
+                    str(creator_wsol_ata),      # [17]
+                    str(creator_wallet),        # [18]
+                    str(global_volume_acc),     # [19] global_volume_accumulator PDA
+                    str(user_volume_acc),       # [20] user_volume_accumulator PDA
+                    _CONST_21,                  # [21]
+                    _CONST_22,                  # [22]
+                    _CONST_23,                  # [23]
                 ]
 
             # Writable / signer flags for each of the 24 accounts
@@ -1095,9 +1102,9 @@ class SolanaWallet:
                 (False, False),  # [16] PUMPSWAP     R
                 (True,  False),  # [17] creator_wsol W
                 (False, False),  # [18] creator      R
-                (False, False),  # [19] pool_auth    R
-                (True,  False),  # [20] ref_base     W
-                (False, False),  # [21] const        R
+                (True,  False),  # [19] global_vol_acc  W (init_if_needed)
+                (True,  False),  # [20] user_vol_acc   W (init_if_needed)
+                (False, False),  # [21] const          R
                 (False, False),  # [22] const        R
                 (False, False),  # [23] const        R
             ]
