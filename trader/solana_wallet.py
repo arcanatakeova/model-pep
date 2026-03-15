@@ -1246,7 +1246,13 @@ class SolanaWallet:
             # Confirmed from real on-chain sell txs: sell has no volume accumulators.
             # buy[21]→sell[19], buy[22]→sell[20], buy[23]→sell[21].
             if is_sell:
+                logger.info("PumpSwap sell: ref_accs len=%d [19]=%s [21]=%s",
+                            len(ref_accs),
+                            ref_accs[19][:16] if len(ref_accs) > 19 else "N/A",
+                            ref_accs[21][:16] if len(ref_accs) > 21 else "N/A")
                 ref_accs = ref_accs[:19] + ref_accs[21:]   # 24 → 22 accounts
+                logger.info("PumpSwap sell: trimmed to %d accounts, [19]=%s",
+                            len(ref_accs), ref_accs[19][:16])
                 _ACCT_FLAGS = [
                     (True,  False),  # [0]  pool         W
                     (True,  True),   # [1]  user         WS
