@@ -230,11 +230,19 @@ class DexScreener:
             except Exception as e:
                 logger.debug("%s fetch error: %s", key, e)
 
-        # Deduplicate by pair address
+        # Deduplicate by pair address, and strip infrastructure tokens that
+        # should never be treated as a "buy target" (SOL/WSOL, USDC, USDT).
+        _SKIP_BASE = {
+            "So11111111111111111111111111111111111111112",   # SOL / WSOL
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", # USDT
+        }
         seen = set()
         unique = []
         for t in raw_tokens:
             if t.pair_address and t.pair_address not in seen:
+                if t.base_address in _SKIP_BASE:
+                    continue  # never buy SOL/USDC/USDT with SOL
                 seen.add(t.pair_address)
                 unique.append(t)
 
@@ -315,10 +323,16 @@ class DexScreener:
             except Exception as e:
                 logger.debug("new_pairs %s error: %s", key, e)
 
-        # Filter by age + liquidity
+        # Filter by age + liquidity, skip native infrastructure tokens
+        _SKIP_BASE = {
+            "So11111111111111111111111111111111111111112",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+        }
         fresh = [t for t in raw
                  if (t.age_hours is None or t.age_hours <= max_age_hours)
-                 and t.liquidity_usd >= MIN_LIQUIDITY_USD]
+                 and t.liquidity_usd >= MIN_LIQUIDITY_USD
+                 and t.base_address not in _SKIP_BASE]
 
         # Dedup
         seen = set()
