@@ -44,6 +44,16 @@ _BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                "AppleWebKit/537.36 (KHTML, like Gecko) "
                "Chrome/122.0.0.0 Safari/537.36")
 
+# ─── Pump.fun on-chain constants (no PumpPortal dependency) ────────────────────
+_PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+_ATA_PROG     = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bRS"
+_TOKEN_PROG   = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+_SYSTEM_PROG  = "11111111111111111111111111111111"
+_RENT_SYSVAR  = "SysvarRent111111111111111111111111111111111"
+# buy discriminator = sha256("global:buy")[:8]  (computed at import time)
+import hashlib as _hashlib
+_PUMP_BUY_DISC = _hashlib.sha256(b"global:buy").digest()[:8]
+
 # Raydium swap API — used as fallback when Jupiter is geo-blocked
 RAYDIUM_COMPUTE_URL  = "https://transaction-v1.raydium.io/compute/swap-base-in"
 RAYDIUM_TX_URL       = "https://transaction-v1.raydium.io/transaction/swap-base-in"
@@ -423,13 +433,17 @@ class SolanaWallet:
             tx_b64, out_amount, price_impact = self._quote_and_build_raydium(
                 input_mint, output_mint, raw_input_amount, slippage_bps)
         if tx_b64 is None and output_mint.endswith("pump"):
-            logger.info("Raydium unavailable — trying Pump.fun bonding curve")
+            logger.info("Raydium unavailable — trying Pump.fun bonding curve (PumpPortal)")
             tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
                 output_mint, raw_input_amount, slippage_bps, pool="pump")
             if tx_b64 is None:
-                logger.info("Pump.fun bonding curve unavailable — trying PumpSwap AMM")
+                logger.info("Pump.fun bonding curve unavailable — trying PumpSwap AMM (PumpPortal)")
                 tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
                     output_mint, raw_input_amount, slippage_bps, pool="pumpswap")
+            if tx_b64 is None:
+                logger.info("PumpPortal unavailable — building Pump.fun tx directly on-chain")
+                tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun_direct(
+                    output_mint, raw_input_amount, slippage_bps)
         elif tx_b64 is None:
             logger.info("Raydium unavailable — token is not a Pump.fun token, no further fallbacks")
         if tx_b64 is None:
@@ -585,6 +599,143 @@ class SolanaWallet:
             return tx_b64, out_amount, price_impact
         except Exception as e:
             logger.warning("Raydium quote/build exception: %s", e)
+            return None, 0, 0.0
+
+    def _quote_and_build_pumpfun_direct(self, output_mint: str, amount_lamports: int,
+                                        slippage_bps: int,
+                                        ) -> tuple[Optional[str], int, float]:
+        """Build a Pump.fun bonding-curve buy tx directly using on-chain data.
+
+        Does NOT depend on PumpPortal or any third-party API — only Helius RPC.
+        Uses the Pump.fun program's constant-product AMM formula:
+            tokens_out = virtualTokenReserves * sol_in / (virtualSolReserves + sol_in)
+        Returns (tx_b64, token_amount, 0.0) or (None, 0, 0.0) on failure.
+        """
+        try:
+            import struct
+            from solders.pubkey import Pubkey
+            from solders.instruction import Instruction, AccountMeta
+            from solders.message import MessageV0
+            from solders.transaction import VersionedTransaction
+
+            PUMP_PROG  = Pubkey.from_string(_PUMP_PROGRAM)
+            TOKEN_PROG = Pubkey.from_string(_TOKEN_PROG)
+            SYS_PROG   = Pubkey.from_string(_SYSTEM_PROG)
+            RENT_SYS   = Pubkey.from_string(_RENT_SYSVAR)
+            ATA_PROG   = Pubkey.from_string(_ATA_PROG)
+
+            mint = Pubkey.from_string(output_mint)
+            user = self._keypair.pubkey()
+
+            # ── Derive PDAs ────────────────────────────────────────────────────
+            global_pda, _ = Pubkey.find_program_address([b"global"], PUMP_PROG)
+            bc_pda, _     = Pubkey.find_program_address(
+                [b"bonding-curve", bytes(mint)], PUMP_PROG)
+            ev_auth, _    = Pubkey.find_program_address(
+                [b"__event_authority"], PUMP_PROG)
+
+            def _ata(owner: Pubkey, mint_pk: Pubkey) -> Pubkey:
+                return Pubkey.find_program_address(
+                    [bytes(owner), bytes(TOKEN_PROG), bytes(mint_pk)], ATA_PROG)[0]
+
+            bc_ata   = _ata(bc_pda, mint)
+            user_ata = _ata(user, mint)
+
+            # ── Fetch on-chain accounts via Helius RPC ─────────────────────────
+            def _get_account_data(address: str) -> Optional[bytes]:
+                r = requests.post(config.SOLANA_RPC_URL, json={
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "getAccountInfo",
+                    "params": [address, {"encoding": "base64", "commitment": "confirmed"}],
+                }, timeout=10)
+                if not r.ok:
+                    return None
+                val = r.json().get("result", {}).get("value")
+                if not val:
+                    return None
+                return base64.b64decode(val["data"][0])
+
+            # Read fee_recipient from global state (offset 41, 32 bytes)
+            gdata = _get_account_data(str(global_pda))
+            if not gdata or len(gdata) < 73:
+                logger.warning("Pump.fun direct: global account fetch failed")
+                return None, 0, 0.0
+            fee_recipient = Pubkey.from_bytes(gdata[41:73])
+
+            # Read bonding curve reserves
+            bcdata = _get_account_data(str(bc_pda))
+            if not bcdata or len(bcdata) < 49:
+                logger.warning("Pump.fun direct: bonding curve not found for %s",
+                               output_mint[:12])
+                return None, 0, 0.0
+            vtr, vsr = struct.unpack_from("<QQ", bcdata, 8)   # virtualTokenReserves, virtualSolReserves
+            complete = bcdata[48] != 0
+            if complete:
+                logger.info("Pump.fun direct: %s bonding curve complete (graduated)",
+                            output_mint[:12])
+                return None, 0, 0.0
+            if vsr == 0:
+                return None, 0, 0.0
+
+            # ── AMM formula: tokens out ────────────────────────────────────────
+            token_amount = (vtr * amount_lamports) // (vsr + amount_lamports)
+            if token_amount <= 0:
+                logger.warning("Pump.fun direct: zero token calc for %s", output_mint[:12])
+                return None, 0, 0.0
+            max_sol_cost = int(amount_lamports * (1 + slippage_bps / 10000))
+
+            # ── Instructions ───────────────────────────────────────────────────
+            # 1. Create user ATA idempotently (no-op if already exists)
+            create_ata_ix = Instruction(
+                program_id=ATA_PROG,
+                accounts=[
+                    AccountMeta(pubkey=user,     is_signer=True,  is_writable=True),
+                    AccountMeta(pubkey=user_ata, is_signer=False, is_writable=True),
+                    AccountMeta(pubkey=user,     is_signer=False, is_writable=False),
+                    AccountMeta(pubkey=mint,     is_signer=False, is_writable=False),
+                    AccountMeta(pubkey=SYS_PROG, is_signer=False, is_writable=False),
+                    AccountMeta(pubkey=TOKEN_PROG, is_signer=False, is_writable=False),
+                ],
+                data=bytes([1]),   # discriminator 1 = CreateIdempotent
+            )
+
+            # 2. Pump.fun buy instruction
+            buy_data = _PUMP_BUY_DISC + struct.pack("<QQ", token_amount, max_sol_cost)
+            buy_ix = Instruction(
+                program_id=PUMP_PROG,
+                accounts=[
+                    AccountMeta(pubkey=global_pda,   is_signer=False, is_writable=False),
+                    AccountMeta(pubkey=fee_recipient, is_signer=False, is_writable=True),
+                    AccountMeta(pubkey=mint,          is_signer=False, is_writable=False),
+                    AccountMeta(pubkey=bc_pda,        is_signer=False, is_writable=True),
+                    AccountMeta(pubkey=bc_ata,        is_signer=False, is_writable=True),
+                    AccountMeta(pubkey=user_ata,      is_signer=False, is_writable=True),
+                    AccountMeta(pubkey=user,          is_signer=True,  is_writable=True),
+                    AccountMeta(pubkey=SYS_PROG,      is_signer=False, is_writable=False),
+                    AccountMeta(pubkey=TOKEN_PROG,    is_signer=False, is_writable=False),
+                    AccountMeta(pubkey=RENT_SYS,      is_signer=False, is_writable=False),
+                    AccountMeta(pubkey=ev_auth,       is_signer=False, is_writable=False),
+                    AccountMeta(pubkey=PUMP_PROG,     is_signer=False, is_writable=False),
+                ],
+                data=buy_data,
+            )
+
+            # ── Build + sign VersionedTransaction ─────────────────────────────
+            bh = self._client.get_latest_blockhash().value.blockhash
+            msg = MessageV0.try_compile(
+                payer=user,
+                instructions=[create_ata_ix, buy_ix],
+                address_lookup_table_accounts=[],
+                recent_blockhash=bh,
+            )
+            tx = VersionedTransaction(msg, [self._keypair])
+            tx_b64 = base64.b64encode(bytes(tx)).decode()
+            logger.info("Pump.fun direct tx built: %.6f SOL → %d tokens (%s)",
+                        amount_lamports / 1e9, token_amount, output_mint[:12])
+            return tx_b64, token_amount, 0.0
+
+        except Exception as e:
+            logger.warning("Pump.fun direct exception: %s", e)
             return None, 0, 0.0
 
     def _quote_and_build_pumpfun(self, output_mint: str, amount_lamports: int,
