@@ -738,7 +738,7 @@ class AITrader:
                 tok, sz, sfty = args
 
                 # Holder count hard block — use data already fetched by safety checker
-                if sfty and sfty.holder_count and 0 < sfty.holder_count < 20:
+                if sfty and getattr(sfty, "holder_count", None) and 0 < sfty.holder_count < 20:
                     logger.warning("SKIP %s: only %d holders (rug risk)",
                                    tok.base_symbol, sfty.holder_count)
                     return None
