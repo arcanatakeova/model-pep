@@ -285,8 +285,8 @@ class RiskManager:
         # 5. Caps
         size = min(size, config.DEX_MAX_POSITION_USD)
         size = min(size, liquidity_usd * config.MIN_LIQUIDITY_RATIO)
-        # Cash cap: use up to 99% of available cash — wallet is the only real limit
-        size = min(size, self.portfolio.cash * 0.99)
+        # Cash cap: use up to 90% of available cash — leave room for tx fees
+        size = min(size, self.portfolio.cash * 0.90)
 
         if size < config.DEX_MIN_POSITION_USD:
             return 0.0

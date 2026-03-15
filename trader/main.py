@@ -212,20 +212,18 @@ class AITrader:
                 "reset_paper": False,
             })
 
-        # Sync capital with Phantom wallet whenever this is a fresh live start
-        # (no prior live trades.json) OR we just wiped paper data above.
-        _fresh_live = live and (not os.path.exists(config.TRADE_LOG_FILE) or _is_paper_data)
-        if self.solana.is_connected and _fresh_live:
+        # Always sync cash + initial_capital with the real Phantom wallet on every startup.
+        # This ensures position sizing and drawdown calculations reflect the true balance,
+        # not a stale saved value or the $100k config default.
+        if self.solana.is_connected and live:
             try:
                 sol_bal = self.solana.get_sol_balance()
                 sol_usd = self.solana.get_portfolio_value_usd()
                 if sol_usd > 0.50:
                     self.portfolio.cash            = sol_usd
                     self.portfolio.initial_capital  = sol_usd
-                    self.portfolio.peak_equity      = sol_usd
+                    self.portfolio.peak_equity      = max(self.portfolio.peak_equity, sol_usd)
                     self._day_start_eq              = sol_usd
-                    # Reset daily loss tracker AFTER wallet sync so the baseline
-                    # is the real SOL balance — not the fake $100k config default.
                     self.risk_mgr.reset_daily_loss_tracker()
                     logger.info("Phantom wallet synced: SOL=%.4f ($%.2f)", sol_bal, sol_usd)
             except Exception as e:
@@ -801,7 +799,7 @@ class AITrader:
                 _sol, _usdc, _sol_usd, _cache_ts = self._wallet_balance_cache
                 # Use cached value if fresh (<10s), else fall back to portfolio.cash
                 sol_bal_usd = _sol_usd if (time.time() - _cache_ts) < 10 else self.portfolio.cash
-                if sol_bal_usd < size_usd * 1.05:   # Need trade size + ~5% for fees
+                if sol_bal_usd < size_usd + 1.0:   # Need trade size + $1 flat for Solana fees
                     logger.warning("SOL balance $%.2f insufficient for $%.2f trade — skipping",
                                    sol_bal_usd, size_usd)
                     return
