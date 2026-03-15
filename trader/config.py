@@ -162,7 +162,7 @@ MAX_TOP10_HOLDER_PCT = 0.85        # Penalize if top 10 holders own > 85% (loose
 
 # ─── Volatility-Adjusted Position Sizing ────────────────────────────────────
 DEX_BASE_POSITION_USD = 100.0      # Base position for memecoin trades (raised from $75)
-DEX_MIN_POSITION_USD = 2.0         # Minimum position size (covers Solana fees ~$0.50)
+DEX_MIN_POSITION_USD = 1.0         # Minimum position size (covers Solana fees ~$0.50)
 POSITION_VOL_SCALAR = 1.0          # Multiplier for vol-adjusted sizing
 MAX_MEMECOIN_ALLOCATION_PCT = 0.65 # Max 65% of equity in memecoins (raised from 50%)
 

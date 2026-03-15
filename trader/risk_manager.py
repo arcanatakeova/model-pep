@@ -286,13 +286,9 @@ class RiskManager:
 
         # 5. Caps
         size = min(size, config.DEX_MAX_POSITION_USD)
-        # Equity cap: scale up for small wallets so DEX_MIN_POSITION_USD is always achievable.
-        _min_pct = (config.DEX_MIN_POSITION_USD / equity) * 1.5 if equity > 0 else 0.30
-        _equity_cap_pct = max(config.MAX_POSITION_PCT, min(_min_pct, 0.30))
-        size = min(size, equity * _equity_cap_pct)
         size = min(size, liquidity_usd * config.MIN_LIQUIDITY_RATIO)
-        # Cash cap: allow up to 35% per trade (up from 25%) for high-conviction entries
-        size = min(size, self.portfolio.cash * 0.35)
+        # Cash cap: use up to 99% of available cash — wallet is the only real limit
+        size = min(size, self.portfolio.cash * 0.99)
 
         if size < config.DEX_MIN_POSITION_USD:
             return 0.0
