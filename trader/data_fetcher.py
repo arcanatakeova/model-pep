@@ -22,9 +22,14 @@ from typing import Optional
 import websocket  # websocket-client package
 
 import requests
+from requests.adapters import HTTPAdapter as _HTTPAdapter
 import pandas as pd
 
 import config
+
+_session = requests.Session()
+_session.mount("https://", _HTTPAdapter(pool_connections=20, pool_maxsize=50))
+_session.mount("http://",  _HTTPAdapter(pool_connections=20, pool_maxsize=50))
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +86,7 @@ def _get(url: str, params: dict = None, timeout: int = 10) -> Optional[dict]:
             headers = {"Accept": "application/json", "User-Agent": "ai-trader/3.0"}
             if config.COINGECKO_API_KEY and "coingecko" in url:
                 headers["x-cg-demo-api-key"] = config.COINGECKO_API_KEY
-            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+            resp = _session.get(url, params=params, headers=headers, timeout=timeout)
             if resp.status_code == 429:
                 wait = 2 + attempt * 2
                 logger.debug("Rate limited by %s, waiting %ds", url, wait)
@@ -600,7 +605,7 @@ def get_forex_ohlcv_stooq(pair: str) -> pd.DataFrame:
 
     try:
         url = f"https://stooq.com/q/d/l/?s={code}&i=d"
-        resp = requests.get(url, timeout=8, headers={"User-Agent": "ai-trader/3.0"})
+        resp = _session.get(url, timeout=8, headers={"User-Agent": "ai-trader/3.0"})
         if not resp.ok or "No data" in resp.text:
             return _store(key, pd.DataFrame())
 
@@ -832,7 +837,7 @@ def get_finnhub_quote(symbol: str) -> Optional[float]:
     if cached is not None:
         return cached
     try:
-        resp = requests.get(
+        resp = _session.get(
             f"{_FINNHUB_BASE}/quote",
             params={"symbol": symbol, "token": config.FINNHUB_KEY},
             timeout=5,
@@ -871,7 +876,7 @@ def get_finnhub_ohlcv(symbol: str, resolution: str = "60",
     t_to   = int(_time.time())
     t_from = t_to - days * 86400
     try:
-        resp = requests.get(
+        resp = _session.get(
             f"{_FINNHUB_BASE}/stock/candle",
             params={
                 "symbol": symbol, "resolution": resolution,
@@ -918,7 +923,7 @@ def get_finnhub_crypto_candles(symbol: str, exchange: str = "BINANCE",
     t_to   = int(_time.time())
     t_from = t_to - days * 86400
     try:
-        resp = requests.get(
+        resp = _session.get(
             f"{_FINNHUB_BASE}/crypto/candle",
             params={
                 "symbol": full_sym, "resolution": resolution,

@@ -20,11 +20,16 @@ import logging
 import time
 import concurrent.futures
 import requests
+from requests.adapters import HTTPAdapter as _HTTPAdapter
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional
 
 import config
+
+_session = requests.Session()
+_session.mount("https://", _HTTPAdapter(pool_connections=20, pool_maxsize=50))
+_session.mount("http://",  _HTTPAdapter(pool_connections=20, pool_maxsize=50))
 from token_safety import TokenSafetyChecker
 
 # Birdeye client — lazy-loaded only if API key is set
@@ -1342,7 +1347,7 @@ class DexScreener:
 
         for attempt in range(3):
             try:
-                resp = requests.get(url, params=params, timeout=timeout,
+                resp = _session.get(url, params=params, timeout=timeout,
                                     headers={"User-Agent": "ai-trader/2.0"})
                 if resp.status_code == 429:
                     time.sleep(2 ** attempt * 2)
