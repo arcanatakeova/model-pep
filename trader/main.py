@@ -744,6 +744,52 @@ class AITrader:
                         # Use Jupiter price (more accurate at time of trade)
                         token.price_usd = jup_price
 
+                # ── Birdeye pre-trade deep validation ────────────────────────────
+                # Only called here (once per actual trade attempt) — not in bulk scan.
+                # 2 CU: get_token_overview + get_ohlcv for the specific token we're buying.
+                if token.chain_id == "solana" and config.BIRDEYE_API_KEY:
+                    from dex_screener import _get_birdeye as _dex_be
+                    _be = _dex_be()
+                    if _be:
+                        # 1. Holder count — very few holders = concentrated rug
+                        try:
+                            overview = _be.get_token_overview(token.base_address)
+                            if overview:
+                                h_count = int(overview.get("holder", 0) or 0)
+                                uw_24h  = int(overview.get("uniqueWallet24h", 0) or 0)
+                                token.holder_count      = h_count
+                                token.unique_wallets_24h = uw_24h
+                                if 0 < h_count < 50:
+                                    logger.warning(
+                                        "SKIP %s: only %d unique holders (rug risk)",
+                                        token.base_symbol, h_count)
+                                    continue
+                        except Exception as e:
+                            logger.debug("Token overview error %s: %s", token.base_symbol, e)
+
+                        # 2. OHLCV momentum confirmation: need a sustained move, not a wick
+                        # Fetch 6 × 5m candles and require ≥2/3 most recent are bullish.
+                        # Also skip if current price has already reversed >20% from session high.
+                        try:
+                            candles = _be.get_ohlcv(token.base_address, interval="5m", limit=6)
+                            if candles and len(candles) >= 3:
+                                recent = candles[-3:]
+                                bullish = sum(1 for c in recent if c.close >= c.open)
+                                if bullish < 2:
+                                    logger.info(
+                                        "SKIP %s: OHLCV weak momentum (%d/3 candles bullish)",
+                                        token.base_symbol, bullish)
+                                    continue
+                                session_high = max(c.high for c in recent if c.high > 0)
+                                if session_high > 0 and token.price_usd < session_high * 0.80:
+                                    logger.info(
+                                        "SKIP %s: price %.0f%% below recent high (reversal)",
+                                        token.base_symbol,
+                                        (1 - token.price_usd / session_high) * 100)
+                                    continue
+                        except Exception as e:
+                            logger.debug("OHLCV check error %s: %s", token.base_symbol, e)
+
                 self._open_dex_position(token, size_usd, safety)
                 held_symbols.add(token.base_symbol.upper())
                 held_addrs.add(token.pair_address)
@@ -836,11 +882,26 @@ class AITrader:
                     pair_address=token.pair_address if token.dex_id == "pumpswap" else None)
                 if tx and not tx.startswith("paper_"):
                     pos_data["tx"] = tx
+                    # Refresh entry price from Birdeye immediately after buy confirms.
+                    # Pre-trade price (Jupiter/DexScreener) can be seconds stale by execution.
+                    # Using the real post-tx price gives accurate PnL tracking.
+                    if config.BIRDEYE_API_KEY:
+                        try:
+                            from dex_screener import _get_birdeye as _dex_be
+                            _be = _dex_be()
+                            if _be:
+                                bp = _be.get_price(token.base_address)
+                                if bp and bp.price_usd > 0:
+                                    pos_data["entry_price"]   = bp.price_usd
+                                    pos_data["current_price"] = bp.price_usd
+                                    pos_data["peak_price"]    = bp.price_usd
+                        except Exception:
+                            pass  # Keep original price on failure
                     self._dex_positions[token.pair_address] = pos_data
                     self.portfolio.cash -= size_usd
                     risk_str = safety.risk_level if safety else "?"
                     logger.info("DEX BUY %s $%.2f @ $%.8f score=%.2f safety=%s | tx=%s",
-                                token.base_symbol, size_usd, token.price_usd,
+                                token.base_symbol, size_usd, pos_data["entry_price"],
                                 token.score, risk_str, tx[:16])
             else:
                 pos_data["tx"] = f"paper_{int(time.time())}"

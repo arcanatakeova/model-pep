@@ -93,6 +93,8 @@ class DexToken:
     buys_m5: int = 0
     sells_m5: int = 0
     source: str = "dexscreener"     # Where this token was discovered
+    holder_count: int = 0           # Unique holders (from Birdeye token_overview)
+    unique_wallets_24h: int = 0     # Unique trading wallets last 24h (Birdeye)
 
     @property
     def buy_sell_ratio_h1(self) -> float:
@@ -200,6 +202,27 @@ class DexScreener:
                 seen.add(t.pair_address)
                 unique.append(t)
 
+        # ── Batch price refresh via Birdeye (1 CU total for all tokens) ──────────
+        # DexScreener data can be up to 25s stale. Birdeye has 3s cache.
+        # Replace price, market_cap, and liquidity for all Solana candidates at once.
+        be = _get_birdeye()
+        if be:
+            sol_mints = [t.base_address for t in unique
+                         if t.chain_id == "solana" and t.base_address]
+            if sol_mints:
+                try:
+                    fresh_prices = be.get_multi_price(sol_mints)
+                    for t in unique:
+                        bp = fresh_prices.get(t.base_address)
+                        if bp and bp.price_usd > 0:
+                            t.price_usd = bp.price_usd
+                            if bp.market_cap > 0:
+                                t.market_cap = bp.market_cap
+                            if bp.liquidity_usd > 0:
+                                t.liquidity_usd = bp.liquidity_usd
+                except Exception as e:
+                    logger.debug("Batch price refresh error: %s", e)
+
         # Concurrent safety checks for Solana tokens above pre-score threshold
         # (pre-score without safety to decide which ones are worth checking)
         pre_scored = []
@@ -259,6 +282,25 @@ class DexScreener:
                 seen.add(t.pair_address)
                 unique.append(t)
 
+        # ── Batch Birdeye price refresh for new pairs ─────────────────────────────
+        be = _get_birdeye()
+        if be:
+            sol_mints = [t.base_address for t in unique
+                         if t.chain_id == "solana" and t.base_address]
+            if sol_mints:
+                try:
+                    fresh_prices = be.get_multi_price(sol_mints)
+                    for t in unique:
+                        bp = fresh_prices.get(t.base_address)
+                        if bp and bp.price_usd > 0:
+                            t.price_usd = bp.price_usd
+                            if bp.market_cap > 0:
+                                t.market_cap = bp.market_cap
+                            if bp.liquidity_usd > 0:
+                                t.liquidity_usd = bp.liquidity_usd
+                except Exception as e:
+                    logger.debug("New pairs batch price refresh error: %s", e)
+
         # Safety checks for new pairs (most likely to be rugs — always check)
         self._run_concurrent_safety_checks(unique)
 
@@ -317,6 +359,8 @@ class DexScreener:
                         token.volume_h24   = bp.volume_24h_usd
                     if bp.liquidity_usd > 0:
                         token.liquidity_usd = bp.liquidity_usd
+                    if bp.market_cap > 0:
+                        token.market_cap   = bp.market_cap  # Birdeye mcap > DexScreener FDV
             except Exception:
                 pass
 
@@ -517,6 +561,28 @@ class DexScreener:
                 score += 0.03
             elif age > 168:
                 score -= 0.03
+
+        # ── Holder concentration guard (Birdeye token_overview data) ─────
+        # Very few unique holders = concentrated ownership = rug risk regardless
+        # of how strong the price momentum looks.
+        if token.holder_count > 0:
+            if token.holder_count < 50:
+                token.score = 0.0
+                token.signals = [f"BLOCKED: only {token.holder_count} holders (rug risk)"]
+                return 0.0
+            elif token.holder_count < 200:
+                score -= 0.10
+                signals.append(f"Few holders ({token.holder_count})")
+            elif token.holder_count > 2000:
+                score += 0.03
+                signals.append(f"Good distribution ({token.holder_count} holders)")
+
+        # ── Unique wallets (trading breadth) ──────────────────────────────
+        # Many unique wallets trading in 24h = organic interest, not 1 whale pumping
+        if token.unique_wallets_24h > 500:
+            score += 0.03
+        elif token.unique_wallets_24h > 0 and token.unique_wallets_24h < 20:
+            score -= 0.05   # Thin trading = manipulation risk
 
         # ── Source bonus ──────────────────────────────────────────────────
         # Pump.fun tokens discovered on the live feed get a freshness bonus
