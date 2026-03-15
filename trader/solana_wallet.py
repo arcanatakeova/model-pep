@@ -949,13 +949,13 @@ class SolanaWallet:
 
             user_base_ata = _ata(user, base_mint_pk, base_token_prog)
             user_wsol_ata = _ata(user, WSOL_MINT)
-            # Creator wallet from pool data (offset 11:43 = pool-level creator field)
-            # and coin_creator = bonding-curve creator stored at pool_data[211:243]
-            creator_wallet   = Pubkey.from_bytes(pool_data[11:43])
+            # coin_creator = bonding-curve creator at pool_data[211:243] = bc[49:81]
+            # [18] creator_wallet = pAMM_PDA(b"creator_vault", coin_creator)
+            # Confirmed by ref_tx for pool 9XTex3LaPS: [18]=7eni3x = pAMM_PDA(creator_vault, bc)
+            coin_creator     = Pubkey.from_bytes(pool_data[211:243]) if len(pool_data) >= 243 else Pubkey.from_bytes(pool_data[11:43])
+            creator_wallet, _ = Pubkey.find_program_address(
+                [b"creator_vault", bytes(coin_creator)], PUMPSWAP)
             creator_wsol_ata = _ata(creator_wallet, WSOL_MINT)
-            # coin_creator (original pump.fun bonding-curve creator) = pool_data[211:243]
-            # Used for [23] derivation via the pfee program PDA
-            coin_creator     = Pubkey.from_bytes(pool_data[211:243]) if len(pool_data) >= 243 else creator_wallet
 
             # Volume accumulator PDAs (PumpSwap Anchor program)
             _pool_pk = Pubkey.from_string(pool_address)
@@ -975,11 +975,11 @@ class SolanaWallet:
             _SPL_TOKEN_PROG   = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
             _CONST_21         = "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"
             _CONST_22         = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
-            # [23] is a per-pool pfee-program PDA: seeds = ["coin_creator_vault", coin_creator]
-            # coin_creator = pool_data[211:243] = bonding-curve bc[49:81]
-            _PFEE_PROG        = Pubkey.from_string(_CONST_22)
+            # [23] coin_creator_vault_authority = pAMM PDA seeds=["creator_vault", bc_creator]
+            # bc_creator = pool_data[211:243] = bonding-curve creator field at bc[49:81]
+            # Verified: pAMM_PDA(b'creator_vault', bc_creator) matches Anchor Right for 2+ pools
             _coin_creator_vault_23, _ = Pubkey.find_program_address(
-                [b"coin_creator_vault", bytes(coin_creator)], _PFEE_PROG)
+                [b"creator_vault", bytes(coin_creator)], PUMPSWAP)
             # Default fee recipient: any entry from global_config's valid fee-recipient list.
             # The pAMM program checks [9] is in the global_config list — use a known-valid one.
             # [10] = WSOL ATA of the fee recipient (SPL Token program).
@@ -1060,13 +1060,13 @@ class SolanaWallet:
             # [14] R  ATA program (constant)
             # [15] R  EventAuthority (constant)
             # [16] R  PumpSwap program (constant)
-            # [17] W  creator_wsol_ata  (ATA(creator_wallet, WSOL))
-            # [18] R  creator_wallet    (pool_data[11:43])
+            # [17] W  creator_wsol_ata  (ATA(pAMM_PDA(creator_vault, bc_creator), WSOL))
+            # [18] W  creator_wallet    pAMM_PDA(b"creator_vault", bc_creator)
             # [19] W  global_volume_accumulator  PDA(pAMM, ["global_volume_accumulator"])
             # [20] W  user_volume_accumulator   PDA(pAMM, ["user_volume_accumulator", user])
             # [21] R  pfee state account (constant)
             # [22] R  pfee program (constant)
-            # [23] W  coin_creator_vault PDA(pfee, ["coin_creator_vault", coin_creator])
+            # [23] W  coin_creator_vault_authority PDA(pAMM, ["creator_vault", bc_creator])
             if not ref_accs:
                 logger.info("PumpSwap: no ref tx for pool %s — deriving accounts",
                             pool_address[:16])
@@ -1089,12 +1089,12 @@ class SolanaWallet:
                     _EVENT_AUTH,                         # [15]
                     str(PUMPSWAP),                       # [16]
                     str(creator_wsol_ata),               # [17] ATA(creator_wallet, WSOL)
-                    str(creator_wallet),                 # [18] pool_data[11:43]
+                    str(creator_wallet),                 # [18] pAMM PDA(creator_vault, bc_creator)
                     str(global_volume_acc),              # [19] global_volume_accumulator PDA
                     str(user_volume_acc),                # [20] user_volume_accumulator PDA
                     _CONST_21,                           # [21] pfee state account
                     _CONST_22,                           # [22] pfee program
-                    str(_coin_creator_vault_23),         # [23] pfee PDA(coin_creator_vault, coin_creator)
+                    str(_coin_creator_vault_23),         # [23] pAMM PDA(creator_vault, bc_creator)
                 ]
 
             # Writable / signer flags for each of the 24 accounts
@@ -1117,7 +1117,7 @@ class SolanaWallet:
                 (False, False),  # [15] EventAuth    R
                 (False, False),  # [16] PUMPSWAP     R
                 (True,  False),  # [17] creator_wsol W
-                (False, False),  # [18] creator      R
+                (True,  False),  # [18] creator_vault W (same PDA as [23])
                 (True,  False),  # [19] global_vol_acc  W (init_if_needed)
                 (True,  False),  # [20] user_vol_acc   W (init_if_needed)
                 (False, False),  # [21] pfee state     R
