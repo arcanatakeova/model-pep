@@ -928,7 +928,26 @@ class SolanaWallet:
                     return None, 0, 0.0
 
             # ── Step 5: derive user ATAs and pool authority ───────────────────
-            user_base_ata = _ata(user, base_mint_pk)
+            # Detect whether base mint uses SPL Token or Token-2022 by reading
+            # its account owner field (determines correct ATA derivation + create ix)
+            _TOKEN22_PROG_STR = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+            try:
+                _mint_info_r = requests.post(config.SOLANA_RPC_URL, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+                    "params": [pump_mint, {"encoding": "base64", "commitment": "confirmed"}],
+                }, timeout=8)
+                _mint_owner = (_mint_info_r.json()
+                               .get("result", {}).get("value", {})
+                               .get("owner", ""))
+            except Exception:
+                _mint_owner = ""
+            if _mint_owner == _TOKEN22_PROG_STR:
+                base_token_prog = Pubkey.from_string(_TOKEN22_PROG_STR)
+                logger.debug("PumpSwap: base mint %s is Token-2022", pump_mint[:12])
+            else:
+                base_token_prog = TOKEN_PROG
+
+            user_base_ata = _ata(user, base_mint_pk, base_token_prog)
             user_wsol_ata = _ata(user, WSOL_MINT)
             # Pool authority = owner of the vault (SPL token account offset 32)
             pool_authority = Pubkey.from_bytes(base_data[32:64])
@@ -1033,8 +1052,8 @@ class SolanaWallet:
                     str(pool_quote_ta),      # [8]
                     str(user),               # [9] self-referral
                     str(user_wsol_ata),      # [10] referral_wsol = user_wsol
-                    _TOKEN22_PROG,           # [11]
-                    _TOKEN_PROG,             # [12]
+                    _TOKEN22_PROG_STR,       # [11]
+                    str(base_token_prog),    # [12] SPL Token or Token-2022 per mint
                     _SYSTEM_PROG,            # [13]
                     _ATA_PROG,               # [14]
                     _EVENT_AUTH,             # [15]
@@ -1115,12 +1134,12 @@ class SolanaWallet:
                 create_base_ix = Instruction(
                     program_id=ATA_PROG,
                     accounts=[
-                        AccountMeta(user,          True,  True),
-                        AccountMeta(user_base_ata, False, True),
-                        AccountMeta(user,          False, False),
-                        AccountMeta(base_mint_pk,  False, False),
-                        AccountMeta(SYS_PROG,      False, False),
-                        AccountMeta(TOKEN_PROG,    False, False),
+                        AccountMeta(user,             True,  True),
+                        AccountMeta(user_base_ata,    False, True),
+                        AccountMeta(user,             False, False),
+                        AccountMeta(base_mint_pk,     False, False),
+                        AccountMeta(SYS_PROG,         False, False),
+                        AccountMeta(base_token_prog,  False, False),
                     ],
                     data=bytes([1]),
                 )
