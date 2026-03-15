@@ -368,11 +368,7 @@ class RiskManager:
             p.get("size_usd", 0) * p.get("remaining_fraction", 1.0)
             for p in dex_positions.values()
         )
-        # Real equity = cash + DEX position values (portfolio.equity() only sees cash)
-        real_equity = self.portfolio.cash + total_dex_usd
-        max_dex_total = real_equity * config.MAX_MEMECOIN_ALLOCATION_PCT
-        if total_dex_usd >= max_dex_total:
-            return False, f"Memecoin allocation cap (${total_dex_usd:.0f} >= ${max_dex_total:.0f})"
+        # No memecoin allocation cap — 100% of capital can be deployed in DEX positions
 
         if token_dex_id:
             same_dex = sum(1 for p in dex_positions.values()
