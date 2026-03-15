@@ -7,6 +7,7 @@ Sources:
   - CryptoCompare   : crypto historical OHLCV (free, no key)
   - ExchangeRate API: forex rates (free, no key)
   - Yahoo Finance   : stocks & ETFs via yfinance (unofficial, no key)
+  - Finnhub         : real-time stock quotes + OHLCV (FINNHUB_KEY required)
   - Binance WS      : real-time tick prices <50ms latency (free, no key)
   - Binance REST    : funding rates, order book (free, requires API key for trading)
 """
@@ -735,11 +736,25 @@ def get_forex_ohlcv(pair: str, limit: int = 200) -> pd.DataFrame:
 
 def get_stock_ohlcv(symbol: str, period: str = "60d", interval: str = "1h") -> pd.DataFrame:
     """
-    Fetch stock/ETF OHLCV using yfinance (unofficial Yahoo Finance).
-    Falls back gracefully if yfinance is not installed.
+    Fetch stock/ETF OHLCV. Prefers Finnhub (official, keyed) over yfinance (unofficial).
     Returns empty DataFrame on weekends / outside market hours so signals
     don't trade on stale Friday-close data.
     """
+    # Try Finnhub first if key is available
+    if config.FINNHUB_KEY:
+        # Map yfinance interval → Finnhub resolution
+        _res_map = {"1m": "1", "5m": "5", "15m": "15", "30m": "30",
+                    "1h": "60", "1d": "D", "1wk": "W", "1mo": "M"}
+        fh_res = _res_map.get(interval, "60")
+        try:
+            import re
+            days_match = re.match(r"(\d+)d", period)
+            fh_days = int(days_match.group(1)) if days_match else 60
+        except Exception:
+            fh_days = 60
+        df = get_finnhub_ohlcv(symbol, resolution=fh_res, days=fh_days)
+        if not df.empty:
+            return df
     # US equity markets are closed on weekends — return nothing to prevent
     # the bot from acting on 2-day-old OHLCV as if it were live data.
     now_utc = datetime.now(timezone.utc)
@@ -789,11 +804,145 @@ def get_stock_ohlcv(symbol: str, period: str = "60d", interval: str = "1h") -> p
 
 
 def get_stock_price(symbol: str) -> Optional[float]:
-    """Get latest price for a stock/ETF."""
+    """Get latest price for a stock/ETF. Prefers Finnhub (real-time) over yfinance."""
+    price = get_finnhub_quote(symbol)
+    if price is not None and price > 0:
+        return price
     df = get_stock_ohlcv(symbol, period="5d", interval="1h")
     if not df.empty:
         return float(df["close"].iloc[-1])
     return None
+
+
+# ─── Finnhub (Real-time stocks, forex, crypto) ───────────────────────────────
+
+_FINNHUB_BASE = "https://finnhub.io/api/v1"
+
+
+def get_finnhub_quote(symbol: str) -> Optional[float]:
+    """
+    Real-time stock/ETF quote from Finnhub.
+    Returns current price or None on error / missing key.
+    Cache: 15s (near-live for intraday trading).
+    """
+    if not config.FINNHUB_KEY:
+        return None
+    key = f"fh_quote_{symbol}"
+    cached = _cached(key, ttl=15)
+    if cached is not None:
+        return cached
+    try:
+        resp = requests.get(
+            f"{_FINNHUB_BASE}/quote",
+            params={"symbol": symbol, "token": config.FINNHUB_KEY},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        price = float(data.get("c", 0) or 0)   # 'c' = current price
+        if price > 0:
+            return _store(key, price)
+    except Exception as e:
+        logger.debug("Finnhub quote error for %s: %s", symbol, e)
+    return None
+
+
+def get_finnhub_ohlcv(symbol: str, resolution: str = "60",
+                       days: int = 60) -> pd.DataFrame:
+    """
+    Stock/ETF OHLCV candles from Finnhub.
+    resolution: '1','5','15','30','60','D','W','M'
+    Returns same schema as get_stock_ohlcv (timestamp, open, high, low, close, volume).
+    Cache: 5 minutes.
+    """
+    if not config.FINNHUB_KEY:
+        return pd.DataFrame()
+    key = f"fh_ohlcv_{symbol}_{resolution}_{days}"
+    cached = _cached(key, ttl=300)
+    if cached is not None:
+        return cached
+
+    now_utc = datetime.now(timezone.utc)
+    weekday = now_utc.weekday()
+    if weekday >= 5:   # Weekend — stock markets closed
+        return _store(key, pd.DataFrame())
+
+    import time as _time
+    t_to   = int(_time.time())
+    t_from = t_to - days * 86400
+    try:
+        resp = requests.get(
+            f"{_FINNHUB_BASE}/stock/candle",
+            params={
+                "symbol": symbol, "resolution": resolution,
+                "from": t_from, "to": t_to,
+                "token": config.FINNHUB_KEY,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("s") != "ok" or not data.get("t"):
+            return _store(key, pd.DataFrame())
+        df = pd.DataFrame({
+            "timestamp": pd.to_datetime(data["t"], unit="s", utc=True),
+            "open":   data["o"],
+            "high":   data["h"],
+            "low":    data["l"],
+            "close":  data["c"],
+            "volume": data["v"],
+        })
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return _store(key, df)
+    except Exception as e:
+        logger.debug("Finnhub OHLCV error for %s: %s", symbol, e)
+    return _store(key, pd.DataFrame())
+
+
+def get_finnhub_crypto_candles(symbol: str, exchange: str = "BINANCE",
+                                resolution: str = "60", days: int = 30) -> pd.DataFrame:
+    """
+    Crypto OHLCV from Finnhub (e.g. BINANCE:BTCUSDT).
+    Falls back if Finnhub key missing.
+    """
+    if not config.FINNHUB_KEY:
+        return pd.DataFrame()
+    full_sym = f"{exchange}:{symbol}" if ":" not in symbol else symbol
+    key = f"fh_crypto_{full_sym}_{resolution}_{days}"
+    cached = _cached(key, ttl=60)
+    if cached is not None:
+        return cached
+
+    import time as _time
+    t_to   = int(_time.time())
+    t_from = t_to - days * 86400
+    try:
+        resp = requests.get(
+            f"{_FINNHUB_BASE}/crypto/candle",
+            params={
+                "symbol": full_sym, "resolution": resolution,
+                "from": t_from, "to": t_to,
+                "token": config.FINNHUB_KEY,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("s") != "ok" or not data.get("t"):
+            return _store(key, pd.DataFrame())
+        df = pd.DataFrame({
+            "timestamp": pd.to_datetime(data["t"], unit="s", utc=True),
+            "open":   data["o"],
+            "high":   data["h"],
+            "low":    data["l"],
+            "close":  data["c"],
+            "volume": data["v"],
+        })
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return _store(key, df)
+    except Exception as e:
+        logger.debug("Finnhub crypto candle error for %s: %s", full_sym, e)
+    return _store(key, pd.DataFrame())
 
 
 # ─── Messari (Crypto Fundamentals) ───────────────────────────────────────────

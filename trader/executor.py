@@ -359,18 +359,28 @@ class TradeExecutor:
         return None
 
     def _init_live_exchange(self):
-        """Initialize ccxt exchange for live spot trading (Binance)."""
-        if not config.BINANCE_API_KEY:
-            logger.debug("Live trading enabled but no BINANCE_API_KEY set — staying in paper mode")
-            return
+        """Initialize ccxt exchange for live spot trading (Binance or Coinbase)."""
         try:
             import ccxt
-            self._exchange = ccxt.binance({
-                "apiKey": config.BINANCE_API_KEY,
-                "secret": config.BINANCE_SECRET,
-                "enableRateLimit": True,
-            })
-            logger.info("Live spot trading initialized: Binance")
+            if config.BINANCE_API_KEY:
+                self._exchange = ccxt.binance({
+                    "apiKey": config.BINANCE_API_KEY,
+                    "secret": config.BINANCE_SECRET,
+                    "enableRateLimit": True,
+                })
+                logger.info("Live spot trading initialized: Binance")
+            elif config.COINBASE_KEY_NAME or config.COINBASE_API_KEY:
+                # Coinbase Advanced Trade (CDP): key name + EC private key
+                cb_key    = config.COINBASE_KEY_NAME or config.COINBASE_API_KEY
+                cb_secret = config.COINBASE_SECRET
+                self._exchange = ccxt.coinbase({
+                    "apiKey": cb_key,
+                    "secret": cb_secret,
+                    "enableRateLimit": True,
+                })
+                logger.info("Live spot trading initialized: Coinbase Advanced Trade")
+            else:
+                logger.debug("No exchange API keys set — CEX in paper mode")
         except ImportError:
             logger.error("ccxt not installed. Run: pip install ccxt")
         except Exception as e:

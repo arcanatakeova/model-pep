@@ -117,8 +117,11 @@ BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "")
 # Exchange API keys for live CEX trading (optional)
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_SECRET  = os.getenv("BINANCE_SECRET", "")
-COINBASE_API_KEY = os.getenv("COINBASE_API_KEY", "")
-COINBASE_SECRET  = os.getenv("COINBASE_SECRET", "")
+# Coinbase Advanced Trade (CDP): COINBASE_KEY_NAME = organizations/xxx/apiKeys/yyy
+#                                 COINBASE_SECRET   = EC private key (PEM, \n escaped)
+COINBASE_KEY_NAME = os.getenv("COINBASE_KEY_NAME", "")   # CDP API key name
+COINBASE_API_KEY  = os.getenv("COINBASE_API_KEY",  "")   # Legacy / fallback key
+COINBASE_SECRET   = os.getenv("COINBASE_SECRET",   "")   # Private key or secret
 
 # ─── Timing ───────────────────────────────────────────────────────────────────
 SCAN_INTERVAL_SEC = 5         # Scan markets every 5 seconds (short-trade focus)
