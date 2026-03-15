@@ -999,9 +999,15 @@ class SolanaWallet:
                 _num     = base_reserve * amount_raw * 9900
                 _den     = (quote_reserve * 10000) + (amount_raw * 9900)
                 token_out = _num // _den
-                token_out = token_out * 98 // 100   # 2% margin for on-chain slippage tolerance
+                # Apply slippage tolerance to min_base_amount_out (arg1).
+                # On-chain pAMM delivers fewer tokens than our off-chain estimate due to
+                # fee differences and stale reserve reads.  A fixed 2% margin was
+                # insufficient (observed 14-16% gap).  Use 10× slippage_bps so at the
+                # default 100 bps trade slippage we accept up to 10% fewer tokens.
+                _min_margin  = max(slippage_bps * 10, 1000)   # at least 10%
+                min_base_out = token_out * (10000 - _min_margin) // 10000
                 max_quote_in  = int(amount_raw * (1 + slippage_bps / 10000))
-                arg0, arg1    = amount_raw, token_out   # exact SOL in, min tokens out
+                arg0, arg1    = amount_raw, min_base_out   # exact SOL in, min tokens out
                 out_amount    = token_out
                 if token_out <= 0:
                     logger.warning("PumpSwap: zero token calc pool=%s", pool_address[:16])
