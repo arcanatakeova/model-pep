@@ -157,7 +157,7 @@ class AITrader:
             private_key_b58=config.PHANTOM_PRIVATE_KEY)              # Phantom wallet
 
         # ── WebSocket real-time feed ──────────────────────────────────────
-        self._ws_feed = df_mod.get_ws_feed()   # Start WebSocket in background
+        self._ws_feed = df_mod.get_ws_feed() if hasattr(df_mod, "get_ws_feed") else None
 
         # ── State ─────────────────────────────────────────────────────────
         now = time.time()
