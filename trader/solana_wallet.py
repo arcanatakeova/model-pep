@@ -478,7 +478,23 @@ class SolanaWallet:
         if not sig:
             # Fallback to direct RPC send
             sig = self._sign_and_send_rpc(tx_b64)
-        if not sig:
+
+        # If bonding curve is graduated (0x1775), try PumpSwap directly
+        if sig == "GRADUATED" and _is_pump:
+            pump_mint = output_mint if output_mint.endswith("pump") else input_mint
+            is_sell   = input_mint.endswith("pump")
+            logger.info("Routing graduated token %s → PumpSwap (post 0x1775)", pump_mint[:12])
+            tx_b64, out_amount, price_impact = self._quote_and_build_pumpswap(
+                pump_mint, raw_input_amount, slippage_bps,
+                is_sell=is_sell, pool_address=pair_address)
+            if tx_b64 is None:
+                return SwapResult(success=False,
+                                  error="Bonding curve graduated — PumpSwap also failed")
+            sig = self._sign_and_send_jito(tx_b64, priority_fee)
+            if not sig:
+                sig = self._sign_and_send_rpc(tx_b64)
+
+        if not sig or sig == "GRADUATED":
             return SwapResult(success=False, error="Transaction send failed")
 
         # 5. Wait for FINALIZED (not just confirmed)
@@ -1322,7 +1338,10 @@ class SolanaWallet:
             return None
 
     def _sign_and_send_rpc(self, tx_b64: str) -> Optional[str]:
-        """Sign and send via direct Solana RPC (fallback when Jito unavailable)."""
+        """Sign and send via direct Solana RPC (fallback when Jito unavailable).
+        Returns signature string on success, "GRADUATED" if bonding curve completed
+        (error 0x1775 / 6005), or None on other failures.
+        """
         try:
             from solders.transaction import VersionedTransaction
             from solana.rpc.types import TxOpts
@@ -1342,6 +1361,10 @@ class SolanaWallet:
             logger.debug("RPC transaction sent: %s", sig[:16])
             return sig
         except Exception as e:
+            err_str = str(e)
+            if "0x1775" in err_str or "Custom(6005)" in err_str:
+                logger.info("Bonding curve complete (0x1775) — token graduated to PumpSwap")
+                return "GRADUATED"
             logger.error("RPC send error: %s", e)
             return None
 
