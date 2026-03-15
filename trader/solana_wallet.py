@@ -1015,6 +1015,7 @@ class SolanaWallet:
                         cloned[6]  = str(user_wsol_ata)
                         cloned[9]  = str(user)           # self-referral
                         cloned[10] = str(user_wsol_ata)  # referral_wsol = our WSOL ATA
+                        cloned[20] = str(user_volume_acc)  # user_volume_accumulator (ours)
                         ref_accs = cloned
                         break
                     if ref_accs:
