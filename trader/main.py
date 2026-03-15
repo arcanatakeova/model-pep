@@ -662,12 +662,7 @@ class AITrader:
         confirmation before execution.
         """
         try:
-            if self.risk_mgr._max_drawdown_triggered():
-                logger.info("DEX scan skipped: max drawdown guard active")
-                return
-            if self.risk_mgr._daily_loss_triggered():
-                logger.info("DEX scan skipped: daily loss limit active")
-                return
+            # Circuit breakers removed — bot always scans and trades
 
             tokens = self.dex_screener.get_multi_chain_opportunities()
             if not tokens:
