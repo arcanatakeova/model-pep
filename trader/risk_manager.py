@@ -311,8 +311,9 @@ class RiskManager:
         h24_vol = abs(price_change_h24 or 0) / 100
 
         # Use the largest observed timeframe as the volatility anchor
-        base = max(h1_vol * 2.5, h6_vol * 0.6, h24_vol * 0.25, 0.20)
-        base = min(base, 0.45)
+        # Tightened: 2.0× (was 2.5×) and 15% floor (was 20%) to cut losses faster
+        base = max(h1_vol * 2.0, h6_vol * 0.5, h24_vol * 0.20, 0.15)
+        base = min(base, 0.40)  # Hard cap 40% (was 45%)
 
         # Safety-adjusted multiplier: less trusted = more volatile = wider stop needed
         if safety_score >= 0.80:

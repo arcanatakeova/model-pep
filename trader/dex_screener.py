@@ -589,7 +589,8 @@ class DexScreener:
         _is_burst = (
             _vol_ratio > 5
             and token.price_change_h1 > 10
-            and token.buys_h1 > 100
+            and token.buys_h1 > 150           # raised from 100 — need real conviction
+            and token.price_change_m5 > -5    # not already reversing
         )
         if _is_burst:
             score += 0.15
@@ -616,6 +617,7 @@ class DexScreener:
             score -= 0.10   # Heavy selling
 
         # 5-min buy pressure (ultra-recent signal)
+        bsr_m5 = 0.5
         if token.buys_m5 > 0:
             bsr_m5 = token.buy_sell_ratio_m5
             if bsr_m5 > 0.80 and token.buys_m5 > 20:
@@ -623,6 +625,17 @@ class DexScreener:
                 signals.append(f"5m buy frenzy ({token.buys_m5} buys)")
             elif bsr_m5 > 0.70 and token.buys_m5 > 10:
                 score += 0.03
+            # Severe sell pressure at entry: market actively dumping right now
+            elif bsr_m5 < 0.35 and (token.buys_m5 + token.sells_m5) > 5:
+                score -= 0.15
+                signals.append(f"Sell pressure: {bsr_m5:.0%} 5m BSR")
+
+        # ── Momentum divergence: 1h running but 5m turning down ───────────
+        # If 1h moved strongly UP but 5m is now DOWN, we are late to the party
+        if token.price_change_h1 > 20 and token.price_change_m5 < -3:
+            score -= 0.10
+            signals.append(
+                f"Divergence: 1h=+{token.price_change_h1:.0f}% but 5m={token.price_change_m5:.1f}%")
 
         # ── Liquidity depth (10%) ─────────────────────────────────────────
         liq = token.liquidity_usd

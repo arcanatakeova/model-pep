@@ -985,18 +985,29 @@ class AITrader:
                             continue
 
                     # ── 2. Reversal after peak: price dropped fast from ATH ───
-                    # More generous: allow deeper pullbacks before selling
                     peak = pos.get("peak_price", entry)
                     if peak > entry and pnl_pct > 0:
                         reversal = (peak - current) / peak
-                        # Scale reversal threshold by profit: more profit = allow bigger pullback
-                        # At +10% profit, sell if -18% reversal. At +100%, sell if -25%
-                        reversal_threshold = min(0.18 + pnl_pct * 0.07, 0.30)
-                        if reversal >= reversal_threshold and pnl_pct > 0.08:
+                        # Tighter for small profits, widens as gains increase.
+                        # At +8% profit sell if -12% reversal; at +100% allow -28%.
+                        reversal_threshold = min(0.12 + pnl_pct * 0.08, 0.28)
+                        if reversal >= reversal_threshold and pnl_pct > 0.05:
                             to_close.append((
                                 pair_addr, pos, current,
                                 f"FastMonitor reversal: -{reversal:.0%} from peak "
                                 f"(PnL +{pnl_pct:.0%})"))
+                            continue
+
+                    # ── 2b. Momentum collapse: sharp 3s drop while barely in profit ─
+                    # If we haven't yet secured meaningful gains and the token is
+                    # dumping fast, exit before the loss deepens.
+                    if prev > 0:
+                        tick_drop = (current - prev) / prev
+                        if tick_drop <= -0.08 and pnl_pct < 0.05:
+                            to_close.append((
+                                pair_addr, pos, current,
+                                f"FastMonitor momentum collapse: {tick_drop:.0%} tick "
+                                f"(PnL {pnl_pct:.0%})"))
                             continue
 
                     # ── 3. Volume dry-up with stalled price ───────────────────
