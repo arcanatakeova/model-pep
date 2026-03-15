@@ -1092,7 +1092,7 @@ class SolanaWallet:
                     ],
                     data=bytes([1]),
                 )
-                fund_ix  = transfer(TransferParams(user, user_wsol_ata, max_quote_in))
+                fund_ix  = transfer(TransferParams(from_pubkey=user, to_pubkey=user_wsol_ata, lamports=max_quote_in))
                 sync_ix  = Instruction(TOKEN_PROG,
                                        [AccountMeta(user_wsol_ata, False, True)],
                                        bytes([17]))   # syncNative = 17
