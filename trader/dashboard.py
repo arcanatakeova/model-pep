@@ -111,7 +111,7 @@ def _fetch_live_prices() -> dict:
             return dict(_price_cache)
 
 
-def _live_price_for(symbol: str, prices: dict) -> float | None:
+def _live_price_for(symbol: str, prices: dict):
     """Look up live price for a position symbol in the prices dict."""
     base = symbol.split("/")[0].split("-")[0].lower()
     # Direct match
@@ -484,7 +484,7 @@ def run_dashboard(host: str = "0.0.0.0", port: int = 8888, debug: bool = False):
     app.run(host=host, port=port, debug=debug, use_reloader=False, threaded=True)
 
 
-def start_dashboard_thread(port: int = 8888) -> threading.Thread | None:
+def start_dashboard_thread(port: int = 8888):
     """Start the dashboard in a background daemon thread. Returns the thread."""
     if not _flask_ok:
         logger.warning("Flask not available — dashboard disabled. pip3 install flask")
