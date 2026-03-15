@@ -71,14 +71,6 @@ def _safe_float(val, default: float = 0.0) -> float:
         return default
 
 
-# Search terms — 20 high-signal queries covering all major memecoin namespaces
-_SEARCH_QUERIES = [
-    "PUMP", "MEME", "AI", "DOG", "WIF", "PEPE",
-    "CAT", "MOON", "DOGE", "SHIB", "INU", "BULL",
-    "TRUMP", "ELON", "BABY", "MINI", "TURBO", "BONK",
-    "FROG", "CHAD",
-]
-
 # Raydium CLMM pool endpoint (separate from AMM)
 RAYDIUM_CLMM_URL = "https://api-v3.raydium.io/pools/info/list"
 
@@ -192,25 +184,27 @@ class DexScreener:
         self._evict_evaluated()
 
         # ── Launch all data fetches concurrently ──────────────────────────────
+        # All sources rank tokens by pure on-chain activity — no name/keyword bias.
         futures = {
-            "boosted":        self._executor.submit(self._fetch_boosted_tokens),
-            "profiles":       self._executor.submit(self._fetch_token_profiles),
-            "pumpfun_active": self._executor.submit(self._fetch_pumpfun_tokens),
-            "pumpfun_mcap":   self._executor.submit(self._fetch_pumpfun_by_mcap),
-            "pumpfun_reply":  self._executor.submit(self._fetch_pumpfun_viral),
-            "raydium_amm":    self._executor.submit(self._fetch_raydium_pools),
-            "raydium_amm_p2": self._executor.submit(self._fetch_raydium_pools, 2),
-            "raydium_clmm":   self._executor.submit(self._fetch_raydium_clmm),
-            "be_trend":       self._executor.submit(self._fetch_birdeye_trending),
-            "be_gainers":     self._executor.submit(self._fetch_birdeye_gainers),
+            # DexScreener objective feeds
+            "boosted":         self._executor.submit(self._fetch_boosted_tokens),
+            "profiles":        self._executor.submit(self._fetch_token_profiles),
+            # Pump.fun — 3 independent sort orders, no name filter
+            "pumpfun_active":  self._executor.submit(self._fetch_pumpfun_tokens),
+            "pumpfun_mcap":    self._executor.submit(self._fetch_pumpfun_by_mcap),
+            "pumpfun_viral":   self._executor.submit(self._fetch_pumpfun_viral),
+            "pumpfun_new":     self._executor.submit(self._fetch_pumpfun_new),
+            # Raydium — AMM pages 1-3 + CLMM pools (4 independent ranked lists)
+            "raydium_amm_p1":  self._executor.submit(self._fetch_raydium_pools, 1),
+            "raydium_amm_p2":  self._executor.submit(self._fetch_raydium_pools, 2),
+            "raydium_amm_p3":  self._executor.submit(self._fetch_raydium_pools, 3),
+            "raydium_clmm":    self._executor.submit(self._fetch_raydium_clmm),
+            # Birdeye — trending + gainers (independent rankings)
+            "be_trend":        self._executor.submit(self._fetch_birdeye_trending),
+            "be_gainers":      self._executor.submit(self._fetch_birdeye_gainers),
+            # DexScreener token-level endpoints (volume-ranked, no keyword filter)
+            "ds_solana_top":   self._executor.submit(self._fetch_dexscreener_top_solana),
         }
-        # 20-query DexScreener search grid — all in parallel
-        search_futures = {
-            f"search_{q}": self._executor.submit(
-                self._search_top_pairs, "solana", q, 50)
-            for q in _SEARCH_QUERIES
-        }
-        futures.update(search_futures)
 
         raw_tokens: list[DexToken] = []
 
@@ -222,7 +216,7 @@ class DexScreener:
             except Exception as e:
                 logger.debug("%s fetch error: %s", key, e)
 
-        # Collect already-parsed token lists
+        # Collect already-parsed token lists (everything except boosted/profiles which need batch fetch)
         other_keys = [k for k in futures if k not in ("boosted", "profiles")]
         for key in other_keys:
             try:
@@ -299,17 +293,15 @@ class DexScreener:
         """
         New pair sniping: DexScreener search + Birdeye new listings + Pump.fun new.
         """
+        # All sources are activity-ranked — no keyword filtering
         futures = {
-            "be_new":      self._executor.submit(self._fetch_birdeye_new_listings),
-            "pump_new":    self._executor.submit(self._fetch_pumpfun_new),
-            "pump_viral":  self._executor.submit(self._fetch_pumpfun_viral),
+            "be_new":         self._executor.submit(self._fetch_birdeye_new_listings),
+            "pump_new":       self._executor.submit(self._fetch_pumpfun_new),
+            "pump_viral":     self._executor.submit(self._fetch_pumpfun_viral),
+            "pump_active":    self._executor.submit(self._fetch_pumpfun_tokens),
+            "raydium_amm_p1": self._executor.submit(self._fetch_raydium_pools, 1),
+            "raydium_clmm":   self._executor.submit(self._fetch_raydium_clmm),
         }
-        search_futures = {
-            f"search_{q}": self._executor.submit(
-                self._search_top_pairs, "solana", q, 50)
-            for q in ["PUMP", "NEW", "LAUNCH", "FAIR", "MINT"]
-        }
-        futures.update(search_futures)
 
         raw: list[DexToken] = []
         for key, fut in futures.items():
@@ -912,6 +904,23 @@ class DexScreener:
             t = self._parse_pair(p)
             if t:
                 tokens.append(t)
+        return tokens
+
+    def _fetch_dexscreener_top_solana(self) -> list[DexToken]:
+        """
+        DexScreener top Solana pairs by volume — pure activity rank, zero keyword bias.
+        Uses the token-boosts top endpoint enriched with pair data.
+        Also fetches recently created pairs to catch brand-new launches.
+        """
+        tokens = []
+        try:
+            # Top boosted — highest real money spent = community conviction
+            data = self._get(f"{DEXSCREENER_BASE}/token-boosts/top/v1")
+            if isinstance(data, list):
+                sol_metas = [t for t in data if t.get("chainId") == "solana"][:50]
+                tokens.extend(self._fetch_pairs_for_tokens(sol_metas))
+        except Exception as e:
+            logger.debug("DS top solana error: %s", e)
         return tokens
 
     def _evict_evaluated(self):
