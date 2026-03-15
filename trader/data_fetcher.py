@@ -145,12 +145,24 @@ def get_coin_ohlcv(coin_id: str, days: int = 30, interval: str = "hourly") -> pd
 
 
 def get_coin_price(coin_id: str) -> Optional[float]:
-    """Get current USD price of a coin."""
+    """Get current USD price of a coin. Tries CoinCap first, CoinGecko fallback."""
     key = f"price_{coin_id}"
     cached = _cached(key, ttl=30)
     if cached is not None:
         return cached
 
+    # Primary: CoinCap (free, no key, reliable)
+    coincap_id = coin_id.lower().replace("_", "-")
+    cap_data = _get(f"{config.COINCAP_BASE}/assets/{coincap_id}")
+    if cap_data and "data" in cap_data:
+        try:
+            price = float(cap_data["data"]["priceUsd"])
+            if price > 0:
+                return _store(key, price)
+        except (KeyError, ValueError, TypeError):
+            pass
+
+    # Fallback: CoinGecko
     data = _get(
         f"{config.COINGECKO_BASE}/simple/price",
         params={"ids": coin_id, "vs_currencies": "usd", "include_24hr_vol": True},

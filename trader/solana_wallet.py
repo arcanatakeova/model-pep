@@ -295,7 +295,21 @@ class SolanaWallet:
             return int(usd_amount * 1e6)
 
     def _get_sol_price(self) -> float:
-        """Get current SOL price in USD."""
+        """Get current SOL price in USD via CoinCap (free, no key)."""
+        # Primary: CoinCap (reliable, free, no auth)
+        try:
+            resp = requests.get(
+                "https://api.coincap.io/v2/assets/solana",
+                timeout=5,
+                headers={"Accept": "application/json"},
+            )
+            if resp.ok:
+                price = float(resp.json()["data"]["priceUsd"])
+                if price > 0:
+                    return price
+        except Exception:
+            pass
+        # Fallback: CoinGecko
         try:
             resp = requests.get(
                 "https://api.coingecko.com/api/v3/simple/price",
@@ -306,4 +320,5 @@ class SolanaWallet:
                 return float(resp.json()["solana"]["usd"])
         except Exception:
             pass
-        return 150.0  # Fallback estimate
+        logger.warning("Could not fetch live SOL price from any source")
+        return 0.0
