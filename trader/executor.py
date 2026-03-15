@@ -326,9 +326,26 @@ class TradeExecutor:
         if config.COINBASE_API_KEY and config.COINBASE_SECRET:
             try:
                 import ccxt
+                # Coinbase Advanced Trade key format:
+                #   API key: "organizations/xxx/apiKeys/yyy"
+                #   Secret: EC PEM key (with literal \n that need converting)
+                api_key = config.COINBASE_API_KEY.strip()
+                secret = config.COINBASE_SECRET.strip()
+
+                # Strip "API key name " prefix if present
+                if api_key.lower().startswith("api key name "):
+                    api_key = api_key[len("API key name "):].strip()
+                    # Also try without the prefix variant
+                    if api_key.lower().startswith("api key name"):
+                        api_key = api_key.split(" ", 3)[-1].strip()
+
+                # Convert literal \n to actual newlines in PEM key
+                if "\\n" in secret:
+                    secret = secret.replace("\\n", "\n")
+
                 self._exchange = ccxt.coinbase({
-                    "apiKey": config.COINBASE_API_KEY,
-                    "secret": config.COINBASE_SECRET,
+                    "apiKey": api_key,
+                    "secret": secret,
                     "enableRateLimit": True,
                 })
                 # Verify connection

@@ -65,12 +65,31 @@ class SolanaWallet:
             from solders.keypair import Keypair
             from solana.rpc.api import Client
 
-            # Phantom exports private key as base58 or byte array
+            # Phantom exports private key as base58 string or JSON byte array
+            key_str = self.private_key_b58.strip()
             try:
-                key_bytes = base64.b58decode(self.private_key_b58)
+                # Try base58 decode (most common Phantom export format)
+                import base58
+                key_bytes = base58.b58decode(key_str)
+            except ImportError:
+                # base58 not installed — try solders' from_base58_string
+                try:
+                    self._keypair = Keypair.from_base58_string(key_str)
+                    self._pubkey = str(self._keypair.pubkey())
+                    self._client = Client(SOLANA_RPC_URL)
+                    logger.info("Phantom wallet connected: %s...%s",
+                                self._pubkey[:6], self._pubkey[-4:])
+                    return
+                except Exception:
+                    # Last resort: JSON byte array [1,2,3,...]
+                    key_bytes = bytes(json.loads(key_str))
             except Exception:
-                # Try as JSON array
-                key_bytes = bytes(json.loads(self.private_key_b58))
+                # Not base58 — try JSON byte array
+                try:
+                    key_bytes = bytes(json.loads(key_str))
+                except Exception:
+                    logger.error("Cannot parse Phantom key — expected base58 string or JSON byte array")
+                    return
 
             self._keypair = Keypair.from_bytes(key_bytes)
             self._pubkey  = str(self._keypair.pubkey())
