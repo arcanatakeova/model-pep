@@ -1600,50 +1600,109 @@ class AITrader:
 
     def _reconcile_wallet_positions(self):
         """
-        Startup check: compare on-chain SPL holdings with _dex_positions.
-        Logs positions tracked but missing on-chain, and untracked on-chain tokens.
-        Only runs in live mode with a connected wallet.
+        Startup reconciliation — wallet is the source of truth.
+
+        1. Drop any saved positions whose token is no longer in the wallet
+           (externally sold, transferred, or rug-pulled to zero).
+        2. Add any on-chain tokens not in saved state as new positions,
+           using the current price as the entry (we lost the original entry).
+        3. Update qty in saved positions to match actual on-chain balance.
         """
         if not self.live or not self.solana.is_connected:
             return
         try:
             on_chain = self.solana.get_all_token_balances()
             if not on_chain:
-                logger.debug("Wallet reconciliation: no token balances (no positions or RPC error)")
+                logger.debug("Wallet reconciliation: empty wallet or RPC error")
                 return
 
-            on_chain_mints = set(on_chain.keys())
-            _skip_mints    = {SOL_MINT, USDC_MINT, USDT_MINT}
-            tracked_mints  = {pos.get("address", "") for pos in self._dex_positions.values()}
+            _skip  = {SOL_MINT, USDC_MINT, USDT_MINT}
+            now_ts = datetime.now(timezone.utc).isoformat()
 
-            # Positions we track but have no on-chain tokens for
-            ghost_count = 0
+            # ── 1. Drop ghost positions (tracked but zero on-chain balance) ──
             for pair_addr, pos in list(self._dex_positions.items()):
                 mint = pos.get("address", "")
-                if not mint or mint in _skip_mints:
+                if not mint or mint in _skip:
                     continue
-                if mint not in on_chain_mints:
-                    ghost_count += 1
+                if mint not in on_chain:
                     logger.warning(
-                        "STARTUP RECONCILE: %s (%s…) tracked but NO on-chain balance "
-                        "— may have been sold externally; live sync will reconcile.",
-                        pos.get("symbol", "?"), mint[:12])
+                        "RECONCILE DROP: %s — not in wallet, removing from tracker",
+                        pos.get("symbol", mint[:8]))
+                    with self._dex_lock:
+                        self._dex_positions.pop(pair_addr, None)
 
-            # Tokens on-chain but not tracked (excludes SOL/USDC/USDT)
-            untracked = on_chain_mints - tracked_mints - _skip_mints
-            for mint in untracked:
-                bal = on_chain[mint]
+            # ── 2. Sync qty for surviving positions ───────────────────────────
+            for pair_addr, pos in self._dex_positions.items():
+                mint = pos.get("address", "")
+                if mint and mint in on_chain:
+                    actual_qty = on_chain[mint]["ui_amount"]
+                    if actual_qty > 0:
+                        pos["qty"] = actual_qty
+
+            # ── 3. Add untracked on-chain tokens as new positions ─────────────
+            tracked_mints = {pos.get("address", "")
+                             for pos in self._dex_positions.values()}
+            untracked = {m: b for m, b in on_chain.items()
+                         if m not in _skip and m not in tracked_mints}
+
+            for mint, bal in untracked.items():
+                qty = bal["ui_amount"]
+                # Look up current price + pair info from DexScreener
+                token_info = self.dex_screener.get_token_info(mint, "solana")
+                if not token_info or token_info.price_usd <= 0:
+                    # Try Jupiter price as fallback
+                    price = self._get_jupiter_price(mint)
+                    if not price or price <= 0:
+                        logger.info("RECONCILE SKIP: %s… — cannot price, leaving untracked",
+                                    mint[:12])
+                        continue
+                    symbol     = mint[:8]
+                    pair_addr  = mint   # Use mint as key when no pair found
+                    liq_usd    = 0.0
+                    dex_id     = "unknown"
+                else:
+                    price     = token_info.price_usd
+                    symbol    = token_info.base_symbol
+                    pair_addr = token_info.pair_address or mint
+                    liq_usd   = token_info.liquidity_usd
+                    dex_id    = token_info.dex_id
+
+                value_usd = qty * price
+                if value_usd < 0.50:
+                    logger.debug("RECONCILE SKIP: %s dust $%.4f", symbol, value_usd)
+                    continue
+
+                pos = {
+                    "address":           mint,
+                    "symbol":            symbol,
+                    "chain":             "solana",
+                    "dex_id":            dex_id,
+                    "entry_price":       price,   # Current price — real entry unknown
+                    "current_price":     price,
+                    "size_usd":          value_usd,
+                    "qty":               qty,
+                    "liquidity_usd":     liq_usd,
+                    "remaining_fraction": 1.0,
+                    "peak_price":        price,
+                    "stop_pct":          config.TRAILING_STOP_PCT,
+                    "target_pct":        config.TAKE_PROFIT_PCT,
+                    "opened_at":         now_ts,
+                    "tx":                "recovered",   # Flag: recovered from wallet
+                    "current_pnl_pct":   0.0,
+                }
+                with self._dex_lock:
+                    self._dex_positions[pair_addr] = pos
                 logger.info(
-                    "STARTUP RECONCILE: untracked on-chain token %s… balance=%.6f",
-                    mint[:12], bal["ui_amount"])
+                    "RECONCILE ADD: %s qty=%.4f price=$%.8f value=$%.2f (recovered from wallet)",
+                    symbol, qty, price, value_usd)
 
-            logger.info(
-                "Wallet reconciliation: %d tracked, %d on-chain tokens, "
-                "%d ghost, %d untracked",
-                len(tracked_mints - {""}), len(on_chain_mints),
-                ghost_count, len(untracked))
+            total = len(self._dex_positions)
+            logger.info("Wallet reconciliation complete: %d active positions", total)
+            if total:
+                self._save_dex_positions()   # Persist the reconciled state immediately
+
         except Exception as e:
-            logger.debug("Wallet reconciliation error: %s", e)
+            logger.warning("Wallet reconciliation error: %s", e)
 
     def _sync_wallet_positions(self):
         """
