@@ -908,7 +908,7 @@ class SolanaWallet:
             # (preferred path: validates our hardcoded constants against reality)
             _GLOBAL_CONFIG = "ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw"
             _EVENT_AUTH    = "GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR"
-            _TOKEN22_PROG  = "TokenzQdBNbEquvPLLNJXvFy5YxEBdnBfZ8VC5g9RB2w"
+            _TOKEN22_PROG  = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
             _CONST_21      = "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"
             _CONST_22      = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
             _CONST_23      = "96LyJcE6LR56Ask37D9bHYGieoSfyFYxwaD3mxXxVnTg"
@@ -1049,6 +1049,11 @@ class SolanaWallet:
             ]
 
             # ── Step 7: build instructions ────────────────────────────────────
+            from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
+            cu_price = self._estimate_priority_fee()
+            cu_limit_ix = set_compute_unit_limit(400_000)   # PumpSwap + WSOL wrap ~200K CU
+            cu_price_ix = set_compute_unit_price(cu_price)
+
             buy_sell_disc = _PUMP_BUY_DISC if not is_sell else _PUMP_SELL_DISC
             main_data = buy_sell_disc + struct.pack("<QQ", arg0, arg1)
             main_ix   = Instruction(program_id=PUMPSWAP,
@@ -1089,8 +1094,8 @@ class SolanaWallet:
                                         AccountMeta(user,          False, True),
                                         AccountMeta(user,          True,  False)],
                                        bytes([9]))    # closeAccount = 9
-                instructions = [create_wsol_ix, fund_ix, sync_ix,
-                                create_base_ix, main_ix, close_ix]
+                instructions = [cu_limit_ix, cu_price_ix, create_wsol_ix,
+                                 fund_ix, sync_ix, create_base_ix, main_ix, close_ix]
             else:
                 # Sell: just execute the sell (tokens → WSOL → SOL auto-unwrapped by close)
                 create_wsol_ix = Instruction(
@@ -1110,7 +1115,7 @@ class SolanaWallet:
                                         AccountMeta(user,          False, True),
                                         AccountMeta(user,          True,  False)],
                                        bytes([9]))
-                instructions = [create_wsol_ix, main_ix, close_ix]
+                instructions = [cu_limit_ix, cu_price_ix, create_wsol_ix, main_ix, close_ix]
 
             bh  = self._client.get_latest_blockhash().value.blockhash
             msg = MessageV0.try_compile(user, instructions, [], bh)
