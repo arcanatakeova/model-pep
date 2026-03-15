@@ -19,6 +19,8 @@ Usage:
   python main.py --report         # Full JSON report, exit
   python main.py --growth         # Show projected compound growth table
 """
+from __future__ import annotations
+
 import argparse
 import json
 import logging

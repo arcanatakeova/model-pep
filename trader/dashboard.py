@@ -21,6 +21,8 @@ Live data flow:
       ↓
   SSE /events → browser EventSource → updates equity + positions + ticker instantly
 """
+from __future__ import annotations
+
 import json
 import logging
 import os

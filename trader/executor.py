@@ -4,6 +4,8 @@ Trade Executor — Bridges signals to actual (paper or live) trade execution.
 Paper mode: simulates fills at market price with configurable slippage.
 Live mode: routes to exchange APIs (Binance, Coinbase Pro) via ccxt.
 """
+from __future__ import annotations
+
 import logging
 from typing import Optional
 from datetime import datetime, timezone

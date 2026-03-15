@@ -127,9 +127,9 @@ class Portfolio:
             }
             self.closed_trades.append(trade)
 
-            emoji = "✓" if pnl >= 0 else "✗"
-            logger.info("%s CLOSE %s %s @ $%.4f | PnL: $%.2f (%.2f%%) | %s",
-                        emoji, side.upper(), asset_id, price,
+            tag = "WIN" if pnl >= 0 else "LOSS"
+            logger.info("[%s] CLOSE %s %s @ $%.4f | PnL: $%.2f (%.2f%%) | %s",
+                        tag, side.upper(), asset_id, price,
                         pnl, pnl_pct, reason)
 
             # Update peak equity
