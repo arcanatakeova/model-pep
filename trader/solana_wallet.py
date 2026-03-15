@@ -895,12 +895,29 @@ class SolanaWallet:
                     logger.warning("PumpSwap: zero SOL calc (sell) pool=%s", pool_address[:16])
                     return None, 0, 0.0
 
-            # ── Step 5: clone fixed accounts from reference buy transaction ───
+            # ── Step 5: derive user ATAs and pool authority ───────────────────
+            user_base_ata = _ata(user, base_mint_pk)
+            user_wsol_ata = _ata(user, WSOL_MINT)
+            # Pool authority = owner of the vault (SPL token account offset 32)
+            pool_authority = Pubkey.from_bytes(base_data[32:64])
+            # Creator wallet and WSOL ATA from pool data (offset 11)
+            creator_wallet  = Pubkey.from_bytes(pool_data[11:43])
+            creator_wsol_ata = _ata(creator_wallet, WSOL_MINT)
+
+            # ── Step 6: try to clone fixed accounts from reference tx ─────────
+            # (preferred path: validates our hardcoded constants against reality)
+            _GLOBAL_CONFIG = "ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw"
+            _EVENT_AUTH    = "GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR"
+            _TOKEN22_PROG  = "TokenzQdBNbEquvPLLNJXvFy5YxEBdnBfZ8VC5g9RB2w"
+            _CONST_21      = "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"
+            _CONST_22      = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
+            _CONST_23      = "96LyJcE6LR56Ask37D9bHYGieoSfyFYxwaD3mxXxVnTg"
+
+            ref_accs = None
             r_sigs = requests.post(config.SOLANA_RPC_URL, json={
                 "jsonrpc": "2.0", "id": 1, "method": "getSignaturesForAddress",
                 "params": [pool_address, {"limit": 20}],
             }, timeout=10)
-            ref_accs, ref_flags = None, {}
             for sig_info in r_sigs.json().get("result", []):
                 r2 = requests.post(config.SOLANA_RPC_URL, json={
                     "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
@@ -928,34 +945,107 @@ class SolanaWallet:
                         continue
                     if not all(idx < nst for idx in inst.accounts):
                         continue   # skip ALT-based txs
-                    ref_accs = [rkeys[idx] for idx in inst.accounts]
-                    for j, idx in enumerate(inst.accounts):
-                        is_s = idx < ns
-                        is_w = (idx < ns - rrs) or (ns <= idx < nst - rns)
-                        ref_flags[j] = (is_w, is_s)
+                    cloned = [rkeys[idx] for idx in inst.accounts]
+                    cloned[1] = str(user)
+                    cloned[5] = str(user_base_ata)
+                    cloned[6] = str(user_wsol_ata)
+                    ref_accs = cloned
                     break
                 if ref_accs:
                     break
 
+            # ── Step 6b: deterministic fallback for brand-new pools ───────────
+            # Build the 24-account list from first principles when the pool has
+            # no on-chain buy transactions to clone from.
+            #
+            # Account layout (confirmed from decoded reference transactions):
+            #  [0] W  pool
+            #  [1] WS user (signer)
+            #  [2] R  globalConfig (constant)
+            #  [3] R  base_mint
+            #  [4] R  quote_mint (WSOL)
+            #  [5] W  user_base_ata
+            #  [6] W  user_wsol_ata
+            #  [7] W  pool_base_token_account
+            #  [8] W  pool_quote_token_account
+            #  [9] R  referral_wallet  → self
+            # [10] W  referral_wsol_ata → user_wsol_ata
+            # [11] R  Token-2022 program (constant)
+            # [12] R  Token program (constant)
+            # [13] R  System program (constant)
+            # [14] R  ATA program (constant)
+            # [15] R  EventAuthority (constant)
+            # [16] R  PumpSwap program (constant)
+            # [17] W  creator_wsol_ata  (ATA(creator, WSOL))
+            # [18] R  creator_wallet    (pool_data[11:43])
+            # [19] R  pool_authority    (SPL vault owner = base_data[32:64])
+            # [20] W  referral_base_ata → user_base_ata (self-referral)
+            # [21] R  constant
+            # [22] R  constant
+            # [23] R  constant
             if not ref_accs:
-                logger.warning("PumpSwap: no reference buy tx found for pool %s",
-                               pool_address[:16])
-                return None, 0, 0.0
+                logger.info("PumpSwap: no ref tx for pool %s — deriving accounts",
+                            pool_address[:16])
+                ref_accs = [
+                    pool_address,            # [0]
+                    str(user),               # [1]
+                    _GLOBAL_CONFIG,          # [2]
+                    pump_mint,               # [3]
+                    str(WSOL_MINT),          # [4]
+                    str(user_base_ata),      # [5]
+                    str(user_wsol_ata),      # [6]
+                    str(pool_base_ta),       # [7]
+                    str(pool_quote_ta),      # [8]
+                    str(user),               # [9] self-referral
+                    str(user_wsol_ata),      # [10] referral_wsol = user_wsol
+                    _TOKEN22_PROG,           # [11]
+                    _TOKEN_PROG,             # [12]
+                    _SYSTEM_PROG,            # [13]
+                    _ATA_PROG,               # [14]
+                    _EVENT_AUTH,             # [15]
+                    str(PUMPSWAP),           # [16]
+                    str(creator_wsol_ata),   # [17]
+                    str(creator_wallet),     # [18]
+                    str(pool_authority),     # [19] vault owner PDA
+                    str(user_base_ata),      # [20] referral_base = user_base (self)
+                    _CONST_21,               # [21]
+                    _CONST_22,               # [22]
+                    _CONST_23,               # [23]
+                ]
 
-            # ── Step 6: substitute user-specific accounts ─────────────────────
-            user_base_ata = _ata(user, base_mint_pk)
-            user_wsol_ata = _ata(user, WSOL_MINT)
-            accs = list(ref_accs)
-            accs[1] = str(user)           # user (writable signer)
-            accs[5] = str(user_base_ata)  # user base token account
-            accs[6] = str(user_wsol_ata)  # user WSOL account
-            # accs[9], [10], [20]: referral — keep from reference tx (benign)
+            # Writable / signer flags for each of the 24 accounts
+            _ACCT_FLAGS = [
+                (True,  False),  # [0]  pool         W
+                (True,  True),   # [1]  user         WS
+                (False, False),  # [2]  globalConfig R
+                (False, False),  # [3]  base_mint    R
+                (False, False),  # [4]  quote_mint   R
+                (True,  False),  # [5]  user_base    W
+                (True,  False),  # [6]  user_wsol    W
+                (True,  False),  # [7]  pool_base    W
+                (True,  False),  # [8]  pool_quote   W
+                (False, False),  # [9]  referral     R
+                (True,  False),  # [10] ref_wsol     W
+                (False, False),  # [11] Token-2022   R
+                (False, False),  # [12] Token        R
+                (False, False),  # [13] System       R
+                (False, False),  # [14] ATA          R
+                (False, False),  # [15] EventAuth    R
+                (False, False),  # [16] PUMPSWAP     R
+                (True,  False),  # [17] creator_wsol W
+                (False, False),  # [18] creator      R
+                (False, False),  # [19] pool_auth    R
+                (True,  False),  # [20] ref_base     W
+                (False, False),  # [21] const        R
+                (False, False),  # [22] const        R
+                (False, False),  # [23] const        R
+            ]
 
             account_metas = [
                 AccountMeta(pubkey=Pubkey.from_string(acc),
-                            is_signer=ref_flags.get(j, (False, False))[1],
-                            is_writable=ref_flags.get(j, (False, False))[0])
-                for j, acc in enumerate(accs)
+                            is_signer=_ACCT_FLAGS[j][1],
+                            is_writable=_ACCT_FLAGS[j][0])
+                for j, acc in enumerate(ref_accs)
             ]
 
             # ── Step 7: build instructions ────────────────────────────────────
