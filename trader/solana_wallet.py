@@ -684,10 +684,15 @@ class SolanaWallet:
                 return None, 0, 0.0
             vtr, vsr = struct.unpack_from("<QQ", bcdata, 8)
             complete = bcdata[48] != 0
-            if complete:
-                logger.info("Pump.fun direct: %s bonding curve complete (graduated)",
+            if complete and is_buy:
+                logger.info("Pump.fun direct: %s graduated — looking up PumpSwap pool",
                             pump_mint_str[:12])
-                return None, 0, 0.0
+                return self._quote_and_build_pumpswap(pump_mint_str, amount_raw, slippage_bps)
+            elif complete:
+                logger.info("Pump.fun direct: %s bonding curve complete (graduated), sell via PumpSwap",
+                            pump_mint_str[:12])
+                return self._quote_and_build_pumpswap(pump_mint_str, amount_raw, slippage_bps,
+                                                      is_sell=True)
             if vsr == 0 or vtr == 0:
                 return None, 0, 0.0
 
@@ -785,6 +790,248 @@ class SolanaWallet:
 
         except Exception as e:
             logger.warning("Pump.fun direct exception: %s", e)
+            return None, 0, 0.0
+
+    def _quote_and_build_pumpswap(self, pump_mint: str, amount_raw: int,
+                                   slippage_bps: int, is_sell: bool = False,
+                                   ) -> tuple[Optional[str], int, float]:
+        """Build a PumpSwap AMM buy or sell tx for graduated pump tokens.
+
+        Automatically finds the PumpSwap pool for the given mint via DexScreener,
+        reads pool vault balances for AMM price computation, then clones the
+        account list from a reference on-chain transaction (substituting only
+        user-specific accounts) to build a correctly-structured instruction.
+
+        WSOL wrapping/unwrapping is handled automatically for buys.
+
+        Discriminator: sha256("global:buy")[:8] = [102,6,61,18,1,218,235,234]
+          (PumpSwap uses the same Anchor namespace as the bonding curve program)
+        Buy args:  (base_amount_out: u64, max_quote_amount_in: u64)
+        Sell args: (base_amount_in: u64,  min_quote_amount_out: u64)
+        """
+        try:
+            import struct
+            from solders.pubkey import Pubkey
+            from solders.instruction import Instruction, AccountMeta
+            from solders.message import MessageV0
+            from solders.transaction import VersionedTransaction
+            from solders.system_program import transfer, TransferParams
+
+            PUMPSWAP   = Pubkey.from_string("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA")
+            TOKEN_PROG = Pubkey.from_string(_TOKEN_PROG)
+            SYS_PROG   = Pubkey.from_string(_SYSTEM_PROG)
+            ATA_PROG   = Pubkey.from_string(_ATA_PROG)
+            WSOL_MINT  = Pubkey.from_string("So11111111111111111111111111111111111111112")
+            user       = self._keypair.pubkey()
+            base_mint_pk = Pubkey.from_string(pump_mint)
+
+            def _ata(owner, mint_pk, prog=TOKEN_PROG):
+                return Pubkey.find_program_address(
+                    [bytes(owner), bytes(prog), bytes(mint_pk)], ATA_PROG)[0]
+
+            def _get_data(addr):
+                r = requests.post(config.SOLANA_RPC_URL, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+                    "params": [str(addr), {"encoding": "base64", "commitment": "confirmed"}],
+                }, timeout=10)
+                if not r.ok:
+                    return None
+                val = r.json().get("result", {}).get("value")
+                return base64.b64decode(val["data"][0]) if val else None
+
+            # ── Step 1: find PumpSwap pool via DexScreener ────────────────────
+            ds = requests.get(
+                f"https://api.dexscreener.com/latest/dex/tokens/{pump_mint}",
+                timeout=8)
+            pool_address = None
+            if ds.ok:
+                for p in ds.json().get("pairs", []):
+                    if p.get("chainId") == "solana" and p.get("dexId") == "pumpswap":
+                        pool_address = p.get("pairAddress")
+                        break
+            if not pool_address:
+                logger.warning("PumpSwap: no pool found for %s on DexScreener", pump_mint[:12])
+                return None, 0, 0.0
+
+            # ── Step 2: read pool → vault addresses ───────────────────────────
+            pool_data = _get_data(pool_address)
+            if not pool_data or len(pool_data) < 203:
+                logger.warning("PumpSwap: pool account not found %s", pool_address[:16])
+                return None, 0, 0.0
+            pool_base_ta  = Pubkey.from_bytes(pool_data[139:171])
+            pool_quote_ta = Pubkey.from_bytes(pool_data[171:203])
+
+            # ── Step 3: read vault balances (SPL token account, amount @ offset 64) ─
+            base_data  = _get_data(str(pool_base_ta))
+            quote_data = _get_data(str(pool_quote_ta))
+            if not base_data or not quote_data or len(base_data) < 72 or len(quote_data) < 72:
+                logger.warning("PumpSwap: vault data unavailable for pool %s", pool_address[:16])
+                return None, 0, 0.0
+            base_reserve  = struct.unpack_from("<Q", base_data, 64)[0]
+            quote_reserve = struct.unpack_from("<Q", quote_data, 64)[0]
+            if base_reserve == 0 or quote_reserve == 0:
+                logger.warning("PumpSwap: zero reserves pool=%s", pool_address[:16])
+                return None, 0, 0.0
+
+            # ── Step 4: AMM calculation (~1% total fees) ──────────────────────
+            if not is_sell:
+                # BUY: sol_in → tokens_out
+                sol_in_eff    = amount_raw * 9900 // 10000
+                token_out     = (base_reserve * sol_in_eff) // (quote_reserve + sol_in_eff)
+                max_quote_in  = int(amount_raw * (1 + slippage_bps / 10000))
+                arg0, arg1    = token_out, max_quote_in
+                out_amount    = token_out
+                if token_out <= 0:
+                    logger.warning("PumpSwap: zero token calc pool=%s", pool_address[:16])
+                    return None, 0, 0.0
+            else:
+                # SELL: tokens_in → sol_out
+                sol_out_gross = (quote_reserve * amount_raw) // (base_reserve + amount_raw)
+                sol_out_net   = sol_out_gross * 9900 // 10000
+                min_sol_out   = int(sol_out_net * (1 - slippage_bps / 10000))
+                arg0, arg1    = amount_raw, min_sol_out
+                out_amount    = sol_out_net
+                if sol_out_net <= 0:
+                    logger.warning("PumpSwap: zero SOL calc (sell) pool=%s", pool_address[:16])
+                    return None, 0, 0.0
+
+            # ── Step 5: clone fixed accounts from reference buy transaction ───
+            r_sigs = requests.post(config.SOLANA_RPC_URL, json={
+                "jsonrpc": "2.0", "id": 1, "method": "getSignaturesForAddress",
+                "params": [pool_address, {"limit": 20}],
+            }, timeout=10)
+            ref_accs, ref_flags = None, {}
+            for sig_info in r_sigs.json().get("result", []):
+                r2 = requests.post(config.SOLANA_RPC_URL, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
+                    "params": [sig_info["signature"],
+                               {"encoding": "base64", "maxSupportedTransactionVersion": 0}],
+                }, timeout=15)
+                res = r2.json().get("result")
+                if not res:
+                    continue
+                ref_tx  = VersionedTransaction.from_bytes(
+                    base64.b64decode(res["transaction"][0]))
+                ref_msg = ref_tx.message
+                rkeys   = [str(k) for k in ref_msg.account_keys]
+                h       = ref_msg.header
+                ns, rrs, rns = (h.num_required_signatures,
+                                h.num_readonly_signed_accounts,
+                                h.num_readonly_unsigned_accounts)
+                nst = len(rkeys)
+                for inst in ref_msg.instructions:
+                    if "pAMM" not in rkeys[inst.program_id_index]:
+                        continue
+                    if len(inst.accounts) != 24:
+                        continue
+                    if bytes(inst.data)[:8] != _PUMP_BUY_DISC:
+                        continue
+                    if not all(idx < nst for idx in inst.accounts):
+                        continue   # skip ALT-based txs
+                    ref_accs = [rkeys[idx] for idx in inst.accounts]
+                    for j, idx in enumerate(inst.accounts):
+                        is_s = idx < ns
+                        is_w = (idx < ns - rrs) or (ns <= idx < nst - rns)
+                        ref_flags[j] = (is_w, is_s)
+                    break
+                if ref_accs:
+                    break
+
+            if not ref_accs:
+                logger.warning("PumpSwap: no reference buy tx found for pool %s",
+                               pool_address[:16])
+                return None, 0, 0.0
+
+            # ── Step 6: substitute user-specific accounts ─────────────────────
+            user_base_ata = _ata(user, base_mint_pk)
+            user_wsol_ata = _ata(user, WSOL_MINT)
+            accs = list(ref_accs)
+            accs[1] = str(user)           # user (writable signer)
+            accs[5] = str(user_base_ata)  # user base token account
+            accs[6] = str(user_wsol_ata)  # user WSOL account
+            # accs[9], [10], [20]: referral — keep from reference tx (benign)
+
+            account_metas = [
+                AccountMeta(pubkey=Pubkey.from_string(acc),
+                            is_signer=ref_flags.get(j, (False, False))[1],
+                            is_writable=ref_flags.get(j, (False, False))[0])
+                for j, acc in enumerate(accs)
+            ]
+
+            # ── Step 7: build instructions ────────────────────────────────────
+            buy_sell_disc = _PUMP_BUY_DISC if not is_sell else _PUMP_SELL_DISC
+            main_data = buy_sell_disc + struct.pack("<QQ", arg0, arg1)
+            main_ix   = Instruction(program_id=PUMPSWAP,
+                                    accounts=account_metas, data=main_data)
+
+            if not is_sell:
+                # Wrap SOL → WSOL, execute buy, unwrap remaining WSOL
+                create_wsol_ix = Instruction(
+                    program_id=ATA_PROG,
+                    accounts=[
+                        AccountMeta(user,          True,  True),
+                        AccountMeta(user_wsol_ata, False, True),
+                        AccountMeta(user,          False, False),
+                        AccountMeta(WSOL_MINT,     False, False),
+                        AccountMeta(SYS_PROG,      False, False),
+                        AccountMeta(TOKEN_PROG,    False, False),
+                    ],
+                    data=bytes([1]),
+                )
+                fund_ix  = transfer(TransferParams(user, user_wsol_ata, max_quote_in))
+                sync_ix  = Instruction(TOKEN_PROG,
+                                       [AccountMeta(user_wsol_ata, False, True)],
+                                       bytes([17]))   # syncNative = 17
+                create_base_ix = Instruction(
+                    program_id=ATA_PROG,
+                    accounts=[
+                        AccountMeta(user,          True,  True),
+                        AccountMeta(user_base_ata, False, True),
+                        AccountMeta(user,          False, False),
+                        AccountMeta(base_mint_pk,  False, False),
+                        AccountMeta(SYS_PROG,      False, False),
+                        AccountMeta(TOKEN_PROG,    False, False),
+                    ],
+                    data=bytes([1]),
+                )
+                close_ix = Instruction(TOKEN_PROG,
+                                       [AccountMeta(user_wsol_ata, False, True),
+                                        AccountMeta(user,          False, True),
+                                        AccountMeta(user,          True,  False)],
+                                       bytes([9]))    # closeAccount = 9
+                instructions = [create_wsol_ix, fund_ix, sync_ix,
+                                create_base_ix, main_ix, close_ix]
+            else:
+                # Sell: just execute the sell (tokens → WSOL → SOL auto-unwrapped by close)
+                create_wsol_ix = Instruction(
+                    program_id=ATA_PROG,
+                    accounts=[
+                        AccountMeta(user,          True,  True),
+                        AccountMeta(user_wsol_ata, False, True),
+                        AccountMeta(user,          False, False),
+                        AccountMeta(WSOL_MINT,     False, False),
+                        AccountMeta(SYS_PROG,      False, False),
+                        AccountMeta(TOKEN_PROG,    False, False),
+                    ],
+                    data=bytes([1]),
+                )
+                close_ix = Instruction(TOKEN_PROG,
+                                       [AccountMeta(user_wsol_ata, False, True),
+                                        AccountMeta(user,          False, True),
+                                        AccountMeta(user,          True,  False)],
+                                       bytes([9]))
+                instructions = [create_wsol_ix, main_ix, close_ix]
+
+            bh  = self._client.get_latest_blockhash().value.blockhash
+            msg = MessageV0.try_compile(user, instructions, [], bh)
+            tx  = VersionedTransaction(msg, [self._keypair])
+            tx_b64 = base64.b64encode(bytes(tx)).decode()
+            logger.info("PumpSwap %s tx built: %d → pool=%s",
+                        "sell" if is_sell else "buy", amount_raw, pool_address[:16])
+            return tx_b64, out_amount, 0.0
+
+        except Exception as e:
+            logger.warning("PumpSwap exception: %s", e)
             return None, 0, 0.0
 
     def _quote_and_build_pumpfun(self, input_mint: str, output_mint: str,
