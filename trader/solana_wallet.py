@@ -436,29 +436,45 @@ class SolanaWallet:
         4. Wait for FINALIZED confirmation
         5. Retry once with 2× fee if transaction expires
         """
-        # 1. Get quote + build tx — Jupiter → Raydium → Pump.fun (cascade)
-        tx_b64, out_amount, price_impact = self._quote_and_build_jupiter(
-            input_mint, output_mint, raw_input_amount, slippage_bps)
-        if tx_b64 is None:
-            logger.info("Jupiter unavailable — trying Raydium")
-            tx_b64, out_amount, price_impact = self._quote_and_build_raydium(
-                input_mint, output_mint, raw_input_amount, slippage_bps)
+        # 1. Get quote + build tx — choose path based on token type
         _is_pump = output_mint.endswith("pump") or input_mint.endswith("pump")
-        if tx_b64 is None and _is_pump:
-            logger.info("Raydium unavailable — trying Pump.fun bonding curve (PumpPortal)")
-            tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
-                input_mint, output_mint, raw_input_amount, slippage_bps, pool="pump")
+
+        if _is_pump and pair_address:
+            # Fast-path: pool address already known → build on-chain directly.
+            # Skips Jupiter/Raydium because they sometimes return txs that fail
+            # on-chain for new/low-liquidity PumpSwap pools, silently blocking the
+            # fallback cascade.  The on-chain path is always correct when pool addr is known.
+            logger.info("Pump token with known pool — using direct on-chain path")
+            tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun_direct(
+                input_mint, output_mint, raw_input_amount, slippage_bps,
+                pair_address=pair_address)
             if tx_b64 is None:
-                logger.info("Pump.fun bonding curve unavailable — trying PumpSwap AMM (PumpPortal)")
+                # Direct failed (e.g. RPC error) — PumpPortal as last resort
                 tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
                     input_mint, output_mint, raw_input_amount, slippage_bps, pool="pumpswap")
+        else:
+            # Standard path: Jupiter → Raydium → (pump-specific fallbacks)
+            tx_b64, out_amount, price_impact = self._quote_and_build_jupiter(
+                input_mint, output_mint, raw_input_amount, slippage_bps)
             if tx_b64 is None:
-                logger.info("PumpPortal unavailable — building Pump.fun tx directly on-chain")
-                tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun_direct(
-                    input_mint, output_mint, raw_input_amount, slippage_bps,
-                    pair_address=pair_address)
-        elif tx_b64 is None:
-            logger.info("Raydium unavailable — token is not a Pump.fun token, no further fallbacks")
+                logger.info("Jupiter unavailable — trying Raydium")
+                tx_b64, out_amount, price_impact = self._quote_and_build_raydium(
+                    input_mint, output_mint, raw_input_amount, slippage_bps)
+            if tx_b64 is None and _is_pump:
+                logger.info("Raydium unavailable — trying Pump.fun bonding curve (PumpPortal)")
+                tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
+                    input_mint, output_mint, raw_input_amount, slippage_bps, pool="pump")
+                if tx_b64 is None:
+                    logger.info("Pump.fun bonding curve unavailable — trying PumpSwap AMM (PumpPortal)")
+                    tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
+                        input_mint, output_mint, raw_input_amount, slippage_bps, pool="pumpswap")
+                if tx_b64 is None:
+                    logger.info("PumpPortal unavailable — building Pump.fun tx directly on-chain")
+                    tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun_direct(
+                        input_mint, output_mint, raw_input_amount, slippage_bps,
+                        pair_address=pair_address)
+            elif tx_b64 is None and not _is_pump:
+                logger.info("Raydium unavailable — token is not a Pump.fun token, no further fallbacks")
         if tx_b64 is None:
             return SwapResult(success=False,
                               error="No DEX quote available (Jupiter + Raydium + Pump.fun all failed)")
@@ -1020,7 +1036,8 @@ class SolanaWallet:
                             continue
                         if len(inst.accounts) != 24:
                             continue
-                        if bytes(inst.data)[:8] != _PUMP_BUY_DISC:
+                        # Accept buy OR sell instructions — both use the same 24-account layout
+                        if bytes(inst.data)[:8] not in (_PUMP_BUY_DISC, _PUMP_SELL_DISC):
                             continue
                         if not all(idx < len(rkeys) for idx in inst.accounts):
                             continue
