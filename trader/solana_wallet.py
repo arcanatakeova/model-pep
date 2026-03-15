@@ -63,6 +63,12 @@ _PUMP_BUY_DISC = _hashlib.sha256(b"global:buy").digest()[:8]
 
 _PUMP_SELL_DISC = _hashlib.sha256(b"global:sell").digest()[:8]
 
+# PumpSwap (pAMM) buy discriminator — NOT the sha256-derived value.
+# Real on-chain pAMM buy transactions all use c62e1552b4d9e870.
+# The sha256-derived value triggers a different (legacy) code path that
+# overflows at buy.rs:414 (error 0x1787).
+_PUMPSWAP_BUY_DISC = bytes.fromhex("c62e1552b4d9e870")
+
 # Raydium swap API — used as fallback when Jupiter is geo-blocked
 RAYDIUM_COMPUTE_URL  = "https://transaction-v1.raydium.io/compute/swap-base-in"
 RAYDIUM_TX_URL       = "https://transaction-v1.raydium.io/transaction/swap-base-in"
@@ -1108,7 +1114,7 @@ class SolanaWallet:
                         # Only clone from BUY instructions: sell layout has different
                         # account positions (e.g. [19] and [22] differ), causing
                         # 0xbbf/0xbc0 when we build a tx using sell-derived accounts.
-                        if bytes(inst.data)[:8] != _PUMP_BUY_DISC:
+                        if bytes(inst.data)[:8] != _PUMPSWAP_BUY_DISC:
                             continue
                         if not all(idx < len(rkeys) for idx in inst.accounts):
                             continue
@@ -1189,7 +1195,7 @@ class SolanaWallet:
                                 if (_ix.program_id_index >= len(_rk)
                                         or _rk[_ix.program_id_index] != str(PUMPSWAP)
                                         or len(_ix.accounts) != 24
-                                        or bytes(_ix.data)[:8] != _PUMP_BUY_DISC  # only buy layout
+                                        or bytes(_ix.data)[:8] != _PUMPSWAP_BUY_DISC  # only buy layout
                                         or not all(i < len(_rk) for i in _ix.accounts)):
                                     continue
                                 _pumpswap_global_va = _rk[_ix.accounts[19]]
@@ -1236,33 +1242,63 @@ class SolanaWallet:
                     str(_coin_creator_vault_23),         # [23] pAMM PDA(creator_vault, bc_creator)
                 ]
 
-            # Writable / signer flags for each of the 24 accounts
-            _ACCT_FLAGS = [
-                (True,  False),  # [0]  pool         W
-                (True,  True),   # [1]  user         WS
-                (False, False),  # [2]  globalConfig R
-                (False, False),  # [3]  base_mint    R
-                (False, False),  # [4]  quote_mint   R
-                (True,  False),  # [5]  user_base    W
-                (True,  False),  # [6]  user_wsol    W
-                (True,  False),  # [7]  pool_base    W
-                (True,  False),  # [8]  pool_quote   W
-                (False, False),  # [9]  referral     R
-                (True,  False),  # [10] ref_wsol     W
-                (False, False),  # [11] Token-2022   R
-                (False, False),  # [12] Token        R
-                (False, False),  # [13] System       R
-                (False, False),  # [14] ATA          R
-                (False, False),  # [15] EventAuth    R
-                (False, False),  # [16] PUMPSWAP     R
-                (True,  False),  # [17] creator_wsol W
-                (True,  False),  # [18] creator_vault W (same PDA as [23])
-                (True,  False),  # [19] global_vol_acc  W (init_if_needed)
-                (True,  False),  # [20] user_vol_acc   W (init_if_needed)
-                (False, False),  # [21] pfee state     R
-                (False, False),  # [22] pfee program   R
-                (True,  False),  # [23] coin_creator_vault W (init_if_needed PDA)
-            ]
+            # Sell uses 22 accounts — drop buy[19]=global_va and buy[20]=user_va.
+            # Confirmed from real on-chain sell txs: sell has no volume accumulators.
+            # buy[21]→sell[19], buy[22]→sell[20], buy[23]→sell[21].
+            if is_sell:
+                ref_accs = ref_accs[:19] + ref_accs[21:]   # 24 → 22 accounts
+                _ACCT_FLAGS = [
+                    (True,  False),  # [0]  pool         W
+                    (True,  True),   # [1]  user         WS
+                    (False, False),  # [2]  globalConfig R
+                    (False, False),  # [3]  base_mint    R
+                    (False, False),  # [4]  quote_mint   R
+                    (True,  False),  # [5]  user_base    W
+                    (True,  False),  # [6]  user_wsol    W
+                    (True,  False),  # [7]  pool_base    W
+                    (True,  False),  # [8]  pool_quote   W
+                    (False, False),  # [9]  referral     R
+                    (True,  False),  # [10] ref_wsol     W
+                    (False, False),  # [11] Token-2022   R
+                    (False, False),  # [12] Token        R
+                    (False, False),  # [13] System       R
+                    (False, False),  # [14] ATA          R
+                    (False, False),  # [15] EventAuth    R
+                    (False, False),  # [16] PUMPSWAP     R
+                    (True,  False),  # [17] creator_wsol W
+                    (True,  False),  # [18] creator_vault W
+                    (False, False),  # [19] pfee state   R
+                    (False, False),  # [20] pfee program R
+                    (True,  False),  # [21] coin_creator_vault W
+                ]
+            else:
+                # Writable / signer flags for each of the 24 buy accounts
+                _ACCT_FLAGS = [
+                    (True,  False),  # [0]  pool         W
+                    (True,  True),   # [1]  user         WS
+                    (False, False),  # [2]  globalConfig R
+                    (False, False),  # [3]  base_mint    R
+                    (False, False),  # [4]  quote_mint   R
+                    (True,  False),  # [5]  user_base    W
+                    (True,  False),  # [6]  user_wsol    W
+                    (True,  False),  # [7]  pool_base    W
+                    (True,  False),  # [8]  pool_quote   W
+                    (False, False),  # [9]  referral     R
+                    (True,  False),  # [10] ref_wsol     W
+                    (False, False),  # [11] Token-2022   R
+                    (False, False),  # [12] Token        R
+                    (False, False),  # [13] System       R
+                    (False, False),  # [14] ATA          R
+                    (False, False),  # [15] EventAuth    R
+                    (False, False),  # [16] PUMPSWAP     R
+                    (True,  False),  # [17] creator_wsol W
+                    (True,  False),  # [18] creator_vault W
+                    (True,  False),  # [19] global_vol_acc  W (init_if_needed)
+                    (True,  False),  # [20] user_vol_acc   W (init_if_needed)
+                    (False, False),  # [21] pfee state     R
+                    (False, False),  # [22] pfee program   R
+                    (True,  False),  # [23] coin_creator_vault W (init_if_needed PDA)
+                ]
 
             account_metas = [
                 AccountMeta(pubkey=Pubkey.from_string(acc),
@@ -1277,7 +1313,7 @@ class SolanaWallet:
             cu_limit_ix = set_compute_unit_limit(400_000)   # PumpSwap + WSOL wrap ~200K CU
             cu_price_ix = set_compute_unit_price(cu_price)
 
-            buy_sell_disc = _PUMP_BUY_DISC if not is_sell else _PUMP_SELL_DISC
+            buy_sell_disc = _PUMPSWAP_BUY_DISC if not is_sell else _PUMP_SELL_DISC
             main_data = buy_sell_disc + struct.pack("<QQ", arg0, arg1)
             main_ix   = Instruction(program_id=PUMPSWAP,
                                     accounts=account_metas, data=main_data)
