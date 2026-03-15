@@ -445,7 +445,11 @@ class RiskManager:
         if entry <= 0:
             return None, "Hold", 0
 
-        pnl_pct = (current - entry) / entry
+        side = position.get("side", "long")
+        if side == "long":
+            pnl_pct = (current - entry) / entry
+        else:
+            pnl_pct = (entry - current) / entry
         if pnl_pct <= 0:
             return None, "Hold", 0   # Never partial-sell at a loss
         already_taken = position.get("partial_profits_taken", [])

@@ -147,7 +147,7 @@ def bollinger_signal(close: pd.Series) -> float:
     l1 = lower.iloc[-2]
 
     band_width = u - l
-    if band_width == 0:
+    if band_width == 0 or pd.isna(band_width):
         return 0.0
 
     # Position within bands: -1 at lower, 0 at mid, +1 at upper
@@ -186,7 +186,7 @@ def ema_cross_signal(close: pd.Series,
 
     diff     = f.iloc[-1] - s.iloc[-1]
     diff_prev = f.iloc[-2] - s.iloc[-2]
-    spread   = abs(diff) / s.iloc[-1] if s.iloc[-1] != 0 else 0
+    spread   = abs(diff) / s.iloc[-1] if (s.iloc[-1] != 0 and not pd.isna(s.iloc[-1])) else 0
 
     score = 0.0
     # Direction: 0.5

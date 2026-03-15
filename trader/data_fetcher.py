@@ -883,6 +883,7 @@ def get_finnhub_ohlcv(symbol: str, resolution: str = "60",
         resp.raise_for_status()
         data = resp.json()
         if data.get("s") != "ok" or not data.get("t"):
+            logger.debug("Finnhub OHLCV %s: status=%s (no candle data)", symbol, data.get("s", "unknown"))
             return _store(key, pd.DataFrame())
         df = pd.DataFrame({
             "timestamp": pd.to_datetime(data["t"], unit="s", utc=True),

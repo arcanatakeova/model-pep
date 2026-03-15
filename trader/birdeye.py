@@ -244,6 +244,7 @@ class BirdeyeClient:
             risk_flags=flags,
         )
         self._security_cache[mint_address] = (sec, now)
+        self._evict_cache(self._security_cache, self._SECURITY_TTL)
         return sec
 
     # ─── OHLCV ─────────────────────────────────────────────────────────────────
@@ -295,6 +296,7 @@ class BirdeyeClient:
                     pass
 
         self._ohlcv_cache[cache_key] = (candles, now)
+        self._evict_cache(self._ohlcv_cache, self._OHLCV_TTL)
         return candles
 
     # ─── Trending ──────────────────────────────────────────────────────────────

@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,10 @@ logger = logging.getLogger(__name__)
 _client = None
 _client_lock = threading.Lock()
 _connected = False
+_throttle_lock = threading.Lock()
+
+# Valid env var name: uppercase/lowercase letters, digits, underscore
+_VALID_ENV_NAME = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 
 def _get_client(require_service_role: bool = False):
@@ -94,11 +100,25 @@ def load_secrets() -> bool:
         return False
     try:
         resp = client.rpc("get_vault_secrets").execute()
+        if not isinstance(resp.data, list):
+            logger.warning("Vault RPC returned unexpected data type: %s", type(resp.data).__name__)
+            return False
         loaded = 0
-        for row in (resp.data or []):
-            name   = (row.get("name") or "").strip()
-            secret = (row.get("decrypted_secret") or "").strip()
-            if name and secret:
+        for row in resp.data:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("name")
+            secret = row.get("decrypted_secret")
+            # Use `is not None` — a name like "0" is valid but falsy
+            if name is not None and secret is not None:
+                name = str(name).strip()
+                secret = str(secret).strip()
+                if not name or not secret:
+                    continue
+                # Validate env var name (prevent injection of malformed keys)
+                if not _VALID_ENV_NAME.match(name):
+                    logger.warning("Skipping invalid env var name from Vault: %r", name[:40])
+                    continue
                 # Restore real newlines in PEM keys stored with escaped \n
                 os.environ[name] = secret.replace("\\n", "\n")
                 loaded += 1
@@ -106,7 +126,7 @@ def load_secrets() -> bool:
             logger.info("Loaded %d secrets from Supabase Vault (encrypted at rest)", loaded)
         return loaded > 0
     except Exception as e:
-        logger.warning("Failed to load Vault secrets: %s — using .env fallback", e)
+        logger.warning("Failed to load Vault secrets — using .env fallback")
         return False
 
 
@@ -150,19 +170,19 @@ _last_equity_write: float = 0.0
 def persist_equity(equity: float, cash: float, dex_value: float) -> None:
     """
     Append an equity-curve data point to Supabase `equity_curve` table.
-    Silently throttled to 5-second intervals.
+    Silently throttled to 5-second intervals (thread-safe).
     """
     global _last_equity_write
-    now = time.time()
-    if now - _last_equity_write < 5:
-        return
-    _last_equity_write = now
+    with _throttle_lock:
+        now = time.time()
+        if now - _last_equity_write < 5:
+            return
+        _last_equity_write = now
 
     client = _get_client()
     if client is None:
         return
     try:
-        from datetime import datetime, timezone
         client.table("equity_curve").insert({
             "ts":        datetime.now(timezone.utc).isoformat(),
             "equity":    round(equity, 4),
@@ -182,19 +202,19 @@ def persist_bot_state(state: dict) -> None:
     """
     Upsert the latest bot state into Supabase `bot_state` table (single row,
     id=1).  Dashboard or external tools can query this for a live view.
-    Throttled to once every 5 s.
+    Throttled to once every 5 s (thread-safe).
     """
     global _last_state_write
-    now = time.time()
-    if now - _last_state_write < 5:
-        return
-    _last_state_write = now
+    with _throttle_lock:
+        now = time.time()
+        if now - _last_state_write < 5:
+            return
+        _last_state_write = now
 
     client = _get_client()
     if client is None:
         return
     try:
-        from datetime import datetime, timezone
         client.table("bot_state").upsert({
             "id":         1,
             "state":      state,

@@ -57,6 +57,20 @@ MAX_MARKET_CAP     = 500_000_000 # $500M ceiling
 MAX_PAIR_AGE_HOURS = 24          # 24h max (was 96: dead tokens waste API calls)
 PREFERRED_CHAINS   = ["solana"]
 
+
+def _safe_float(val, default: float = 0.0) -> float:
+    """Convert value to float, handling None, NaN strings, and invalid types."""
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        if f != f:  # NaN check (NaN != NaN)
+            return default
+        return f
+    except (ValueError, TypeError):
+        return default
+
+
 # Search terms — broad coverage across naming conventions
 _SEARCH_QUERIES = ["SOL", "USDC", "PUMP", "MEME", "AI", "DOG", "WIF"]
 
@@ -952,15 +966,15 @@ class DexScreener:
                 base_address   = pair.get("baseToken", {}).get("address", ""),
                 quote_symbol   = pair.get("quoteToken", {}).get("symbol", ""),
                 price_usd      = price,
-                price_change_m5  = float(change.get("m5") or 0),
-                price_change_h1  = float(change.get("h1") or 0),
-                price_change_h6  = float(change.get("h6") or 0),
-                price_change_h24 = float(change.get("h24") or 0),
-                volume_h1   = float(volume.get("h1") or 0),
-                volume_h24  = float(volume.get("h24") or 0),
-                volume_m5   = float(volume.get("m5") or 0),
-                liquidity_usd = float(liq.get("usd") or 0),
-                market_cap    = float(pair.get("marketCap") or pair.get("fdv") or 0),
+                price_change_m5  = _safe_float(change.get("m5")),
+                price_change_h1  = _safe_float(change.get("h1")),
+                price_change_h6  = _safe_float(change.get("h6")),
+                price_change_h24 = _safe_float(change.get("h24")),
+                volume_h1   = _safe_float(volume.get("h1")),
+                volume_h24  = _safe_float(volume.get("h24")),
+                volume_m5   = _safe_float(volume.get("m5")),
+                liquidity_usd = _safe_float(liq.get("usd")),
+                market_cap    = _safe_float(pair.get("marketCap") or pair.get("fdv")),
                 buys_h1   = int(txns_h1.get("buys", 0)),
                 sells_h1  = int(txns_h1.get("sells", 0)),
                 buys_h24  = int(txns_h24.get("buys", 0)),

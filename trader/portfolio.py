@@ -132,7 +132,9 @@ class Portfolio:
                 pnl = (price - entry) * qty
             else:
                 pnl = (entry - price) * qty
-                self.cash += pnl  # Credit/debit for short
+                # Return margin collateral + P&L for futures shorts
+                margin = pos.get("margin_usd", 0.0)
+                self.cash += margin + pnl
 
             pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
 
@@ -320,21 +322,21 @@ class Portfolio:
             positions = state.get("open_positions", {})
             trades = state.get("closed_trades", [])
 
+            # Validate open positions before assigning
+            bad = [k for k, v in positions.items()
+                   if not isinstance(v, dict) or "entry_price" not in v or "side" not in v
+                   or float(v.get("entry_price", 0)) <= 0 or float(v.get("qty", 0)) <= 0]
+            if bad:
+                logger.warning("Removing %d malformed open positions: %s", len(bad), bad)
+                for k in bad:
+                    positions.pop(k, None)
+
             with self._lock:
                 self.cash = cash
                 self.initial_capital = max(initial, 1.0)
                 self.peak_equity = max(peak, cash, 1.0)
                 self.open_positions = positions
                 self.closed_trades = trades
-
-            # Validate open positions have required fields
-            bad = [k for k, v in self.open_positions.items()
-                   if not isinstance(v, dict) or "entry_price" not in v or "side" not in v
-                   or float(v.get("entry_price", 0)) <= 0 or float(v.get("qty", 0)) <= 0]
-            if bad:
-                logger.warning("Removing %d malformed open positions: %s", len(bad), bad)
-                for k in bad:
-                    self.open_positions.pop(k, None)
 
             logger.info("Portfolio loaded: equity=$%.2f, %d open, %d closed trades",
                         self.equity(), len(self.open_positions), len(self.closed_trades))

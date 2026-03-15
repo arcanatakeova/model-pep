@@ -56,7 +56,11 @@ class MarketScanner:
                     logger.debug("Scanner error for %s %s: %s", market, asset, e)
 
         # Sort: actionable signals first, then by conviction
-        signals.sort(key=lambda s: (s.signal == "HOLD", -abs(s.score), -s.conviction))
+        signals.sort(key=lambda s: (
+            (s.signal or "HOLD") == "HOLD",
+            -abs(s.score or 0),
+            -(s.conviction or 0),
+        ))
         logger.info("Scan complete: %d signals (%d BUY, %d SELL, %d HOLD)",
                     len(signals),
                     sum(1 for s in signals if s.signal == "BUY"),

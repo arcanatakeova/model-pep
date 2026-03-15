@@ -1346,7 +1346,7 @@ class SolanaWallet:
             signed_b64 = base64.b64encode(bytes(signed_tx)).decode()
 
             # Jito tip: send a separate SOL transfer of ~0.001 SOL as bundle tip
-            tip_lamports = max(priority_fee, config.JITO_TIP_LAMPORTS)
+            tip_lamports = config.JITO_TIP_LAMPORTS  # Fixed tip independent of priority fee
             tip_tx_b64   = self._build_jito_tip_transaction(tip_lamports)
             if not tip_tx_b64:
                 # Can't build tip tx → skip Jito, fall through to direct RPC
@@ -1674,6 +1674,7 @@ class SolanaWallet:
                 ],
             }, timeout=15)
             if not resp.ok:
+                logger.warning("get_all_token_balances: RPC HTTP %d", resp.status_code)
                 return {}
             result = {}
             for acc in resp.json().get("result", {}).get("value", []):

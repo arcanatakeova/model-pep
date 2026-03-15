@@ -554,7 +554,7 @@ class AITrader:
                 "total_pnl_usd": perf.get("total_pnl_usd", 0),
                 # Recent closed trades (last 50) — written every cycle so dashboard
                 # is always current, regardless of trades.json save frequency.
-                "recent_trades": list(self.portfolio.closed_trades)[-50:],
+                "recent_trades": (lambda ct: ct[-50:])(list(self.portfolio.closed_trades)),
                 "signal_table": signal_table,
                 # DEX positions detail for dashboard (snapshot under lock)
                 "dex_position_details": self._snapshot_dex_positions(),
