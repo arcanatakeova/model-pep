@@ -992,15 +992,16 @@ class SolanaWallet:
             # ── Step 4: AMM calculation (~1% total fees) ──────────────────────
             if not is_sell:
                 # BUY: sol_in → tokens_out
-                # Use single-step integer arithmetic to avoid intermediate truncation
-                # producing a token_out that's too large for the on-chain reverse check.
-                # Apply 98% safety factor to prevent overflow error 0x1787 in buy.rs.
+                # Instruction is BuyExactQuoteIn: arg0 = exact SOL (quote) in lamports,
+                # arg1 = min base tokens out.
+                # DO NOT pass token_out as arg0: pAMM treats arg0 as the SOL amount to
+                # debit from user's WSOL — passing base-token units causes 0x1 InsufficientFunds.
                 _num     = base_reserve * amount_raw * 9900
                 _den     = (quote_reserve * 10000) + (amount_raw * 9900)
                 token_out = _num // _den
-                token_out = token_out * 98 // 100   # 2% margin: avoids on-chain arithmetic overflow
+                token_out = token_out * 98 // 100   # 2% margin for on-chain slippage tolerance
                 max_quote_in  = int(amount_raw * (1 + slippage_bps / 10000))
-                arg0, arg1    = token_out, max_quote_in
+                arg0, arg1    = amount_raw, token_out   # exact SOL in, min tokens out
                 out_amount    = token_out
                 if token_out <= 0:
                     logger.warning("PumpSwap: zero token calc pool=%s", pool_address[:16])
