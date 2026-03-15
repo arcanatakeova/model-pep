@@ -20,9 +20,8 @@ solders>=0.18.1             # Rust-based Solana types (Keypair, Pubkey, etc.)
 # Required for live Polymarket prediction market trading
 py-clob-client>=0.12.0      # Official Polymarket CLOB client
 
-# ── CEX Live Trading (optional) ───────────────────────────────────────────────
-# Uncomment to enable live trading on Binance, Coinbase, etc.
-# ccxt>=4.0.0               # Unified crypto exchange API
+# ── CEX Live Trading ─────────────────────────────────────────────────────────
+ccxt>=4.0.0                 # Unified crypto exchange API (Coinbase, Binance, etc.)
 
 # ── Development ───────────────────────────────────────────────────────────────
 # pytest>=7.0.0

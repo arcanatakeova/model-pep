@@ -17,7 +17,18 @@ import data_fetcher as df_mod
 logger = logging.getLogger(__name__)
 
 SLIPPAGE = 0.001    # 0.1% simulated slippage for paper trading
-COMMISSION = 0.001  # 0.1% commission per trade (Binance maker fee)
+COMMISSION = 0.001  # 0.1% commission per trade (maker fee)
+
+# ccxt symbol mapping: our asset IDs → exchange trading pairs
+_SYMBOL_MAP = {
+    "bitcoin": "BTC/USD", "ethereum": "ETH/USD", "solana": "SOL/USD",
+    "cardano": "ADA/USD", "polkadot": "DOT/USD", "chainlink": "LINK/USD",
+    "avalanche-2": "AVAX/USD", "uniswap": "UNI/USD", "aave": "AAVE/USD",
+    "bnb": "BNB/USD", "binancecoin": "BNB/USD", "polygon": "MATIC/USD",
+    "matic-network": "MATIC/USD", "arbitrum": "ARB/USD", "optimism": "OP/USD",
+    "dogecoin": "DOGE/USD", "ripple": "XRP/USD", "litecoin": "LTC/USD",
+    "stellar": "XLM/USD", "cosmos": "ATOM/USD", "near-protocol": "NEAR/USD",
+}
 
 
 class TradeExecutor:
@@ -127,14 +138,25 @@ class TradeExecutor:
             logger.debug("Not enough cash: need $%.2f, have $%.2f", actual_cost, self.portfolio.cash)
             return None
 
+        # Execute live order if exchange is connected
+        if self._exchange and not config.PAPER_TRADING:
+            order = self.execute_live_buy(signal.asset_id, qty, fill_price)
+            if not order:
+                logger.warning("Live buy failed for %s — skipping", signal.asset_id)
+                return None
+            # Use actual fill price from exchange if available
+            if order.get("average"):
+                fill_price = float(order["average"])
+
         self.portfolio.cash -= commission   # Deduct commission before position open
         pos = self.portfolio.open_position(
             signal.asset_id, "long", qty, fill_price,
             signal.stop_loss, signal.take_profit, signal.to_dict()
         )
         if pos:
-            logger.info("EXECUTED BUY  %-12s $%.4f × %.6f = $%.2f | Score: %.2f | Conv: %.2f",
-                        signal.symbol, fill_price, qty, size_usd, signal.score, signal.conviction)
+            mode = "LIVE" if self._exchange else "PAPER"
+            logger.info("[%s] BUY  %-12s $%.4f × %.6f = $%.2f | Score: %.2f | Conv: %.2f",
+                        mode, signal.symbol, fill_price, qty, size_usd, signal.score, signal.conviction)
         return pos
 
     def _open_short(self, signal: TradeSignal) -> Optional[dict]:
@@ -185,12 +207,26 @@ class TradeExecutor:
 
     def _execute_close(self, asset_id: str, price: float, reason: str) -> dict:
         """Execute a position close."""
-        fill_price = self._fill_price(price, "sell" if self.portfolio.open_positions.get(asset_id, {}).get("side") == "long" else "buy")
+        pos = self.portfolio.open_positions.get(asset_id, {})
+        side = pos.get("side", "long")
+        qty = pos.get("qty", 0)
+        fill_price = self._fill_price(price, "sell" if side == "long" else "buy")
+
+        # Execute live order if exchange is connected
+        if self._exchange and not config.PAPER_TRADING and qty > 0:
+            if side == "long":
+                order = self.execute_live_sell(asset_id, qty, fill_price)
+            else:
+                order = self.execute_live_buy(asset_id, qty, fill_price)
+            if order and order.get("average"):
+                fill_price = float(order["average"])
+
         trade = self.portfolio.close_position(asset_id, fill_price, reason)
         if trade:
             pnl_str = f"+${trade['pnl_usd']:.2f}" if trade['pnl_usd'] >= 0 else f"-${abs(trade['pnl_usd']):.2f}"
-            logger.info("CLOSED %-12s @ $%.4f | PnL: %s (%.2f%%) | %s",
-                        trade.get("symbol", asset_id), fill_price,
+            mode = "LIVE" if self._exchange else "PAPER"
+            logger.info("[%s] CLOSED %-12s @ $%.4f | PnL: %s (%.2f%%) | %s",
+                        mode, trade.get("symbol", asset_id), fill_price,
                         pnl_str, trade['pnl_pct'], reason)
         return trade
 
@@ -199,8 +235,8 @@ class TradeExecutor:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _fill_price(self, market_price: float, side: str) -> float:
-        """Simulate slippage for paper trading."""
-        if config.PAPER_TRADING:
+        """Simulate slippage for paper trading, or return market price for live."""
+        if config.PAPER_TRADING or self._exchange is None:
             if side == "buy":
                 return market_price * (1 + SLIPPAGE)
             else:
@@ -211,6 +247,12 @@ class TradeExecutor:
         """Fetch current price for an open position."""
         market = pos.get("market", "crypto")
         try:
+            # Try live exchange ticker first (most accurate)
+            if self._exchange and market == "crypto":
+                price = self._exchange_price(asset_id)
+                if price:
+                    return price
+
             if market == "crypto":
                 symbol = pos.get("symbol", asset_id.upper().split("-")[0])
                 df = df_mod.get_crypto_ohlcv_cc(symbol, limit=2)
@@ -229,20 +271,90 @@ class TradeExecutor:
             logger.debug("Price fetch error for %s: %s", asset_id, e)
         return None
 
-    def _init_live_exchange(self):
-        """Initialize ccxt exchange for live trading (Binance by default)."""
-        if not config.BINANCE_API_KEY:
-            logger.warning("Live trading enabled but no BINANCE_API_KEY set — staying in paper mode")
-            return
+    def _exchange_price(self, asset_id: str) -> Optional[float]:
+        """Get price from connected exchange."""
+        if not self._exchange:
+            return None
+        pair = _SYMBOL_MAP.get(asset_id.lower())
+        if not pair:
+            # Try constructing: SYMBOL/USD
+            sym = asset_id.upper().split("-")[0]
+            pair = f"{sym}/USD"
         try:
-            import ccxt
-            self._exchange = ccxt.binance({
-                "apiKey": config.BINANCE_API_KEY,
-                "secret": config.BINANCE_SECRET,
-                "enableRateLimit": True,
-            })
-            logger.info("Live trading initialized: Binance")
-        except ImportError:
-            logger.error("ccxt not installed. Run: pip install ccxt")
+            ticker = self._exchange.fetch_ticker(pair)
+            return float(ticker["last"]) if ticker and ticker.get("last") else None
+        except Exception:
+            # Try USDT pair as fallback
+            try:
+                pair_usdt = pair.replace("/USD", "/USDT")
+                ticker = self._exchange.fetch_ticker(pair_usdt)
+                return float(ticker["last"]) if ticker and ticker.get("last") else None
+            except Exception:
+                return None
+
+    def execute_live_buy(self, asset_id: str, qty: float, price: float) -> Optional[dict]:
+        """Place a live market buy order on the connected exchange."""
+        if not self._exchange:
+            return None
+        pair = _SYMBOL_MAP.get(asset_id.lower(), f"{asset_id.upper().split('-')[0]}/USD")
+        try:
+            order = self._exchange.create_market_buy_order(pair, qty)
+            logger.info("LIVE BUY  %s qty=%.6f | order=%s", pair, qty, order.get("id", "?"))
+            return order
         except Exception as e:
-            logger.error("Failed to init exchange: %s", e)
+            logger.error("Live buy failed %s: %s", pair, e)
+            return None
+
+    def execute_live_sell(self, asset_id: str, qty: float, price: float) -> Optional[dict]:
+        """Place a live market sell order on the connected exchange."""
+        if not self._exchange:
+            return None
+        pair = _SYMBOL_MAP.get(asset_id.lower(), f"{asset_id.upper().split('-')[0]}/USD")
+        try:
+            order = self._exchange.create_market_sell_order(pair, qty)
+            logger.info("LIVE SELL %s qty=%.6f | order=%s", pair, qty, order.get("id", "?"))
+            return order
+        except Exception as e:
+            logger.error("Live sell failed %s: %s", pair, e)
+            return None
+
+    def _init_live_exchange(self):
+        """Initialize ccxt exchange — Coinbase primary, Binance fallback."""
+        # ── Primary: Coinbase Advanced Trade ─────────────────────────────────
+        if config.COINBASE_API_KEY and config.COINBASE_SECRET:
+            try:
+                import ccxt
+                self._exchange = ccxt.coinbase({
+                    "apiKey": config.COINBASE_API_KEY,
+                    "secret": config.COINBASE_SECRET,
+                    "enableRateLimit": True,
+                })
+                # Verify connection
+                self._exchange.load_markets()
+                logger.info("Live trading initialized: Coinbase Advanced Trade")
+                return
+            except ImportError:
+                logger.error("ccxt not installed. Run: pip3 install ccxt")
+                return
+            except Exception as e:
+                logger.warning("Coinbase init failed: %s — trying Binance", e)
+
+        # ── Fallback: Binance ────────────────────────────────────────────────
+        if config.BINANCE_API_KEY and config.BINANCE_SECRET:
+            try:
+                import ccxt
+                self._exchange = ccxt.binance({
+                    "apiKey": config.BINANCE_API_KEY,
+                    "secret": config.BINANCE_SECRET,
+                    "enableRateLimit": True,
+                })
+                self._exchange.load_markets()
+                logger.info("Live trading initialized: Binance")
+                return
+            except ImportError:
+                logger.error("ccxt not installed. Run: pip3 install ccxt")
+            except Exception as e:
+                logger.error("Binance init failed: %s", e)
+            return
+
+        logger.warning("Live trading enabled but no exchange API keys set — staying in paper mode")
