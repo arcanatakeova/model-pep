@@ -34,15 +34,24 @@ _client_lock = threading.Lock()
 _connected = False
 
 
-def _get_client():
-    """Return cached Supabase client, or None if not configured."""
+def _get_client(require_service_role: bool = False):
+    """
+    Return cached Supabase client, or None if not configured.
+    require_service_role=True: only returns client if service_role key is available
+    (needed for the secrets table which has strict RLS).
+    """
     global _client, _connected
     if _client is not None:
+        if require_service_role and not os.getenv("SUPABASE_SERVICE_KEY", "").strip():
+            return None
         return _client
     with _client_lock:
         if _client is not None:
+            if require_service_role and not os.getenv("SUPABASE_SERVICE_KEY", "").strip():
+                return None
             return _client
         url = os.getenv("SUPABASE_URL", "").strip()
+        # Prefer service_role key; fall back to anon key for non-secret operations
         key = (os.getenv("SUPABASE_SERVICE_KEY", "")
                or os.getenv("SUPABASE_ANON_KEY", "")).strip()
         if not url or not key:
@@ -51,11 +60,15 @@ def _get_client():
             from supabase import create_client
             _client = create_client(url, key)
             _connected = True
-            logger.info("Supabase connected: %s", url.split("//")[-1].split(".")[0])
+            key_type = "service_role" if os.getenv("SUPABASE_SERVICE_KEY") else "anon"
+            logger.info("Supabase connected [%s]: %s",
+                        key_type, url.split("//")[-1].split(".")[0])
         except ImportError:
             logger.warning("supabase-py not installed — run: pip install supabase")
         except Exception as e:
             logger.warning("Supabase connection failed: %s", e)
+        if require_service_role and not os.getenv("SUPABASE_SERVICE_KEY", "").strip():
+            return None
         return _client
 
 
@@ -67,9 +80,12 @@ def load_secrets() -> bool:
     os.environ.  Call this once at process startup, before config.py is
     imported, so every os.getenv() call in config picks up the Supabase values.
 
+    Requires service_role key (secrets table has strict RLS).
+    Falls back gracefully if only anon key is available.
+
     Returns True if at least one secret was loaded.
     """
-    client = _get_client()
+    client = _get_client(require_service_role=True)
     if client is None:
         return False
     try:
