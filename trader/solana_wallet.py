@@ -957,8 +957,9 @@ class SolanaWallet:
             _pool_pk = Pubkey.from_string(pool_address)
             global_volume_acc, _ = Pubkey.find_program_address(
                 [b"global_volume_accumulator"], PUMPSWAP)
+            # user_volume_accumulator is per-user (NOT per-pool)
             user_volume_acc, _ = Pubkey.find_program_address(
-                [b"user_volume_accumulator", bytes(user), bytes(_pool_pk)], PUMPSWAP)
+                [b"user_volume_accumulator", bytes(user)], PUMPSWAP)
             logger.debug("PumpSwap PDAs: global_va=%s user_va=%s",
                          str(global_volume_acc)[:16], str(user_volume_acc)[:16])
 
