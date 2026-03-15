@@ -277,15 +277,16 @@ class Portfolio:
 
     def save(self, filepath: str = config.TRADE_LOG_FILE):
         """Persist portfolio state to JSON atomically (temp file + rename)."""
-        state = {
-            "cash": self.cash,
-            "initial_capital": self.initial_capital,
-            "peak_equity": self.peak_equity,
-            "open_positions": self.open_positions,
-            "closed_trades": self.closed_trades,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-            "mode": "paper" if config.PAPER_TRADING else "live",
-        }
+        with self._lock:
+            state = {
+                "cash": self.cash,
+                "initial_capital": self.initial_capital,
+                "peak_equity": self.peak_equity,
+                "open_positions": dict(self.open_positions),
+                "closed_trades": list(self.closed_trades),
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "mode": "paper" if config.PAPER_TRADING else "live",
+            }
         tmp = filepath + ".tmp"
         try:
             with open(tmp, "w") as f:
@@ -313,16 +314,18 @@ class Portfolio:
             if cash < 0:
                 logger.error("Corrupted state: negative cash $%.2f — resetting to INITIAL_CAPITAL", cash)
                 cash = config.INITIAL_CAPITAL
-            self.cash = cash
 
             initial = float(state.get("initial_capital", config.INITIAL_CAPITAL))
-            self.initial_capital = max(initial, 1.0)   # Must be positive
+            peak = float(state.get("peak_equity", cash))
+            positions = state.get("open_positions", {})
+            trades = state.get("closed_trades", [])
 
-            peak = float(state.get("peak_equity", self.cash))
-            self.peak_equity = max(peak, self.cash, 1.0)  # Never below current equity
-
-            self.open_positions = state.get("open_positions", {})
-            self.closed_trades  = state.get("closed_trades", [])
+            with self._lock:
+                self.cash = cash
+                self.initial_capital = max(initial, 1.0)
+                self.peak_equity = max(peak, cash, 1.0)
+                self.open_positions = positions
+                self.closed_trades = trades
 
             # Validate open positions have required fields
             bad = [k for k, v in self.open_positions.items()
