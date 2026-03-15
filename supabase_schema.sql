@@ -70,9 +70,11 @@ create table if not exists trades (
 
 alter table trades enable row level security;
 
+-- Writes: service_role only (bot process). Reads: anon OK (dashboard).
 drop policy if exists "anon_insert_trades" on trades;
 drop policy if exists "anon_select_trades" on trades;
-create policy "anon_insert_trades" on trades for insert to anon with check (true);
+drop policy if exists "service_role_write_trades" on trades;
+create policy "service_role_write_trades" on trades for insert to service_role with check (true);
 create policy "anon_select_trades" on trades for select to anon using (true);
 
 create index if not exists trades_closed_at_idx on trades (closed_at desc);
@@ -80,7 +82,7 @@ create index if not exists trades_symbol_idx    on trades (symbol);
 
 
 -- ─── 3. Equity curve ─────────────────────────────────────────────────────────
--- Time-series written every 5 seconds while the bot runs. Anon key.
+-- Time-series written every 5 seconds while the bot runs.
 
 create table if not exists equity_curve (
     ts         timestamptz primary key default now(),
@@ -91,14 +93,16 @@ create table if not exists equity_curve (
 
 alter table equity_curve enable row level security;
 
+-- Writes: service_role only. Reads: anon OK (dashboard charts).
 drop policy if exists "anon_insert_equity" on equity_curve;
 drop policy if exists "anon_select_equity" on equity_curve;
-create policy "anon_insert_equity" on equity_curve for insert to anon with check (true);
+drop policy if exists "service_role_write_equity" on equity_curve;
+create policy "service_role_write_equity" on equity_curve for insert to service_role with check (true);
 create policy "anon_select_equity" on equity_curve for select to anon using (true);
 
 
 -- ─── 4. Bot state snapshot ───────────────────────────────────────────────────
--- Single-row upsert (id=1) every 5 s. Anon key.
+-- Single-row upsert (id=1) every 5 s.
 
 create table if not exists bot_state (
     id         int primary key default 1,
@@ -108,9 +112,11 @@ create table if not exists bot_state (
 
 alter table bot_state enable row level security;
 
+-- Writes: service_role only. Reads: anon OK (dashboard).
 drop policy if exists "anon_upsert_bot_state" on bot_state;
 drop policy if exists "anon_select_bot_state" on bot_state;
-create policy "anon_upsert_bot_state" on bot_state for all to anon using (true) with check (true);
+drop policy if exists "service_role_write_bot_state" on bot_state;
+create policy "service_role_write_bot_state" on bot_state for all to service_role using (true) with check (true);
 create policy "anon_select_bot_state" on bot_state for select to anon using (true);
 
 
