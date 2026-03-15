@@ -292,7 +292,7 @@ def _make_app():
 def run_dashboard(host: str = "0.0.0.0", port: int = 8888, debug: bool = False):
     """Run the Flask dashboard server (blocking)."""
     if not _flask_ok:
-        print("[dashboard] Flask not installed. Run: pip install flask")
+        print("[dashboard] Flask not installed. Run: pip3 install flask")
         return
     os.makedirs(STATIC_DIR, exist_ok=True)
     app = _make_app()
@@ -305,7 +305,7 @@ def run_dashboard(host: str = "0.0.0.0", port: int = 8888, debug: bool = False):
 def start_dashboard_thread(port: int = 8888) -> threading.Thread | None:
     """Start the dashboard in a background daemon thread. Returns the thread."""
     if not _flask_ok:
-        logger.warning("Flask not available — dashboard disabled. pip install flask")
+        logger.warning("Flask not available — dashboard disabled. pip3 install flask")
         return None
     t = threading.Thread(
         target=run_dashboard,

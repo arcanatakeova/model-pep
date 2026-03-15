@@ -76,7 +76,7 @@ class SolanaWallet:
                         self._pubkey[:6], self._pubkey[-4:])
         except ImportError:
             logger.warning("solana/solders not installed. Solana trading disabled.")
-            logger.warning("Install: pip install solana solders")
+            logger.warning("Install: pip3 install solana solders")
         except Exception as e:
             logger.error("Wallet init failed: %s", e)
 

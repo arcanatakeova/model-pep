@@ -1,5 +1,5 @@
 # AI Trader — Python Dependencies
-# Install: pip install -r requirements.txt
+# Install: pip3 install -r requirements.txt
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 requests>=2.31.0            # HTTP client for all API calls
