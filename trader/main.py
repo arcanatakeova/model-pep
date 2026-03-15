@@ -72,6 +72,15 @@ try:
 except ImportError:
     pass
 
+# Load secrets from Supabase vault BEFORE config is imported so that
+# os.getenv() calls inside config.py pick up the Supabase-stored values.
+# Falls back silently to .env if Supabase is not configured.
+try:
+    from secrets_manager import load_secrets as _load_secrets
+    _load_secrets()
+except Exception:
+    pass
+
 import config
 from portfolio import Portfolio
 from risk_manager import RiskManager
@@ -576,6 +585,12 @@ class AITrader:
             # Write portfolio + DEX positions every cycle for live position cards
             self.portfolio.save()
             self._save_dex_positions()
+            # Mirror bot state to Supabase (throttled to 5s inside persist_bot_state)
+            try:
+                import secrets_manager as _sm
+                _sm.persist_bot_state(state)
+            except Exception:
+                pass
         except Exception:
             pass   # Non-critical — dashboard will show stale data
 
@@ -1137,8 +1152,13 @@ class AITrader:
                 if len(self._equity_curve) > 17_280:   # 24h at 5s cadence
                     self._equity_curve = self._equity_curve[-17_280:]
 
-                # ── 4. Write live bot_state.json ──────────────────────────────
+                # ── 4. Write live bot_state.json + Supabase persistence ──────
                 self._write_bot_state(equity, 0.0)
+                try:
+                    import secrets_manager as _sm
+                    _sm.persist_equity(equity, self.portfolio.cash, dex_value)
+                except Exception:
+                    pass
 
             except Exception as e:
                 logger.debug("LiveDashboardWriter error: %s", e)
@@ -1287,20 +1307,30 @@ class AITrader:
                     pos["symbol"], sign, pnl_pct * 100, sign, pnl_usd,
                     remaining * 100, reason)
 
-        self.portfolio.closed_trades.append({
+        trade_record = {
             "asset_id": pair_addr,
             "symbol": pos["symbol"],
             "market": "dex",
             "side": "long",
             "entry_price": entry,
             "exit_price": current_price,
+            "qty": pos.get("qty", 0),
+            "size_usd": pos.get("size_usd", 0),
             "pnl_usd": round(pnl_usd, 4),
             "pnl_pct": round(pnl_pct * 100, 2),
             "close_reason": reason,
+            "chain": pos.get("chain", "solana"),
             "safety_score": pos.get("safety_score"),
             "opened_at": pos["opened_at"],
             "closed_at": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        self.portfolio.closed_trades.append(trade_record)
+        # Persist to Supabase (fire-and-forget)
+        try:
+            import secrets_manager as _sm
+            _sm.persist_trade(trade_record)
+        except Exception:
+            pass
         # Enforce memory cap (same as portfolio.close_position does for CEX trades)
         from portfolio import _MAX_CLOSED_TRADES_MEMORY
         if len(self.portfolio.closed_trades) > _MAX_CLOSED_TRADES_MEMORY:

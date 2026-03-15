@@ -105,7 +105,13 @@ CRYPTOCOMPARE_BASE = "https://min-api.cryptocompare.com/data"
 MESSARI_BASE = "https://data.messari.io/api/v1"
 EXCHANGERATE_BASE = "https://open.er-api.com/v6"
 
-# Optional API keys (from environment)
+# ─── Supabase (secrets vault + trade/state persistence) ───────────────────────
+# Only these two values need to be in .env — everything else is stored in Supabase.
+SUPABASE_URL         = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")   # service_role key
+SUPABASE_ANON_KEY    = os.getenv("SUPABASE_ANON_KEY", "")      # anon key (fallback)
+
+# Optional API keys (from environment or fetched from Supabase vault at startup)
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")
 ALPHAVANTAGE_KEY  = os.getenv("ALPHAVANTAGE_KEY", "")
 FINNHUB_KEY       = os.getenv("FINNHUB_KEY", "")

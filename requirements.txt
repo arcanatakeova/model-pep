@@ -8,6 +8,9 @@ numpy>=1.24.0               # Numerical computations for indicators
 python-dotenv>=1.0.0        # Load API keys from .env file
 websocket-client>=1.6.0     # Binance WebSocket feed (replaces manual socket impl)
 
+# ── Supabase (secrets vault + trade/state persistence) ────────────────────────
+supabase>=2.3.0             # Supabase Python client (secrets, trades, equity curve)
+
 # ── Stock & ETF Data ─────────────────────────────────────────────────────────
 yfinance>=0.2.18            # Yahoo Finance (stocks, ETFs, indices)
 
