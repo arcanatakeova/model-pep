@@ -493,23 +493,22 @@ class TradeExecutor:
             if side == "long":
                 self.portfolio.cash -= notional_usd
             return None
-        if pos:
-            pos["is_futures"] = True
-            pos["leverage"]   = leverage
-            pos["liq_price"]  = round(liq_price, 6)
-            pos["margin_usd"] = round(margin_usd, 2)
-            pos["notional_usd"] = round(notional_usd, 2)
-            pos["symbol"]     = signal.symbol
-            pos["market"]     = signal.market
-            pos["timeframe"]  = getattr(signal, "timeframe", "1h")
+        pos["is_futures"] = True
+        pos["leverage"]   = leverage
+        pos["liq_price"]  = round(liq_price, 6)
+        pos["margin_usd"] = round(margin_usd, 2)
+        pos["notional_usd"] = round(notional_usd, 2)
+        pos["symbol"]     = signal.symbol
+        pos["market"]     = signal.market
+        pos["timeframe"]  = getattr(signal, "timeframe", "1h")
 
-            logger.info(
-                "FUTURES %-5s %-14s x%d @ $%-12.4f | "
-                "margin=$%-8.2f notional=$%-8.2f | liq=$%.4f | %s",
-                side.upper(), signal.symbol, leverage, fill_price,
-                margin_usd, notional_usd, liq_price,
-                getattr(signal, "reasons", [""])[0] if getattr(signal, "reasons", []) else "",
-            )
+        logger.info(
+            "FUTURES %-5s %-14s x%d @ $%-12.4f | "
+            "margin=$%-8.2f notional=$%-8.2f | liq=$%.4f | %s",
+            side.upper(), signal.symbol, leverage, fill_price,
+            margin_usd, notional_usd, liq_price,
+            getattr(signal, "reasons", [""])[0] if getattr(signal, "reasons", []) else "",
+        )
         return pos
 
     def _check_liquidation_guard(self, asset_id: str, pos: dict, current_price: float):

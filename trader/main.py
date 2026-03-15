@@ -1050,7 +1050,15 @@ class AITrader:
             if pair_addr not in self._dex_positions:
                 return False  # Already closed by the other thread — skip
             self._dex_positions.pop(pair_addr)  # Claim ownership before releasing lock
-        return self._close_dex_position(pair_addr, pos, current_price, reason)
+        result = self._close_dex_position(pair_addr, pos, current_price, reason)
+        if result is False:
+            # On-chain sell failed — re-insert so the next cycle can retry.
+            # Only re-insert if nothing else has taken that slot (shouldn't happen,
+            # but guard anyway to avoid overwriting a re-opened position).
+            with self._dex_lock:
+                if pair_addr not in self._dex_positions:
+                    self._dex_positions[pair_addr] = pos
+        return result
 
     def _close_dex_position(self, pair_addr: str, pos: dict, current_price: float, reason: str) -> bool:
         """Close a DEX position (remaining fraction only). Returns False if on-chain sell failed."""
@@ -1268,7 +1276,7 @@ class AITrader:
                     if pos:
                         current_price = (pos.get("current_price")
                                          or pos.get("entry_price", 0))
-                        self._close_dex_position(pid, pos, current_price, reason)
+                        self._try_close_dex_position(pid, pos, current_price, reason)
                         logger.info("MANUAL CLOSE DEX %s — %s", pos.get("symbol", pid), reason)
                     else:
                         logger.warning("Manual close: DEX position %s not found", pid)

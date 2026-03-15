@@ -305,9 +305,9 @@ class ForexAnalyzer:
         if scores.get("stochastic", 0):
             reasons.append(f"Stoch {'oversold' if signal=='BUY' else 'overbought'}")
         if scores.get("rsi", 0):
-            reasons.append(f"RSI {rsi_val:.0f}" if rsi_val else "RSI signal")
+            reasons.append(f"RSI {rsi_val:.0f}" if rsi_val is not None else "RSI signal")
         if scores.get("macd", 0):
-            reasons.append(f"MACD {'positive' if macd_hist and macd_hist>0 else 'negative'} hist")
+            reasons.append(f"MACD {'positive' if macd_hist is not None and macd_hist > 0 else 'negative'} hist")
         if scores.get("pivot", 0):
             reasons.append(f"{'Above' if signal=='BUY' else 'Below'} daily pivot")
         if adx_1h:

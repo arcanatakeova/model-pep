@@ -354,7 +354,8 @@ def get_order_book_depth(symbol: str, limit: int = 20) -> dict:
 
     total_bid_vol = sum(q for _, q in bids)
     total_ask_vol = sum(q for _, q in asks)
-    imbalance = (total_bid_vol - total_ask_vol) / (total_bid_vol + total_ask_vol)
+    _ob_total = total_bid_vol + total_ask_vol
+    imbalance = (total_bid_vol - total_ask_vol) / _ob_total if _ob_total > 0 else 0.0
 
     result = {
         "bids": bids,

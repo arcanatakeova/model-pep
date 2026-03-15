@@ -322,7 +322,7 @@ class BirdeyeClient:
                     "address": t.get("address", ""),
                     "symbol": t.get("symbol", ""),
                     "name": t.get("name", ""),
-                    "price_usd": float(t.get("v24hUSD", 0) or 0),  # Note: this is volume
+                    "price_usd": float(t.get("price", 0) or 0),
                     "volume_24h": float(t.get("v24hUSD", 0) or 0),
                     "price_change_24h": float(t.get("priceChange24H", 0) or 0),
                     "liquidity": float(t.get("liquidity", 0) or 0),
