@@ -45,6 +45,7 @@ from dex_screener import DexScreener
 from polymarket import PolymarketTrader
 from solana_wallet import SolanaWallet
 import data_fetcher as df_mod
+import dashboard as _dash
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -107,6 +108,10 @@ class AITrader:
         # Load saved state
         self.portfolio.load()
         self.risk_mgr.reset_daily_loss_tracker()
+
+        # ── Start web dashboard ────────────────────────────────────────────
+        _dash.set_trader(self)
+        self._dashboard_thread = _dash.start_dashboard_thread(port=8888)
 
         # Sync initial capital with Phantom wallet if connected
         if self.solana.is_connected and live:

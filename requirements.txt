@@ -3,6 +3,7 @@
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 requests>=2.31.0            # HTTP client for all API calls
+flask>=3.0.0                # Web dashboard server (http://localhost:8888)
 pandas>=2.0.0               # Data manipulation and time series analysis
 numpy>=1.24.0               # Numerical computations for indicators
 python-dotenv>=1.0.0        # Load API keys from .env file
