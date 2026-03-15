@@ -71,6 +71,17 @@ else
 fi
 
 while true; do
+    # ── Auto-update: pull latest code before each launch ─────────────────────
+    if git -C "$SCRIPT_DIR/.." rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
+        BEFORE="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD 2>/dev/null)"
+        git -C "$SCRIPT_DIR/.." pull origin claude/ai-trading-bot-SaLev \
+            >> "$LOGFILE" 2>&1 || true
+        AFTER="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD 2>/dev/null)"
+        if [[ "$BEFORE" != "$AFTER" ]]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') [WATCHDOG] Updated $BEFORE → $AFTER" | tee -a "$LOGFILE"
+        fi
+    fi
+
     python3 main.py $ARGS 2>&1 | tee -a "$LOGFILE" || true
     exit_code=$?
 
