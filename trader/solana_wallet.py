@@ -461,8 +461,9 @@ class SolanaWallet:
         """
         # 1. Get quote + build tx — choose path based on token type
         _is_pump = output_mint.endswith("pump") or input_mint.endswith("pump")
+        _is_sell = (output_mint in (SOL_MINT, str(WSOL_MINT)))
 
-        if _is_pump and pair_address:
+        if _is_pump and pair_address and not _is_sell:
             # Fast-path: pool address already known → build on-chain directly.
             # Skips Jupiter/Raydium because they sometimes return txs that fail
             # on-chain for new/low-liquidity PumpSwap pools, silently blocking the

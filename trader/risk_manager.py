@@ -207,6 +207,16 @@ class RiskManager:
         if peak <= 0:
             return False
         drawdown = (peak - current) / peak
+        # Auto-reset: if peak is stale (>10x current equity), the wallet was likely
+        # refunded/restarted — reset peak to current so the circuit breaker doesn't
+        # permanently block trading on a fresh account.
+        if drawdown >= 0.90 and current > 0:
+            logger.warning(
+                "CIRCUIT BREAKER: drawdown %.1f%% looks like stale peak ($%.2f vs $%.2f) "
+                "— resetting peak_equity to current equity to unblock trading",
+                drawdown * 100, peak, current)
+            self.portfolio.peak_equity = current
+            return False
         if drawdown >= self._max_drawdown_limit:
             logger.warning("CIRCUIT BREAKER: Max drawdown %.1f%% exceeds limit %.1f%%",
                            drawdown * 100, self._max_drawdown_limit * 100)
