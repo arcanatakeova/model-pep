@@ -370,15 +370,19 @@ class TradeExecutor:
                 })
                 logger.info("Live spot trading initialized: Binance")
             elif config.COINBASE_KEY_NAME or config.COINBASE_API_KEY:
-                # Coinbase Advanced Trade (CDP): key name + EC private key
-                cb_key    = config.COINBASE_KEY_NAME or config.COINBASE_API_KEY
-                cb_secret = config.COINBASE_SECRET
-                self._exchange = ccxt.coinbase({
-                    "apiKey": cb_key,
-                    "secret": cb_secret,
-                    "enableRateLimit": True,
-                })
-                logger.info("Live spot trading initialized: Coinbase Advanced Trade")
+                # Coinbase Advanced Trade (CDP): key name + EC private key (PEM)
+                cb_key    = (config.COINBASE_KEY_NAME or config.COINBASE_API_KEY).strip()
+                cb_secret = config.COINBASE_SECRET.strip()
+                if not cb_key or not cb_secret:
+                    logger.error("Coinbase key/secret incomplete — check Vault. "
+                                 "key=%d chars, secret=%d chars", len(cb_key), len(cb_secret))
+                else:
+                    self._exchange = ccxt.coinbase({
+                        "apiKey": cb_key,
+                        "secret": cb_secret,
+                        "enableRateLimit": True,
+                    })
+                    logger.info("Live spot trading initialized: Coinbase Advanced Trade")
             else:
                 logger.debug("No exchange API keys set — CEX in paper mode")
         except ImportError:

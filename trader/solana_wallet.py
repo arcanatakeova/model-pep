@@ -133,18 +133,38 @@ class SolanaWallet:
             from solders.keypair import Keypair
             from solana.rpc.api import Client
 
+            # Clean key: Vault may return with surrounding quotes or whitespace
+            raw_key = self.private_key_b58.strip().strip('"').strip("'").strip()
+
             # Phantom exports as base58 string — try that first (most common)
+            errors = []
+            keypair = None
             try:
-                self._keypair = Keypair.from_base58_string(self.private_key_b58)
-            except Exception:
-                # Fallback: JSON byte array [12, 34, 56, ...]
+                keypair = Keypair.from_base58_string(raw_key)
+            except Exception as e:
+                errors.append(f"base58: {e}")
+
+            # Fallback: JSON byte array [12, 34, 56, ...]
+            if keypair is None:
                 try:
-                    key_bytes = bytes(json.loads(self.private_key_b58))
-                    self._keypair = Keypair.from_bytes(key_bytes)
-                except Exception:
-                    # Last resort: raw base64
-                    key_bytes = base64.b64decode(self.private_key_b58)
-                    self._keypair = Keypair.from_bytes(key_bytes)
+                    key_bytes = bytes(json.loads(raw_key))
+                    keypair = Keypair.from_bytes(key_bytes)
+                except Exception as e:
+                    errors.append(f"json: {e}")
+
+            # Last resort: raw base64
+            if keypair is None:
+                try:
+                    key_bytes = base64.b64decode(raw_key)
+                    keypair = Keypair.from_bytes(key_bytes)
+                except Exception as e:
+                    errors.append(f"base64: {e}")
+
+            if keypair is None:
+                logger.error("Wallet init: all key formats failed — %s", "; ".join(errors))
+                return
+
+            self._keypair = keypair
             self._pubkey  = str(self._keypair.pubkey())
 
             # Prefer Helius RPC URL for priority fee estimates & reliability

@@ -14,7 +14,7 @@ MAX_OPEN_POSITIONS = 12       # Max concurrent positions (focused, not spread th
 STOP_LOSS_PCT = 0.03          # 3% stop loss (CEX only — DEX uses dynamic stops)
 TAKE_PROFIT_PCT = 0.06        # 6% take profit (CEX only — DEX uses dynamic targets)
 RISK_PER_TRADE_PCT = 0.04     # Risk 4% of portfolio per trade (aggressive Kelly)
-MIN_SIGNAL_STRENGTH = 0.30    # Min ensemble score (raised: fewer but higher-quality trades)
+MIN_SIGNAL_STRENGTH = 0.22    # Min ensemble score (lowered: capture trades in neutral markets)
 TRAILING_STOP_PCT = 0.05      # 5% trailing stop (wider = lets winners run)
 
 # ─── Disabled strategies (Solana DEX only) ────────────────────────────────────
