@@ -71,8 +71,16 @@ def _safe_float(val, default: float = 0.0) -> float:
         return default
 
 
-# Search terms — broad coverage across naming conventions
-_SEARCH_QUERIES = ["PUMP", "MEME", "AI", "DOG", "WIF", "PEPE"]
+# Search terms — 20 high-signal queries covering all major memecoin namespaces
+_SEARCH_QUERIES = [
+    "PUMP", "MEME", "AI", "DOG", "WIF", "PEPE",
+    "CAT", "MOON", "DOGE", "SHIB", "INU", "BULL",
+    "TRUMP", "ELON", "BABY", "MINI", "TURBO", "BONK",
+    "FROG", "CHAD",
+]
+
+# Raydium CLMM pool endpoint (separate from AMM)
+RAYDIUM_CLMM_URL = "https://api-v3.raydium.io/pools/info/list"
 
 
 @dataclass
@@ -166,23 +174,37 @@ class DexScreener:
         self._cache_ttl = 25   # 25s — aggressive freshness for fast markets
         self._safety_checker = TokenSafetyChecker()
         self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=20, thread_name_prefix="dex-scanner")
+            max_workers=30, thread_name_prefix="dex-scanner")
+        # Recently-evaluated blacklist: pair_address → timestamp last returned
+        # Prevents the same top-scorer repeating every 4s scan cycle.
+        # Tokens stay blocked for 8 minutes then re-enter the pool.
+        self._evaluated: dict[str, float] = {}
+        self._EVAL_BLOCK_SECS = 480   # 8 minutes
 
     # ─── Public API ───────────────────────────────────────────────────────────
 
     def get_trending_tokens(self, min_score: float = 0.40) -> list[DexToken]:
         """
         Parallel fetch from all sources, concurrent safety checks, scored and filtered.
+        Returns fresh tokens — recently evaluated tokens are blacklisted for 8 min
+        so the scanner digs deeper every cycle instead of repeating the same top coins.
         """
-        # Launch all data fetches in parallel
+        self._evict_evaluated()
+
+        # ── Launch all data fetches concurrently ──────────────────────────────
         futures = {
-            "boosted":   self._executor.submit(self._fetch_boosted_tokens),
-            "profiles":  self._executor.submit(self._fetch_token_profiles),
-            "pumpfun":   self._executor.submit(self._fetch_pumpfun_tokens),
-            "raydium":   self._executor.submit(self._fetch_raydium_pools),
-            "be_trend":  self._executor.submit(self._fetch_birdeye_trending),
+            "boosted":        self._executor.submit(self._fetch_boosted_tokens),
+            "profiles":       self._executor.submit(self._fetch_token_profiles),
+            "pumpfun_active": self._executor.submit(self._fetch_pumpfun_tokens),
+            "pumpfun_mcap":   self._executor.submit(self._fetch_pumpfun_by_mcap),
+            "pumpfun_reply":  self._executor.submit(self._fetch_pumpfun_viral),
+            "raydium_amm":    self._executor.submit(self._fetch_raydium_pools),
+            "raydium_amm_p2": self._executor.submit(self._fetch_raydium_pools, 2),
+            "raydium_clmm":   self._executor.submit(self._fetch_raydium_clmm),
+            "be_trend":       self._executor.submit(self._fetch_birdeye_trending),
+            "be_gainers":     self._executor.submit(self._fetch_birdeye_gainers),
         }
-        # Also kick off multi-query DexScreener searches in parallel
+        # 20-query DexScreener search grid — all in parallel
         search_futures = {
             f"search_{q}": self._executor.submit(
                 self._search_top_pairs, "solana", q, 50)
@@ -201,14 +223,15 @@ class DexScreener:
                 logger.debug("%s fetch error: %s", key, e)
 
         # Collect already-parsed token lists
-        for key in ("pumpfun", "raydium", "be_trend") + tuple(search_futures):
+        other_keys = [k for k in futures if k not in ("boosted", "profiles")]
+        for key in other_keys:
             try:
-                result = futures[key].result(timeout=12)
+                result = futures[key].result(timeout=14)
                 raw_tokens.extend(result)
             except Exception as e:
                 logger.debug("%s fetch error: %s", key, e)
 
-        # Deduplicate
+        # Deduplicate by pair address
         seen = set()
         unique = []
         for t in raw_tokens:
@@ -216,9 +239,7 @@ class DexScreener:
                 seen.add(t.pair_address)
                 unique.append(t)
 
-        # ── Batch price refresh via Birdeye (1 CU total for all tokens) ──────────
-        # DexScreener data can be up to 25s stale. Birdeye has 3s cache.
-        # Replace price, market_cap, and liquidity for all Solana candidates at once.
+        # ── Batch Birdeye price refresh (1 CU for all tokens) ────────────────
         be = _get_birdeye()
         if be:
             sol_mints = [t.base_address for t in unique
@@ -234,13 +255,20 @@ class DexScreener:
                                 t.market_cap = bp.market_cap
                             if bp.liquidity_usd > 0:
                                 t.liquidity_usd = bp.liquidity_usd
+                            if bp.volume_24h_usd > 0:
+                                t.volume_h24 = bp.volume_24h_usd
                 except Exception as e:
                     logger.debug("Batch price refresh error: %s", e)
 
-        # Concurrent safety checks for Solana tokens above pre-score threshold
-        # (pre-score without safety to decide which ones are worth checking)
+        # ── Remove recently-evaluated tokens ─────────────────────────────────
+        fresh = [t for t in unique if t.pair_address not in self._evaluated]
+        filtered_count = len(unique) - len(fresh)
+        if filtered_count:
+            logger.debug("Blacklist filtered %d already-evaluated tokens", filtered_count)
+
+        # ── Safety checks for high-potential candidates ───────────────────────
         pre_scored = []
-        for t in unique:
+        for t in fresh:
             ps = self._pre_score(t)
             if ps >= 0.20 or abs(t.price_change_h1) > 10 or abs(t.price_change_m5) > 5:
                 pre_scored.append(t)
@@ -248,16 +276,22 @@ class DexScreener:
         if pre_scored:
             self._run_concurrent_safety_checks(pre_scored)
 
-        # Full score + filter
+        # ── Full score + filter ───────────────────────────────────────────────
         scored = []
-        for t in unique:
+        for t in fresh:
             s = self._score_token(t)
             if s >= min_score:
                 scored.append(t)
         scored.sort(key=lambda t: t.score, reverse=True)
 
-        logger.info("Trending scan: %d sources → %d candidates → %d scored >= %.2f",
-                    len(futures), len(unique), len(scored), min_score)
+        # Mark returned tokens as evaluated so they won't repeat immediately
+        now = time.time()
+        for t in scored:
+            self._evaluated[t.pair_address] = now
+
+        logger.info(
+            "Trending scan: %d sources → %d raw → %d fresh (-%d blacklisted) → %d scored >= %.2f",
+            len(futures), len(unique), len(fresh), filtered_count, len(scored), min_score)
         return scored
 
     def get_new_pairs(self, max_age_hours: float = 48,
@@ -266,13 +300,14 @@ class DexScreener:
         New pair sniping: DexScreener search + Birdeye new listings + Pump.fun new.
         """
         futures = {
-            "be_new":    self._executor.submit(self._fetch_birdeye_new_listings),
-            "pump_new":  self._executor.submit(self._fetch_pumpfun_new),
+            "be_new":      self._executor.submit(self._fetch_birdeye_new_listings),
+            "pump_new":    self._executor.submit(self._fetch_pumpfun_new),
+            "pump_viral":  self._executor.submit(self._fetch_pumpfun_viral),
         }
         search_futures = {
             f"search_{q}": self._executor.submit(
                 self._search_top_pairs, "solana", q, 50)
-            for q in ["SOL", "USDC", "USD"]
+            for q in ["PUMP", "NEW", "LAUNCH", "FAIR", "MINT"]
         }
         futures.update(search_futures)
 
@@ -315,13 +350,21 @@ class DexScreener:
                 except Exception as e:
                     logger.debug("New pairs batch price refresh error: %s", e)
 
-        # Safety checks for new pairs (most likely to be rugs — always check)
-        self._run_concurrent_safety_checks(unique)
+        # Remove recently-evaluated tokens
+        fresh = [t for t in unique if t.pair_address not in self._evaluated]
 
-        scored = [t for t in unique if self._score_token(t) >= min_score]
+        # Safety checks for new pairs (most likely to be rugs — always check)
+        self._run_concurrent_safety_checks(fresh)
+
+        scored = [t for t in fresh if self._score_token(t) >= min_score]
         scored.sort(key=lambda t: t.score, reverse=True)
-        logger.info("New pairs scan: %d candidates → %d scored >= %.2f",
-                    len(unique), len(scored), min_score)
+
+        now = time.time()
+        for t in scored:
+            self._evaluated[t.pair_address] = now
+
+        logger.info("New pairs scan: %d raw → %d fresh → %d scored >= %.2f",
+                    len(unique), len(fresh), len(scored), min_score)
         return scored
 
     def get_multi_chain_opportunities(self) -> list[DexToken]:
@@ -663,12 +706,81 @@ class DexScreener:
             elif holder_velocity > 10:
                 score += 0.02
 
+        # ── 6-hour sustained momentum (5%) ───────────────────────────────
+        h6 = token.price_change_h6
+        if h6 > 200:
+            score += 0.05
+            signals.append(f"Sustained +{h6:.0f}% 6h")
+        elif h6 > 100:
+            score += 0.04
+        elif h6 > 50:
+            score += 0.03
+        elif h6 > 20:
+            score += 0.01
+        elif h6 < -25:
+            score -= 0.03
+
+        # ── 6-hour buy pressure ───────────────────────────────────────────
+        buys_h6  = getattr(token, "_buys_h6",  0)
+        sells_h6 = getattr(token, "_sells_h6", 0)
+        vol_h6   = getattr(token, "_volume_h6", 0.0)
+        total_h6 = buys_h6 + sells_h6
+        if total_h6 > 0:
+            bsr_h6 = buys_h6 / total_h6
+            if bsr_h6 > 0.70 and total_h6 > 200:
+                score += 0.04
+                signals.append(f"6h buy dom {bsr_h6:.0%} ({total_h6} txns)")
+            elif bsr_h6 > 0.65 and total_h6 > 50:
+                score += 0.02
+
+        # ── Volume h6 acceleration vs h24 ────────────────────────────────
+        if vol_h6 > 0 and token.volume_h24 > 0:
+            h6_avg_hourly = vol_h6 / 6
+            h24_avg_hourly = token.volume_h24 / 24
+            if h24_avg_hourly > 0:
+                h6_accel = h6_avg_hourly / h24_avg_hourly
+                if h6_accel > 5:
+                    score += 0.05
+                    signals.append(f"Vol accelerating {h6_accel:.1f}x 6h vs 24h avg")
+                elif h6_accel > 2:
+                    score += 0.02
+
+        # ── Legitimacy signals from info fields ───────────────────────────
+        legitimacy = 0
+        if getattr(token, "_has_twitter",  False): legitimacy += 1
+        if getattr(token, "_has_telegram", False): legitimacy += 1
+        if getattr(token, "_has_website",  False): legitimacy += 1
+        if getattr(token, "_has_image",    False): legitimacy += 1
+        if legitimacy >= 3:
+            score += 0.04
+            signals.append(f"Legit: {legitimacy}/4 socials")
+        elif legitimacy == 2:
+            score += 0.02
+        elif legitimacy == 0 and token.age_hours and token.age_hours > 2:
+            score -= 0.03   # Older token with zero social presence = ghost
+
+        # ── Boost count — community/team spending real money to promote ───
+        boosts = getattr(token, "_boost_count", 0)
+        if boosts >= 10:
+            score += 0.04
+            signals.append(f"Boosted x{boosts}")
+        elif boosts >= 3:
+            score += 0.02
+
         # ── Source bonus ──────────────────────────────────────────────────
         if token.source == "pumpfun_new":
-            score += 0.08   # Freshest pump.fun tokens — fastest movers
+            score += 0.08
             signals.append("Pump.fun NEW")
-        elif token.source == "pumpfun":
-            score += 0.05
+        elif token.source == "pumpfun_viral":
+            score += 0.06
+            signals.append("Pump.fun VIRAL")
+        elif token.source in ("pumpfun", "pumpfun_mcap"):
+            score += 0.04
+        elif token.source == "birdeye_gainer":
+            score += 0.03
+            signals.append("Birdeye top gainer")
+        elif token.source == "raydium_clmm":
+            score += 0.03
         elif token.source == "raydium":
             score += 0.02
 
@@ -802,6 +914,13 @@ class DexScreener:
                 tokens.append(t)
         return tokens
 
+    def _evict_evaluated(self):
+        """Remove expired entries from the recently-evaluated blacklist."""
+        cutoff = time.time() - self._EVAL_BLOCK_SECS
+        expired = [k for k, ts in self._evaluated.items() if ts < cutoff]
+        for k in expired:
+            del self._evaluated[k]
+
     def _fetch_pumpfun_tokens(self) -> list[DexToken]:
         """
         Fetch most recently traded pump.fun tokens — highest real-time activity.
@@ -841,6 +960,76 @@ class DexScreener:
             logger.debug("Pump.fun fetch error: %s", e)
             return []
 
+    def _fetch_pumpfun_by_mcap(self) -> list[DexToken]:
+        """Pump.fun tokens sorted by market cap — established memecoins with momentum."""
+        try:
+            data = self._get(
+                f"{PUMPFUN_BASE}/coins",
+                params={"limit": 50, "sort": "market_cap",
+                        "order": "DESC", "includeNsfw": "false"},
+                timeout=8)
+            if not isinstance(data, list):
+                return []
+            mints = [c["mint"] for c in data if c.get("mint")][:30]
+            if not mints:
+                return []
+            result = self._get(
+                f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not result or not result.get("pairs"):
+                return []
+            tokens = []
+            seen = set()
+            for p in result["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "pumpfun_mcap"
+                    tokens.append(t)
+            return tokens
+        except Exception as e:
+            logger.debug("Pump.fun mcap fetch error: %s", e)
+            return []
+
+    def _fetch_pumpfun_viral(self) -> list[DexToken]:
+        """Pump.fun tokens with most replies — viral community signal."""
+        try:
+            data = self._get(
+                f"{PUMPFUN_BASE}/coins",
+                params={"limit": 50, "sort": "reply_count",
+                        "order": "DESC", "includeNsfw": "false"},
+                timeout=8)
+            if not isinstance(data, list):
+                return []
+            mints = [c["mint"] for c in data if c.get("mint")][:30]
+            if not mints:
+                return []
+            result = self._get(
+                f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not result or not result.get("pairs"):
+                return []
+            tokens = []
+            seen = set()
+            for p in result["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "pumpfun_viral"
+                    tokens.append(t)
+            return tokens
+        except Exception as e:
+            logger.debug("Pump.fun viral fetch error: %s", e)
+            return []
+
     def _fetch_pumpfun_new(self) -> list[DexToken]:
         """Fetch newest pump.fun launches — these haven't even trended yet."""
         try:
@@ -876,25 +1065,26 @@ class DexScreener:
             logger.debug("Pump.fun new fetch error: %s", e)
             return []
 
-    def _fetch_raydium_pools(self) -> list[DexToken]:
+    def _fetch_raydium_pools(self, page: int = 1) -> list[DexToken]:
         """
-        Fetch top Raydium pools by 24h volume — catches tokens not on DexScreener trending.
+        Fetch top Raydium AMM pools by 24h volume.
+        page=2 gives a second batch of 50 different pools.
         """
         try:
             data = self._get(
                 f"{RAYDIUM_BASE}/pools/info/list",
                 params={"poolType": "all", "poolSortField": "volume24h",
-                        "sortType": "desc", "pageSize": 50, "page": 1},
+                        "sortType": "desc", "pageSize": 50, "page": page},
                 timeout=10)
             if not data or not data.get("data", {}).get("data"):
                 return []
             pools = data["data"]["data"]
-            # Extract base token mint addresses
             mints = []
             for p in pools:
-                mint = p.get("mintA", {}).get("address") or p.get("mintB", {}).get("address")
-                if mint and mint not in mints:
-                    mints.append(mint)
+                for field in ("mintA", "mintB"):
+                    mint = (p.get(field) or {}).get("address", "")
+                    if mint and mint not in mints:
+                        mints.append(mint)
             mints = mints[:30]
             if not mints:
                 return []
@@ -905,7 +1095,7 @@ class DexScreener:
             tokens = []
             seen = set()
             for p in result["pairs"]:
-                if p.get("chainId") != "solana" or p.get("dexId") != "raydium":
+                if p.get("chainId") != "solana":
                     continue
                 addr = p.get("pairAddress", "")
                 if addr in seen:
@@ -915,10 +1105,53 @@ class DexScreener:
                 if t:
                     t.source = "raydium"
                     tokens.append(t)
-            logger.debug("Raydium pools: %d tokens", len(tokens))
+            logger.debug("Raydium AMM p%d: %d tokens", page, len(tokens))
             return tokens
         except Exception as e:
-            logger.debug("Raydium fetch error: %s", e)
+            logger.debug("Raydium fetch error (p%d): %s", page, e)
+            return []
+
+    def _fetch_raydium_clmm(self) -> list[DexToken]:
+        """Raydium CLMM (concentrated liquidity) pools — different token set than AMM."""
+        try:
+            data = self._get(
+                f"{RAYDIUM_BASE}/pools/info/list",
+                params={"poolType": "concentrated", "poolSortField": "volume24h",
+                        "sortType": "desc", "pageSize": 50, "page": 1},
+                timeout=10)
+            if not data or not data.get("data", {}).get("data"):
+                return []
+            pools = data["data"]["data"]
+            mints = []
+            for p in pools:
+                for field in ("mintA", "mintB"):
+                    mint = (p.get(field) or {}).get("address", "")
+                    if mint and mint not in mints:
+                        mints.append(mint)
+            mints = mints[:30]
+            if not mints:
+                return []
+            result = self._get(
+                f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not result or not result.get("pairs"):
+                return []
+            tokens = []
+            seen = set()
+            for p in result["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "raydium_clmm"
+                    tokens.append(t)
+            logger.debug("Raydium CLMM: %d tokens", len(tokens))
+            return tokens
+        except Exception as e:
+            logger.debug("Raydium CLMM fetch error: %s", e)
             return []
 
     def _fetch_birdeye_trending(self) -> list[DexToken]:
@@ -951,6 +1184,42 @@ class DexScreener:
             return tokens
         except Exception as e:
             logger.debug("Birdeye trending error: %s", e)
+            return []
+
+    def _fetch_birdeye_gainers(self) -> list[DexToken]:
+        """Birdeye top 24h gainers — tokens with highest price_change_24h."""
+        be = _get_birdeye()
+        if not be or not be.enabled:
+            return []
+        try:
+            # Sort by priceChange24H to find explosive movers
+            trending = be.get_trending_tokens(limit=50, min_liquidity=MIN_LIQUIDITY_USD)
+            # Sort by 24h price change to get the gainers subset
+            gainers = sorted(trending,
+                             key=lambda t: t.get("price_change_24h", 0), reverse=True)[:30]
+            mints = [t["address"] for t in gainers if t.get("address")]
+            if not mints:
+                return []
+            data = self._get(f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not data or not data.get("pairs"):
+                return []
+            tokens = []
+            seen = set()
+            for p in data["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "birdeye_gainer"
+                    tokens.append(t)
+            logger.debug("Birdeye gainers: %d tokens", len(tokens))
+            return tokens
+        except Exception as e:
+            logger.debug("Birdeye gainers error: %s", e)
             return []
 
     def _fetch_birdeye_new_listings(self) -> list[DexToken]:
@@ -994,22 +1263,24 @@ class DexScreener:
             if price <= 0:
                 return None
 
-            txns   = pair.get("txns", {})
-            volume = pair.get("volume", {})
-            change = pair.get("priceChange", {})
-            liq    = pair.get("liquidity", {})
-            txns_m5 = txns.get("m5", {})
-            txns_h1 = txns.get("h1", {})
+            txns     = pair.get("txns", {})
+            volume   = pair.get("volume", {})
+            change   = pair.get("priceChange", {})
+            liq      = pair.get("liquidity", {})
+            info     = pair.get("info", {}) or {}
+            txns_m5  = txns.get("m5", {})
+            txns_h1  = txns.get("h1", {})
+            txns_h6  = txns.get("h6", {})
             txns_h24 = txns.get("h24", {})
 
-            return DexToken(
+            t = DexToken(
                 chain_id       = pair.get("chainId", ""),
                 dex_id         = pair.get("dexId", ""),
                 pair_address   = pair.get("pairAddress", ""),
                 base_symbol    = pair.get("baseToken", {}).get("symbol", ""),
                 base_address   = pair.get("baseToken", {}).get("address", ""),
                 quote_symbol   = pair.get("quoteToken", {}).get("symbol", ""),
-                price_usd      = price,
+                price_usd        = price,
                 price_change_m5  = _safe_float(change.get("m5")),
                 price_change_h1  = _safe_float(change.get("h1")),
                 price_change_h6  = _safe_float(change.get("h6")),
@@ -1019,15 +1290,32 @@ class DexScreener:
                 volume_m5   = _safe_float(volume.get("m5")),
                 liquidity_usd = _safe_float(liq.get("usd")),
                 market_cap    = _safe_float(pair.get("marketCap") or pair.get("fdv")),
-                buys_h1   = int(txns_h1.get("buys", 0)),
-                sells_h1  = int(txns_h1.get("sells", 0)),
-                buys_h24  = int(txns_h24.get("buys", 0)),
-                sells_h24 = int(txns_h24.get("sells", 0)),
-                buys_m5   = int(txns_m5.get("buys", 0)),
-                sells_m5  = int(txns_m5.get("sells", 0)),
+                buys_h1    = int(txns_h1.get("buys", 0)),
+                sells_h1   = int(txns_h1.get("sells", 0)),
+                buys_h24   = int(txns_h24.get("buys", 0)),
+                sells_h24  = int(txns_h24.get("sells", 0)),
+                buys_m5    = int(txns_m5.get("buys", 0)),
+                sells_m5   = int(txns_m5.get("sells", 0)),
                 pair_created_at = pair.get("pairCreatedAt"),
                 url = pair.get("url", ""),
             )
+
+            # ── Enrich from info/socials fields ──────────────────────────────
+            # Store legitimacy metadata as extra attributes for scoring
+            socials  = info.get("socials", []) or []
+            websites = info.get("websites", []) or []
+            t._has_twitter  = any(s.get("type") == "twitter"  for s in socials)
+            t._has_telegram = any(s.get("type") == "telegram" for s in socials)
+            t._has_website  = len(websites) > 0
+            t._has_image    = bool(info.get("imageUrl"))
+            t._boost_count  = int((pair.get("boosts") or {}).get("active", 0))
+
+            # h6 txn data for medium-term buy pressure
+            t._buys_h6  = int(txns_h6.get("buys",  0))
+            t._sells_h6 = int(txns_h6.get("sells", 0))
+            t._volume_h6 = _safe_float(volume.get("h6"))
+
+            return t
         except Exception as e:
             logger.debug("Parse error: %s", e)
             return None
