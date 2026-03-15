@@ -1122,7 +1122,21 @@ class AITrader:
 
                 token = self.dex_screener.get_token_info(pos["address"], pos["chain"])
                 if not token or token.price_usd <= 0:
+                    miss = pos.get("_price_miss", 0) + 1
+                    pos["_price_miss"] = miss
+                    if miss % 12 == 0:  # warn every ~60s
+                        logger.warning(
+                            "Cannot fetch price for %s (%d consecutive misses) — "
+                            "position exits blocked", pos.get("symbol", "?"), miss)
+                    if miss >= 72:  # 6 min of no price → force exit at last known price
+                        last = pos.get("current_price", pos.get("entry_price", 0))
+                        logger.error(
+                            "Force-closing %s after %d price misses (last=$%.8f)",
+                            pos.get("symbol", "?"), miss, last)
+                        self._try_close_dex_position(
+                            pair_addr, pos, last, f"No price data for {miss} cycles — force exit")
                     continue
+                pos["_price_miss"] = 0  # reset on successful fetch
 
                 entry   = pos["entry_price"]
                 current = token.price_usd

@@ -374,7 +374,12 @@ class SolanaWallet:
         if result.success:
             out_sol = result.out_amount / 1e9
             sol_price = self._get_sol_price()
-            actual_usd = out_sol * sol_price if sol_price > 0 else est_value_usd
+            # out_amount is 0 when the route (PumpPortal/direct) doesn't expose it
+            # upfront — fall back to est_value_usd so portfolio.cash is credited correctly
+            if out_sol > 0 and sol_price > 0:
+                actual_usd = out_sol * sol_price
+            else:
+                actual_usd = est_value_usd
             logger.info("SELL %s → %.4f SOL ($%.2f) impact=%.2f%% | tx=%s",
                         token_mint[:12], out_sol, actual_usd,
                         result.price_impact_pct, result.signature[:16])
@@ -613,15 +618,17 @@ class SolanaWallet:
             "dynamicComputeUnitLimit":   True,
         }
         try:
+            resp = None
             for swap_url in (JUPITER_SWAP_URL, JUPITER_SWAP_URL_ALT):
                 try:
-                    resp = requests.post(swap_url, json=swap_payload, timeout=15)
-                    break
+                    _r = requests.post(swap_url, json=swap_payload, timeout=15)
+                    if _r.ok:
+                        resp = _r
+                        break
+                    logger.debug("Jupiter swap %s → HTTP %s", swap_url, _r.status_code)
                 except Exception:
                     continue
-            else:
-                return None, 0, 0.0
-            if not resp.ok:
+            if resp is None:
                 return None, 0, 0.0
             tx_b64 = resp.json().get("swapTransaction")
             if not tx_b64:
