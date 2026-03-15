@@ -35,7 +35,14 @@ logger = logging.getLogger(__name__)
 
 # ─── API endpoints ─────────────────────────────────────────────────────────────
 JUPITER_QUOTE_URL    = "https://quote-api.jup.ag/v6/quote"
+JUPITER_QUOTE_URL_ALT = "https://lite.jup.ag/v6/quote"   # alt endpoint if primary DNS fails
 JUPITER_SWAP_URL     = "https://quote-api.jup.ag/v6/swap"
+JUPITER_SWAP_URL_ALT  = "https://lite.jup.ag/v6/swap"
+
+# Browser-like UA avoids Cloudflare bot-detection (returns 400/403 for python-requests/2.x)
+_BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/122.0.0.0 Safari/537.36")
 
 # Raydium swap API — used as fallback when Jupiter is geo-blocked
 RAYDIUM_COMPUTE_URL  = "https://transaction-v1.raydium.io/compute/swap-base-in"
@@ -511,7 +518,14 @@ class SolanaWallet:
             "dynamicComputeUnitLimit":   True,
         }
         try:
-            resp = requests.post(JUPITER_SWAP_URL, json=swap_payload, timeout=15)
+            for swap_url in (JUPITER_SWAP_URL, JUPITER_SWAP_URL_ALT):
+                try:
+                    resp = requests.post(swap_url, json=swap_payload, timeout=15)
+                    break
+                except Exception:
+                    continue
+            else:
+                return None, 0, 0.0
             if not resp.ok:
                 return None, 0, 0.0
             tx_b64 = resp.json().get("swapTransaction")
@@ -594,7 +608,10 @@ class SolanaWallet:
             slippage_pct = max(10, slippage_bps // 100)
             resp = requests.post(
                 PUMPFUN_TRADE_URL,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": _BROWSER_UA,
+                },
                 json={
                     "publicKey":        self._pubkey,
                     "action":           "buy",
@@ -635,19 +652,26 @@ class SolanaWallet:
             "asLegacyTransaction": "false",
         }
         for attempt in range(3):
-            try:
-                resp = requests.get(JUPITER_QUOTE_URL, params=params, timeout=10)
-                if resp.ok:
-                    data = resp.json()
-                    if data.get("error"):
-                        logger.debug("Jupiter quote error: %s", data["error"])
-                        return None
-                    return data
-            except Exception as e:
+            # Try primary endpoint first; fall back to lite.jup.ag on DNS failure
+            for url in (JUPITER_QUOTE_URL, JUPITER_QUOTE_URL_ALT):
+                try:
+                    resp = requests.get(url, params=params, timeout=10)
+                    if resp.ok:
+                        data = resp.json()
+                        if data.get("error"):
+                            logger.debug("Jupiter quote error: %s", data["error"])
+                            return None
+                        return data
+                    break  # got a real HTTP response — no need to try alt URL
+                except Exception as e:
+                    last_exc = e
+                    continue  # DNS/connection error — try alt URL
+            else:
+                # both URLs failed
                 if attempt < 2:
-                    time.sleep(2 ** attempt)  # 1s, 2s
+                    time.sleep(2 ** attempt)
                 else:
-                    logger.warning("Jupiter quote exception: %s", e)
+                    logger.warning("Jupiter quote exception: %s", last_exc)
         return None
 
     # ─── Transaction signing / sending ────────────────────────────────────────
