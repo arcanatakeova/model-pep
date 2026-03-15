@@ -1106,8 +1106,10 @@ class SolanaWallet:
                             continue
                         if len(inst.accounts) != 24:
                             continue
-                        # Accept buy OR sell instructions — both use the same 24-account layout
-                        if bytes(inst.data)[:8] not in (_PUMP_BUY_DISC, _PUMP_SELL_DISC):
+                        # Only clone from BUY instructions: sell layout has different
+                        # account positions (e.g. [19] and [22] differ), causing
+                        # 0xbbf/0xbc0 when we build a tx using sell-derived accounts.
+                        if bytes(inst.data)[:8] != _PUMP_BUY_DISC:
                             continue
                         if not all(idx < len(rkeys) for idx in inst.accounts):
                             continue
@@ -1188,7 +1190,7 @@ class SolanaWallet:
                                 if (_ix.program_id_index >= len(_rk)
                                         or _rk[_ix.program_id_index] != str(PUMPSWAP)
                                         or len(_ix.accounts) != 24
-                                        or bytes(_ix.data)[:8] not in (_PUMP_BUY_DISC, _PUMP_SELL_DISC)
+                                        or bytes(_ix.data)[:8] != _PUMP_BUY_DISC  # only buy layout
                                         or not all(i < len(_rk) for i in _ix.accounts)):
                                     continue
                                 _pumpswap_global_va = _rk[_ix.accounts[19]]
