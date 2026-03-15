@@ -260,6 +260,14 @@ class AITrader:
             _t.start()
             logger.info("Fast price monitor started (3s Birdeye poll for held positions)")
 
+        # Start live dashboard writer — writes bot_state.json every 5s so the
+        # dashboard always shows real-time prices, SOL balance, and positions
+        # instead of waiting for the full 30s scan cycle.
+        _dw = threading.Thread(target=self._live_dashboard_writer,
+                               name="LiveDashboardWriter", daemon=True)
+        _dw.start()
+        logger.info("Live dashboard writer started (5s bot_state.json refresh)")
+
         while self.running:
             try:
                 self._run_cycle()
@@ -357,12 +365,8 @@ class AITrader:
             self._save_strategy_states()
             self._last_save = time.time()
 
-        # ── 17. Live wallet sync (every 30s) ──────────────────────────────
-        # Refreshes SOL balance, detects externally-closed positions.
-        if (self.live and self.solana.is_connected
-                and time.time() - self._last_wallet_sync > 30):
-            self._sync_wallet_positions()
-            self._last_wallet_sync = time.time()
+        # ── 17. Wallet sync handled by _live_dashboard_writer (5s thread) ───
+        # SOL balance + position reconciliation run every 5s/30s in the background.
 
         logger.info("Cycle #%d done in %.0fms", self._cycle, elapsed_ms)
 
@@ -506,9 +510,10 @@ class AITrader:
             daily_pnl = round(true_equity - self._day_start_eq, 2)
             perf = self.portfolio.performance_summary()
             signal_table = []  # No CEX signals — Solana DEX only
-            # Live wallet balances for dashboard — cached 60s to avoid RPC rate limits
+            # Live wallet balances — cache is refreshed by _live_dashboard_writer every 5s;
+            # here we only fetch if cache is stale (>5s) and writer hasn't run yet.
             _sol, _usdc, _sol_usd, _cache_ts = self._wallet_balance_cache
-            if self.solana.is_connected and (time.time() - _cache_ts > 60):
+            if self.solana.is_connected and (time.time() - _cache_ts > 5):
                 try:
                     _sol     = self.solana.get_sol_balance()
                     _usdc    = self.solana.get_usdc_balance()
@@ -1036,6 +1041,96 @@ class AITrader:
 
             except Exception as e:
                 logger.debug("FastPriceMonitor error: %s", e)
+
+    def _live_dashboard_writer(self):
+        """
+        Background thread: writes bot_state.json every 5 seconds.
+        Prices are already fresh (fast price monitor updates every 3s).
+        SOL balance is polled here with a 5s cache so cash is always live.
+        This is completely independent of the 30s main scan cycle.
+        """
+        _last_token_reconcile = 0.0
+        while self.running:
+            try:
+                time.sleep(5)
+
+                # ── 1. Refresh SOL balance in portfolio.cash ──────────────────
+                if self.live and self.solana.is_connected:
+                    sol_raw   = self.solana.get_sol_balance()
+                    sol_price = self.solana._get_sol_price()
+                    sol_usd   = sol_raw * sol_price if sol_price > 0 else 0.0
+                    if sol_usd > 0:
+                        # Subtract estimated deployed DEX capital to get free cash
+                        dex_deployed = sum(
+                            pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
+                            for pos in self._dex_positions.values()
+                            if pos.get("chain") == "solana"
+                        )
+                        available = sol_usd - dex_deployed
+                        if available > 0:
+                            cash_diff = available - self.portfolio.cash
+                            if cash_diff > 2.0 or cash_diff < -10.0:
+                                self.portfolio.cash = available
+                        # Update wallet cache for dashboard display
+                        try:
+                            _usdc = self.solana.get_usdc_balance()
+                        except Exception:
+                            _usdc = self._wallet_balance_cache[1]
+                        self._wallet_balance_cache = (sol_raw, _usdc, sol_usd, time.time())
+
+                # ── 2. Token position reconciliation (every 30s) ─────────────
+                now_ts = time.time()
+                if (self.live and self.solana.is_connected
+                        and now_ts - _last_token_reconcile > 30
+                        and self._dex_positions):
+                    _last_token_reconcile = now_ts
+                    try:
+                        on_chain = self.solana.get_all_token_balances()
+                        if on_chain:
+                            _skip = {SOL_MINT, USDC_MINT, USDT_MINT}
+                            for pair_addr, pos in list(self._dex_positions.items()):
+                                mint = pos.get("address", "")
+                                if not mint or mint in _skip or pos.get("chain") != "solana":
+                                    continue
+                                if mint not in on_chain:
+                                    entry   = pos.get("entry_price", 0)
+                                    size    = pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
+                                    current = pos.get("current_price", entry)
+                                    symbol  = pos.get("symbol", "?")
+                                    logger.warning(
+                                        "LIVE SYNC: %s (%s…) zero on-chain balance "
+                                        "— removed from tracker (externally closed).",
+                                        symbol, mint[:12])
+                                    with self._dex_lock:
+                                        self._dex_positions.pop(pair_addr, None)
+                                    proceeds = max(size * (current / entry) if entry > 0 else size, 0.0)
+                                    self.portfolio.cash += proceeds
+                                    self.portfolio.closed_trades.append({
+                                        "asset_id":    pair_addr,
+                                        "symbol":      symbol,
+                                        "side":        "long",
+                                        "entry_price": entry,
+                                        "exit_price":  current,
+                                        "pnl_usd":     round(proceeds - size, 4),
+                                        "pnl_pct":     round((current / entry - 1) * 100, 2) if entry > 0 else 0,
+                                        "closed_at":   datetime.now(timezone.utc).isoformat(),
+                                        "reason":      "externally_closed",
+                                        "chain":       "solana",
+                                    })
+                    except Exception as e:
+                        logger.debug("Live token reconcile error: %s", e)
+
+                # ── 3. Write live bot_state.json ──────────────────────────────
+                dex_value = sum(
+                    pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
+                    * (1 + pos.get("current_pnl_pct", 0))
+                    for pos in self._dex_positions.values()
+                )
+                equity = self.portfolio.cash + dex_value
+                self._write_bot_state(equity, 0.0)
+
+            except Exception as e:
+                logger.debug("LiveDashboardWriter error: %s", e)
 
     def _update_dex_positions(self):
         """Check open DEX positions for time exits, partial profits, and stop/TP."""
