@@ -423,7 +423,7 @@ def render():
     total_pnl = sum(t.get("pnl_usd", 0) for t in all_closed)
     pf        = w_pnl / l_pnl if l_pnl > 0 else float("inf")
     pf_str    = "∞" if pf == float("inf") else f"{pf:.2f}x"
-    deployed  = equity - cash
+    deployed  = max(0.0, equity - cash)
     total_open = len(open_pos) + len(dex_pos)
 
     now_str = datetime.now().strftime("%H:%M:%S")
