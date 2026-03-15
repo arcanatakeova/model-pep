@@ -825,7 +825,8 @@ class AITrader:
                 tx = self.solana.safe_buy_token(
                     token.base_address, size_usd,
                     safety_report=safety,
-                    liquidity_usd=token.liquidity_usd)
+                    liquidity_usd=token.liquidity_usd,
+                    pair_address=token.pair_address if token.dex_id == "pumpswap" else None)
                 if tx and not tx.startswith("paper_"):
                     pos_data["tx"] = tx
                     self._dex_positions[token.pair_address] = pos_data

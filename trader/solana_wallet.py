@@ -266,7 +266,8 @@ class SolanaWallet:
     def safe_buy_token(self, token_mint: str, usdc_amount: float,
                        safety_report=None,
                        liquidity_usd: float = 0.0,
-                       slippage_bps: int = None) -> Optional[str]:
+                       slippage_bps: int = None,
+                       pair_address: Optional[str] = None) -> Optional[str]:
         """
         Buy a Solana token with USDC.
         - Checks safety report first (blocks honeypots)
@@ -302,6 +303,7 @@ class SolanaWallet:
             output_mint=token_mint,
             input_amount_usd=usdc_amount,
             slippage_bps=slippage_bps,
+            pair_address=pair_address,
         )
         if result.success:
             logger.info("BUY %s $%.2f SOL slippage=%dbps impact=%.2f%% | tx=%s",
@@ -409,16 +411,19 @@ class SolanaWallet:
     # ─── Execution engine ──────────────────────────────────────────────────────
 
     def _execute_swap(self, input_mint: str, output_mint: str,
-                      input_amount_usd: float, slippage_bps: int) -> SwapResult:
+                      input_amount_usd: float, slippage_bps: int,
+                      pair_address: Optional[str] = None) -> SwapResult:
         """Execute swap using USD input amount (auto-converts to lamports)."""
         amount_raw = self._usd_to_raw(input_mint, input_amount_usd)
         if amount_raw <= 0:
             return SwapResult(success=False, error="USD-to-lamports conversion failed")
-        return self._execute_swap_raw(input_mint, output_mint, amount_raw, slippage_bps)
+        return self._execute_swap_raw(input_mint, output_mint, amount_raw, slippage_bps,
+                                      pair_address=pair_address)
 
     def _execute_swap_raw(self, input_mint: str, output_mint: str,
                           raw_input_amount: int, slippage_bps: int,
-                          _retry: int = 0) -> SwapResult:
+                          _retry: int = 0,
+                          pair_address: Optional[str] = None) -> SwapResult:
         """
         Core swap execution:
         1. Fresh Jupiter quote
@@ -446,7 +451,8 @@ class SolanaWallet:
             if tx_b64 is None:
                 logger.info("PumpPortal unavailable — building Pump.fun tx directly on-chain")
                 tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun_direct(
-                    input_mint, output_mint, raw_input_amount, slippage_bps)
+                    input_mint, output_mint, raw_input_amount, slippage_bps,
+                    pair_address=pair_address)
         elif tx_b64 is None:
             logger.info("Raydium unavailable — token is not a Pump.fun token, no further fallbacks")
         if tx_b64 is None:
@@ -502,7 +508,8 @@ class SolanaWallet:
                 return self._execute_swap_raw(input_mint, output_mint,
                                               raw_input_amount,
                                               slippage_bps,
-                                              _retry=1)
+                                              _retry=1,
+                                              pair_address=pair_address)
             logger.error("TX still unconfirmed after retry: %s", sig[:16])
             return SwapResult(success=False,
                               error=f"Not finalized after retry: {sig[:16]}")
@@ -606,6 +613,7 @@ class SolanaWallet:
 
     def _quote_and_build_pumpfun_direct(self, input_mint: str, output_mint: str,
                                         amount_raw: int, slippage_bps: int,
+                                        pair_address: Optional[str] = None,
                                         ) -> tuple[Optional[str], int, float]:
         """Build a Pump.fun bonding-curve buy OR sell tx directly using on-chain data.
 
@@ -685,14 +693,15 @@ class SolanaWallet:
             vtr, vsr = struct.unpack_from("<QQ", bcdata, 8)
             complete = bcdata[48] != 0
             if complete and is_buy:
-                logger.info("Pump.fun direct: %s graduated — looking up PumpSwap pool",
-                            pump_mint_str[:12])
-                return self._quote_and_build_pumpswap(pump_mint_str, amount_raw, slippage_bps)
-            elif complete:
-                logger.info("Pump.fun direct: %s bonding curve complete (graduated), sell via PumpSwap",
+                logger.info("Pump.fun direct: %s graduated — routing to PumpSwap",
                             pump_mint_str[:12])
                 return self._quote_and_build_pumpswap(pump_mint_str, amount_raw, slippage_bps,
-                                                      is_sell=True)
+                                                      pool_address=pair_address)
+            elif complete:
+                logger.info("Pump.fun direct: %s graduated — selling via PumpSwap",
+                            pump_mint_str[:12])
+                return self._quote_and_build_pumpswap(pump_mint_str, amount_raw, slippage_bps,
+                                                      is_sell=True, pool_address=pair_address)
             if vsr == 0 or vtr == 0:
                 return None, 0, 0.0
 
@@ -794,6 +803,7 @@ class SolanaWallet:
 
     def _quote_and_build_pumpswap(self, pump_mint: str, amount_raw: int,
                                    slippage_bps: int, is_sell: bool = False,
+                                   pool_address: Optional[str] = None,
                                    ) -> tuple[Optional[str], int, float]:
         """Build a PumpSwap AMM buy or sell tx for graduated pump tokens.
 
@@ -839,16 +849,18 @@ class SolanaWallet:
                 val = r.json().get("result", {}).get("value")
                 return base64.b64decode(val["data"][0]) if val else None
 
-            # ── Step 1: find PumpSwap pool via DexScreener ────────────────────
-            ds = requests.get(
-                f"https://api.dexscreener.com/latest/dex/tokens/{pump_mint}",
-                timeout=8)
-            pool_address = None
-            if ds.ok:
-                for p in ds.json().get("pairs", []):
-                    if p.get("chainId") == "solana" and p.get("dexId") == "pumpswap":
-                        pool_address = p.get("pairAddress")
-                        break
+            # ── Step 1: find PumpSwap pool ────────────────────────────────────
+            # pool_address may already be known (e.g. from DexScreener scanner);
+            # only query DexScreener if not provided.
+            if not pool_address:
+                ds = requests.get(
+                    f"https://api.dexscreener.com/latest/dex/tokens/{pump_mint}",
+                    timeout=8)
+                if ds.ok:
+                    for p in ds.json().get("pairs", []):
+                        if p.get("chainId") == "solana" and p.get("dexId") == "pumpswap":
+                            pool_address = p.get("pairAddress")
+                            break
             if not pool_address:
                 logger.warning("PumpSwap: no pool found for %s on DexScreener", pump_mint[:12])
                 return None, 0, 0.0
@@ -914,45 +926,48 @@ class SolanaWallet:
             _CONST_23      = "96LyJcE6LR56Ask37D9bHYGieoSfyFYxwaD3mxXxVnTg"
 
             ref_accs = None
-            r_sigs = requests.post(config.SOLANA_RPC_URL, json={
-                "jsonrpc": "2.0", "id": 1, "method": "getSignaturesForAddress",
-                "params": [pool_address, {"limit": 20}],
-            }, timeout=10)
-            for sig_info in r_sigs.json().get("result", []):
-                r2 = requests.post(config.SOLANA_RPC_URL, json={
-                    "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
-                    "params": [sig_info["signature"],
-                               {"encoding": "base64", "maxSupportedTransactionVersion": 0}],
-                }, timeout=15)
-                res = r2.json().get("result")
-                if not res:
-                    continue
-                ref_tx  = VersionedTransaction.from_bytes(
-                    base64.b64decode(res["transaction"][0]))
-                ref_msg = ref_tx.message
-                rkeys   = [str(k) for k in ref_msg.account_keys]
-                h       = ref_msg.header
-                ns, rrs, rns = (h.num_required_signatures,
-                                h.num_readonly_signed_accounts,
-                                h.num_readonly_unsigned_accounts)
-                nst = len(rkeys)
-                for inst in ref_msg.instructions:
-                    if "pAMM" not in rkeys[inst.program_id_index]:
+            try:
+                r_sigs = requests.post(config.SOLANA_RPC_URL, json={
+                    "jsonrpc": "2.0", "id": 1, "method": "getSignaturesForAddress",
+                    "params": [pool_address, {"limit": 20}],
+                }, timeout=10)
+                for sig_info in r_sigs.json().get("result", []):
+                    r2 = requests.post(config.SOLANA_RPC_URL, json={
+                        "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
+                        "params": [sig_info["signature"],
+                                   {"encoding": "base64", "maxSupportedTransactionVersion": 0}],
+                    }, timeout=15)
+                    res = r2.json().get("result")
+                    if not res:
                         continue
-                    if len(inst.accounts) != 24:
-                        continue
-                    if bytes(inst.data)[:8] != _PUMP_BUY_DISC:
-                        continue
-                    if not all(idx < nst for idx in inst.accounts):
-                        continue   # skip ALT-based txs
-                    cloned = [rkeys[idx] for idx in inst.accounts]
-                    cloned[1] = str(user)
-                    cloned[5] = str(user_base_ata)
-                    cloned[6] = str(user_wsol_ata)
-                    ref_accs = cloned
-                    break
-                if ref_accs:
-                    break
+                    ref_tx  = VersionedTransaction.from_bytes(
+                        base64.b64decode(res["transaction"][0]))
+                    ref_msg = ref_tx.message
+                    rkeys   = [str(k) for k in ref_msg.account_keys]
+                    h       = ref_msg.header
+                    ns, rrs, rns = (h.num_required_signatures,
+                                    h.num_readonly_signed_accounts,
+                                    h.num_readonly_unsigned_accounts)
+                    nst = len(rkeys)
+                    for inst in ref_msg.instructions:
+                        if "pAMM" not in rkeys[inst.program_id_index]:
+                            continue
+                        if len(inst.accounts) != 24:
+                            continue
+                        if bytes(inst.data)[:8] != _PUMP_BUY_DISC:
+                            continue
+                        if not all(idx < nst for idx in inst.accounts):
+                            continue   # skip ALT-based txs
+                        cloned = [rkeys[idx] for idx in inst.accounts]
+                        cloned[1] = str(user)
+                        cloned[5] = str(user_base_ata)
+                        cloned[6] = str(user_wsol_ata)
+                        ref_accs = cloned
+                        break
+                    if ref_accs:
+                        break
+            except Exception as e:
+                logger.debug("PumpSwap: ref tx lookup failed (%s) — using fallback", e)
 
             # ── Step 6b: deterministic fallback for brand-new pools ───────────
             # Build the 24-account list from first principles when the pool has
