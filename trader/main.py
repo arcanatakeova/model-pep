@@ -1834,7 +1834,7 @@ class AITrader:
                     data = json.load(f)
                 if isinstance(data, list) and data:
                     logger.info("Equity curve restored: %d points", len(data))
-                    return data[-2_880:]   # Cap at 24h
+                    return data[-17_280:]  # Cap at 24h (17280 × 5s = 86400s)
         except Exception:
             pass
         return []
