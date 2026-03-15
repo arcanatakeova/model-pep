@@ -1023,6 +1023,30 @@ class SolanaWallet:
                     logger.warning("PumpSwap: zero SOL calc (sell) pool=%s", pool_address[:16])
                     return None, 0, 0.0
 
+            # ── Step 4b: cap buy to available SOL balance ─────────────────────
+            if not is_sell:
+                _WSOL_RENT = 2_039_280   # rent-exempt minimum for a token account
+                _avail = (self.get_sol_balance_lamports()
+                          - MIN_SOL_RESERVE_LAMPORTS
+                          - _WSOL_RENT)
+                if max_quote_in > _avail:
+                    if _avail <= 0:
+                        logger.warning(
+                            "PumpSwap buy: insufficient SOL balance (avail=%d lamports)", _avail)
+                        return None, 0, 0.0
+                    # Scale down proportionally so max_quote_in fits
+                    max_quote_in = _avail
+                    amount_raw   = int(_avail / (1 + slippage_bps / 10000))
+                    _n = base_reserve * amount_raw * 9900
+                    _d = (quote_reserve * 10000) + (amount_raw * 9900)
+                    _t = _n // _d
+                    _m = max(slippage_bps * 10, 1000)
+                    min_base_out = _t * (10000 - _m) // 10000
+                    arg0, arg1 = amount_raw, min_base_out
+                    out_amount = _t
+                    logger.info(
+                        "PumpSwap buy: capped SOL to %d lamports (wallet headroom)", amount_raw)
+
             # ── Step 5: derive user ATAs and pool authority ───────────────────
             # Detect whether base mint uses SPL Token or Token-2022 by reading
             # its account owner field (determines correct ATA derivation + create ix)
