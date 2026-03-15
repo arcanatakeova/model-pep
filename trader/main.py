@@ -84,7 +84,7 @@ from strategies.funding_arb import FundingArbScanner
 from strategies.grid_trader import GridTrader
 from dex_screener import DexScreener
 from polymarket import PolymarketTrader
-from solana_wallet import SolanaWallet
+from solana_wallet import SolanaWallet, SOL_MINT, USDC_MINT, USDT_MINT
 from token_safety import TokenSafetyChecker
 import data_fetcher as df_mod
 
@@ -160,7 +160,7 @@ class AITrader:
         self._last_futures   = 0.0     # Futures runs on cycle 1 (uses CEX cache)
         self._last_arb       = now      # Stagger: arb runs after first interval
         self._last_grid      = 0.0     # Grid runs on cycle 1 (no API calls)
-        self._last_wallet_sync = 0.0   # Wallet drift check every 5 minutes
+        self._last_wallet_sync = 0.0   # Live wallet position sync every 30s
         self._day_start_eq   = self.portfolio.equity()
         self._last_day       = datetime.now(timezone.utc).date()
         self._equity_curve   = self._load_equity_curve()  # Persist chart history across restarts
@@ -192,6 +192,7 @@ class AITrader:
 
         self.portfolio.load()
         self._load_dex_positions()
+        self._reconcile_wallet_positions()
         self.risk_mgr.reset_daily_loss_tracker()
 
         # Initialise settings.json if missing
@@ -356,11 +357,11 @@ class AITrader:
             self._save_strategy_states()
             self._last_save = time.time()
 
-        # ── 17. Wallet drift sync (every 5 min) ───────────────────────────
-        # Detect if user deposited more SOL externally and credit it as cash.
+        # ── 17. Live wallet sync (every 30s) ──────────────────────────────
+        # Refreshes SOL balance, detects externally-closed positions.
         if (self.live and self.solana.is_connected
-                and time.time() - self._last_wallet_sync > 300):
-            self._sync_wallet_drift()
+                and time.time() - self._last_wallet_sync > 30):
+            self._sync_wallet_positions()
             self._last_wallet_sync = time.time()
 
         logger.info("Cycle #%d done in %.0fms", self._cycle, elapsed_ms)
@@ -882,10 +883,29 @@ class AITrader:
                     pair_address=token.pair_address if token.dex_id == "pumpswap" else None)
                 if tx and not tx.startswith("paper_"):
                     pos_data["tx"] = tx
-                    # Refresh entry price from Birdeye immediately after buy confirms.
-                    # Pre-trade price (Jupiter/DexScreener) can be seconds stale by execution.
-                    # Using the real post-tx price gives accurate PnL tracking.
-                    if config.BIRDEYE_API_KEY:
+                    # Priority 1: parse on-chain transaction for exact fill price
+                    # (wallet waits for FINALIZED before returning, so tx is available)
+                    fill_set = False
+                    try:
+                        fill = self.solana.get_transaction_token_change(
+                            tx, token.base_address)
+                        if fill.get("price_usd", 0) > 0:
+                            pos_data["entry_price"]   = fill["price_usd"]
+                            pos_data["current_price"] = fill["price_usd"]
+                            pos_data["peak_price"]    = fill["price_usd"]
+                            if fill.get("tokens_received"):
+                                pos_data["qty"] = fill["tokens_received"]
+                            if fill.get("sol_spent"):
+                                pos_data["sol_spent"] = fill["sol_spent"]
+                            fill_set = True
+                            logger.info("Fill price from chain: $%.8f (%.4f tokens for %.4f SOL)",
+                                        fill["price_usd"],
+                                        fill.get("tokens_received", 0),
+                                        fill.get("sol_spent", 0))
+                    except Exception:
+                        pass
+                    # Priority 2: Birdeye real-time price if tx parse unavailable
+                    if not fill_set and config.BIRDEYE_API_KEY:
                         try:
                             from dex_screener import _get_birdeye as _dex_be
                             _be = _dex_be()
@@ -896,7 +916,7 @@ class AITrader:
                                     pos_data["current_price"] = bp.price_usd
                                     pos_data["peak_price"]    = bp.price_usd
                         except Exception:
-                            pass  # Keep original price on failure
+                            pass  # Keep pre-trade estimate on failure
                     self._dex_positions[token.pair_address] = pos_data
                     self.portfolio.cash -= size_usd
                     risk_str = safety.risk_level if safety else "?"
@@ -1448,6 +1468,133 @@ class AITrader:
                     sol_usd, abs(drift), expected_sol_usd)
         except Exception as e:
             logger.debug("Wallet drift check failed: %s", e)
+
+    def _reconcile_wallet_positions(self):
+        """
+        Startup check: compare on-chain SPL holdings with _dex_positions.
+        Logs positions tracked but missing on-chain, and untracked on-chain tokens.
+        Only runs in live mode with a connected wallet.
+        """
+        if not self.live or not self.solana.is_connected:
+            return
+        try:
+            on_chain = self.solana.get_all_token_balances()
+            if not on_chain:
+                logger.debug("Wallet reconciliation: no token balances (no positions or RPC error)")
+                return
+
+            on_chain_mints = set(on_chain.keys())
+            _skip_mints    = {SOL_MINT, USDC_MINT, USDT_MINT}
+            tracked_mints  = {pos.get("address", "") for pos in self._dex_positions.values()}
+
+            # Positions we track but have no on-chain tokens for
+            ghost_count = 0
+            for pair_addr, pos in list(self._dex_positions.items()):
+                mint = pos.get("address", "")
+                if not mint or mint in _skip_mints:
+                    continue
+                if mint not in on_chain_mints:
+                    ghost_count += 1
+                    logger.warning(
+                        "STARTUP RECONCILE: %s (%s…) tracked but NO on-chain balance "
+                        "— may have been sold externally; live sync will reconcile.",
+                        pos.get("symbol", "?"), mint[:12])
+
+            # Tokens on-chain but not tracked (excludes SOL/USDC/USDT)
+            untracked = on_chain_mints - tracked_mints - _skip_mints
+            for mint in untracked:
+                bal = on_chain[mint]
+                logger.info(
+                    "STARTUP RECONCILE: untracked on-chain token %s… balance=%.6f",
+                    mint[:12], bal["ui_amount"])
+
+            logger.info(
+                "Wallet reconciliation: %d tracked, %d on-chain tokens, "
+                "%d ghost, %d untracked",
+                len(tracked_mints - {""}), len(on_chain_mints),
+                ghost_count, len(untracked))
+        except Exception as e:
+            logger.debug("Wallet reconciliation error: %s", e)
+
+    def _sync_wallet_positions(self):
+        """
+        Live wallet state sync (~30s cadence in live mode):
+        1. Update portfolio.cash from real on-chain SOL balance.
+        2. Remove positions whose on-chain token balance is zero
+           (externally sold/transferred) and credit estimated proceeds.
+        """
+        if not self.live or not self.solana.is_connected:
+            return
+        try:
+            # 1. Refresh SOL balance → derive available cash
+            sol_raw   = self.solana.get_sol_balance()
+            sol_price = self.solana._get_sol_price()
+            sol_usd   = sol_raw * sol_price if sol_price > 0 else 0.0
+
+            # Subtract value of open DEX positions from total wallet value
+            dex_deployed = sum(
+                pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
+                for pos in self._dex_positions.values()
+                if pos.get("chain") == "solana"
+            )
+            available = sol_usd - dex_deployed
+
+            if available > 0:
+                cash_diff = available - self.portfolio.cash
+                # Ignore tiny fluctuations from SOL price changes
+                if cash_diff > 2.0 or cash_diff < -10.0:
+                    logger.debug(
+                        "Live SOL sync: wallet=$%.2f deployed=$%.2f "
+                        "cash $%.2f → $%.2f (Δ%+.2f)",
+                        sol_usd, dex_deployed, self.portfolio.cash,
+                        available, cash_diff)
+                    self.portfolio.cash = available
+
+            # 2. Check each Solana DEX position's on-chain token balance
+            sol_positions = {
+                pair: pos for pair, pos in self._dex_positions.items()
+                if pos.get("chain") == "solana" and pos.get("address")
+            }
+            if not sol_positions:
+                return
+
+            on_chain = self.solana.get_all_token_balances()
+            if not on_chain:
+                return  # RPC error — never remove positions on a failed read
+
+            for pair_addr, pos in list(sol_positions.items()):
+                mint = pos.get("address", "")
+                if not mint or mint in (SOL_MINT, USDC_MINT, USDT_MINT):
+                    continue
+                if mint not in on_chain:
+                    # Token gone from wallet — closed outside the bot
+                    entry   = pos.get("entry_price", 0)
+                    size    = pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
+                    current = pos.get("current_price", entry)
+                    symbol  = pos.get("symbol", "?")
+                    logger.warning(
+                        "LIVE SYNC: %s (%s…) has zero on-chain balance "
+                        "— position closed externally; removing from tracker.",
+                        symbol, mint[:12])
+                    with self._dex_lock:
+                        self._dex_positions.pop(pair_addr, None)
+                    # Credit estimated value from last known price
+                    proceeds = max(size * (current / entry) if entry > 0 else size, 0.0)
+                    self.portfolio.cash += proceeds
+                    self.portfolio.closed_trades.append({
+                        "asset_id":    pair_addr,
+                        "symbol":      symbol,
+                        "side":        "long",
+                        "entry_price": entry,
+                        "exit_price":  current,
+                        "pnl_usd":     round(proceeds - size, 4),
+                        "pnl_pct":     round((current / entry - 1) * 100, 2) if entry > 0 else 0,
+                        "closed_at":   datetime.now(timezone.utc).isoformat(),
+                        "reason":      "externally_closed",
+                        "chain":       "solana",
+                    })
+        except Exception as e:
+            logger.debug("Live wallet sync error: %s", e)
 
     def _save_dex_positions(self):
         """Persist open DEX positions so they survive restarts."""

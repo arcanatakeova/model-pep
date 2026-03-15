@@ -1653,6 +1653,129 @@ class SolanaWallet:
         logger.warning("SOL price unavailable — using $150 fallback estimate")
         return 150.0
 
+    # ─── Live wallet state (on-chain source of truth) ──────────────────────────
+
+    def get_all_token_balances(self) -> dict:
+        """
+        Return all non-zero SPL token balances held by this wallet.
+        Single RPC call — uses getTokenAccountsByOwner with the SPL Token programId.
+        Returns: {mint_address: {"ui_amount": float, "raw": int, "decimals": int}}
+        """
+        if not self.is_connected:
+            return {}
+        try:
+            resp = requests.post(config.SOLANA_RPC_URL, json={
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    self._pubkey,
+                    {"programId": _TOKEN_PROG},
+                    {"encoding": "jsonParsed", "commitment": "confirmed"},
+                ],
+            }, timeout=15)
+            if not resp.ok:
+                return {}
+            result = {}
+            for acc in resp.json().get("result", {}).get("value", []):
+                info = (acc.get("account", {})
+                            .get("data", {})
+                            .get("parsed", {})
+                            .get("info", {}))
+                mint = info.get("mint", "")
+                ta   = info.get("tokenAmount", {})
+                raw  = int(ta.get("amount", 0))
+                dec  = int(ta.get("decimals", 6))
+                if mint and raw > 0:
+                    result[mint] = {
+                        "ui_amount": raw / (10 ** dec),
+                        "raw":       raw,
+                        "decimals":  dec,
+                    }
+            return result
+        except Exception as e:
+            logger.debug("get_all_token_balances error: %s", e)
+            return {}
+
+    def get_transaction_token_change(self, signature: str, base_mint: str) -> dict:
+        """
+        Parse a finalized swap transaction to get actual fill data.
+        Returns a dict with any of:
+          "tokens_received" (float) — tokens bought
+          "sol_spent"       (float) — SOL spent on buy
+          "tokens_sold"     (float) — tokens sold
+          "sol_received"    (float) — SOL received from sell
+          "price_usd"       (float) — effective USD price per token
+          "sol_change"      (float) — raw SOL change (negative = spent, positive = received)
+          "token_change"    (float) — raw token change
+        Returns {} if not found or parse fails.
+        """
+        if not self.is_connected or not signature or signature.startswith("paper"):
+            return {}
+        try:
+            resp = requests.post(config.SOLANA_RPC_URL, json={
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getTransaction",
+                "params": [
+                    signature,
+                    {
+                        "encoding": "jsonParsed",
+                        "commitment": "finalized",
+                        "maxSupportedTransactionVersion": 0,
+                    },
+                ],
+            }, timeout=15)
+            if not resp.ok:
+                return {}
+            tx = resp.json().get("result")
+            if not tx:
+                return {}
+
+            meta          = tx.get("meta", {})
+            pre_balances  = meta.get("preBalances",  [])
+            post_balances = meta.get("postBalances", [])
+            pre_token     = meta.get("preTokenBalances",  [])
+            post_token    = meta.get("postTokenBalances", [])
+
+            # Account 0 = fee payer = our wallet
+            sol_change = 0.0
+            if pre_balances and post_balances:
+                sol_change = (post_balances[0] - pre_balances[0]) / 1e9
+
+            # Find this wallet's base token balance change
+            token_change = 0.0
+            for pt in post_token:
+                if pt.get("mint") == base_mint and pt.get("owner") == self._pubkey:
+                    post_amt = float(pt.get("uiTokenAmount", {}).get("uiAmount") or 0)
+                    pre_amt  = 0.0
+                    for prt in pre_token:
+                        if prt.get("mint") == base_mint and prt.get("owner") == self._pubkey:
+                            pre_amt = float(prt.get("uiTokenAmount", {}).get("uiAmount") or 0)
+                            break
+                    token_change = post_amt - pre_amt
+                    break
+
+            sol_price = self._get_sol_price()
+            result    = {"sol_change": round(sol_change, 9), "token_change": token_change}
+
+            if token_change > 0 and sol_change < 0:
+                # Buy: spent SOL, received tokens
+                sol_spent = abs(sol_change)
+                result["tokens_received"] = token_change
+                result["sol_spent"]       = sol_spent
+                if sol_price > 0:
+                    result["price_usd"] = (sol_spent * sol_price) / token_change
+            elif token_change < 0 and sol_change > 0:
+                # Sell: sold tokens, received SOL
+                result["tokens_sold"]  = abs(token_change)
+                result["sol_received"] = sol_change
+                if abs(token_change) > 0 and sol_price > 0:
+                    result["price_usd"] = (sol_change * sol_price) / abs(token_change)
+
+            return result
+        except Exception as e:
+            logger.debug("get_transaction_token_change error: %s", e)
+            return {}
+
     # ─── Quote helper (for safety checker / dry-run) ───────────────────────────
 
     def get_quote(self, input_mint: str, output_mint: str,
