@@ -1040,16 +1040,15 @@ class SolanaWallet:
                 [b"creator_vault", bytes(coin_creator)], PUMPSWAP)
             creator_wsol_ata = _ata(creator_wallet, WSOL_MINT)
 
-            # Volume accumulator PDAs — owned by the pfee program, NOT by PUMPSWAP.
-            # The pfee program (pfeeUxB6j...) initialises and owns these accounts;
-            # passing a PDA derived from PUMPSWAP seeds causes error 0xbbf (AccountOwnedByWrongProgram).
+            # Volume accumulator PDAs — owned by pAMM (PUMPSWAP), NOT by pfee.
+            # Confirmed on-chain: both global and user volume accumulators are
+            # pAMM PDAs.  Using pfee seeds produced the wrong addresses (0xbbf/0x7d6).
             _pool_pk = Pubkey.from_string(pool_address)
-            PFEE_PROG = Pubkey.from_string("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ")
             global_volume_acc, _ = Pubkey.find_program_address(
-                [b"global_volume_accumulator"], PFEE_PROG)
+                [b"global_volume_accumulator"], PUMPSWAP)
             # user_volume_accumulator is per-user (NOT per-pool)
             user_volume_acc, _ = Pubkey.find_program_address(
-                [b"user_volume_accumulator", bytes(user)], PFEE_PROG)
+                [b"user_volume_accumulator", bytes(user)], PUMPSWAP)
             logger.debug("PumpSwap PDAs: global_va=%s user_va=%s",
                          str(global_volume_acc)[:16], str(user_volume_acc)[:16])
 
