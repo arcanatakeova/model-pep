@@ -94,6 +94,10 @@ QUOTE_MAX_AGE_SECS       = 5            # Refetch quote if older than this
 MAX_PRICE_IMPACT_PCT     = 4.0          # Reject swaps with > 4% impact
 CONFIRMATION_TIMEOUT     = 60           # Seconds to wait for finalized
 
+# PumpSwap singleton cache — global_volume_accumulator is the same address for every tx.
+# Populated from the first successful ref_tx clone or a bootstrap program-level lookup.
+_pumpswap_global_va: Optional[str] = None
+
 
 class SwapResult:
     """Result of a swap execution attempt."""
@@ -482,12 +486,13 @@ class SolanaWallet:
         _is_pump = output_mint.endswith("pump") or input_mint.endswith("pump")
         _is_sell = (output_mint in (SOL_MINT, str(WSOL_MINT)))
 
-        if _is_pump and pair_address and not _is_sell:
-            # Fast-path: pool address already known → build on-chain directly.
+        if _is_pump and pair_address:
+            # Fast-path for both BUY and SELL: pool address already known → build on-chain.
             # Skips Jupiter/Raydium because they sometimes return txs that fail
             # on-chain for new/low-liquidity PumpSwap pools, silently blocking the
             # fallback cascade.  The on-chain path is always correct when pool addr is known.
-            logger.info("Pump token with known pool — using direct on-chain path")
+            logger.info("Pump token with known pool — using direct on-chain path (%s)",
+                        "sell" if _is_sell else "buy")
             tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun_direct(
                 input_mint, output_mint, raw_input_amount, slippage_bps,
                 pair_address=pair_address)
@@ -1113,6 +1118,9 @@ class SolanaWallet:
                         # [10] = fee_recipient_wsol_ata — keep from ref tx (derived from [9])
                         cloned[20] = str(user_volume_acc)  # user_volume_accumulator (ours)
                         ref_accs = cloned
+                        # Cache the global_volume_accumulator singleton (same address across all pools)
+                        global _pumpswap_global_va
+                        _pumpswap_global_va = cloned[19]
                         break
                     if ref_accs:
                         break
@@ -1149,8 +1157,58 @@ class SolanaWallet:
             # [22] R  pfee program (constant)
             # [23] W  coin_creator_vault_authority PDA(pAMM, ["creator_vault", bc_creator])
             if not ref_accs:
-                logger.info("PumpSwap: no ref tx for pool %s — deriving accounts",
-                            pool_address[:16])
+                # ── Bootstrap global_volume_accumulator from any recent pAMM tx ──
+                # This is needed for brand-new pools that have no prior transactions.
+                # global_volume_accumulator is a singleton: same address for every pool.
+                global _pumpswap_global_va
+                if not _pumpswap_global_va:
+                    try:
+                        r_prog = _session.post(config.SOLANA_RPC_URL, json={
+                            "jsonrpc": "2.0", "id": 1,
+                            "method": "getSignaturesForAddress",
+                            "params": [str(PUMPSWAP), {"limit": 20}],
+                        }, timeout=10)
+                        for _si in r_prog.json().get("result", []):
+                            _r2 = _session.post(config.SOLANA_RPC_URL, json={
+                                "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
+                                "params": [_si["signature"],
+                                           {"encoding": "base64",
+                                            "maxSupportedTransactionVersion": 0}],
+                            }, timeout=15)
+                            _res = _r2.json().get("result")
+                            if not _res or (_res.get("meta") or {}).get("err") is not None:
+                                continue
+                            _rtx  = VersionedTransaction.from_bytes(
+                                base64.b64decode(_res["transaction"][0]))
+                            _rmsg = _rtx.message
+                            _rk   = [str(k) for k in _rmsg.account_keys]
+                            _ld   = (_res.get("meta") or {}).get("loadedAddresses") or {}
+                            _rk.extend(_ld.get("writable", []))
+                            _rk.extend(_ld.get("readonly", []))
+                            for _ix in _rmsg.instructions:
+                                if (_ix.program_id_index >= len(_rk)
+                                        or _rk[_ix.program_id_index] != str(PUMPSWAP)
+                                        or len(_ix.accounts) != 24
+                                        or bytes(_ix.data)[:8] not in (_PUMP_BUY_DISC, _PUMP_SELL_DISC)
+                                        or not all(i < len(_rk) for i in _ix.accounts)):
+                                    continue
+                                _pumpswap_global_va = _rk[_ix.accounts[19]]
+                                logger.info("PumpSwap: bootstrapped global_va=%s",
+                                            _pumpswap_global_va[:16])
+                                break
+                            if _pumpswap_global_va:
+                                break
+                    except Exception as _be:
+                        logger.debug("PumpSwap: global_va bootstrap failed (%s)", _be)
+
+                _gva = _pumpswap_global_va or str(global_volume_acc)
+                if not _pumpswap_global_va:
+                    logger.warning("PumpSwap: global_va not bootstrapped — using PDA derivation "
+                                   "(may fail with AccountNotInitialized)")
+                else:
+                    logger.info("PumpSwap: no ref tx for pool %s — using bootstrapped global_va",
+                                pool_address[:16])
+
                 ref_accs = [
                     pool_address,                        # [0]
                     str(user),                           # [1]
@@ -1171,7 +1229,7 @@ class SolanaWallet:
                     str(PUMPSWAP),                       # [16]
                     str(creator_wsol_ata),               # [17] ATA(creator_wallet, WSOL)
                     str(creator_wallet),                 # [18] pAMM PDA(creator_vault, bc_creator)
-                    str(global_volume_acc),              # [19] global_volume_accumulator PDA
+                    _gva,                                # [19] global_volume_accumulator (real addr)
                     str(user_volume_acc),                # [20] user_volume_accumulator PDA
                     _CONST_21,                           # [21] pfee state account
                     _CONST_22,                           # [22] pfee program
@@ -1719,46 +1777,51 @@ class SolanaWallet:
 
     # ─── Live wallet state (on-chain source of truth) ──────────────────────────
 
-    def get_all_token_balances(self) -> dict:
+    def get_all_token_balances(self) -> Optional[dict]:
         """
-        Return all non-zero SPL token balances held by this wallet.
-        Single RPC call — uses getTokenAccountsByOwner with the SPL Token programId.
-        Returns: {mint_address: {"ui_amount": float, "raw": int, "decimals": int}}
+        Return all non-zero token balances held by this wallet (SPL Token + Token-2022).
+        Queries both token programs so PumpSwap Token-2022 tokens are included.
+        Returns:
+          {mint: {"ui_amount": float, "raw": int, "decimals": int}}  on success (may be empty)
+          None  on RPC failure — callers must distinguish {} (empty wallet) from None (failed)
         """
         if not self.is_connected:
-            return {}
-        try:
-            resp = _session.post(config.SOLANA_RPC_URL, json={
-                "jsonrpc": "2.0", "id": 1,
-                "method": "getTokenAccountsByOwner",
-                "params": [
-                    self._pubkey,
-                    {"programId": _TOKEN_PROG},
-                    {"encoding": "jsonParsed", "commitment": "confirmed"},
-                ],
-            }, timeout=15)
-            if not resp.ok:
-                logger.warning("get_all_token_balances: RPC HTTP %d", resp.status_code)
-                return {}
-            result = {}
-            for acc in resp.json().get("result", {}).get("value", []):
-                info = (acc.get("account", {})
-                            .get("data", {})
-                            .get("parsed", {})
-                            .get("info", {}))
-                mint = info.get("mint", "")
-                ta   = info.get("tokenAmount", {})
-                raw  = int(ta.get("amount", 0))
-                dec  = int(ta.get("decimals", 6))
-                if mint and raw > 0:
-                    result[mint] = {
-                        "ui_amount": raw / (10 ** dec),
-                        "raw":       raw,
-                        "decimals":  dec,
-                    }
-            return result
-        except Exception as e:
-            logger.debug("get_all_token_balances error: %s", e)
+            return None
+        _TOKEN22_PROG = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+        result = {}
+        for prog_id in (_TOKEN_PROG, _TOKEN22_PROG):
+            try:
+                resp = _session.post(config.SOLANA_RPC_URL, json={
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "getTokenAccountsByOwner",
+                    "params": [
+                        self._pubkey,
+                        {"programId": prog_id},
+                        {"encoding": "jsonParsed", "commitment": "confirmed"},
+                    ],
+                }, timeout=15)
+                if not resp.ok:
+                    logger.warning("get_all_token_balances: RPC HTTP %d", resp.status_code)
+                    return None  # RPC failure — don't make decisions on partial data
+                for acc in resp.json().get("result", {}).get("value", []):
+                    info = (acc.get("account", {})
+                                .get("data", {})
+                                .get("parsed", {})
+                                .get("info", {}))
+                    mint = info.get("mint", "")
+                    ta   = info.get("tokenAmount", {})
+                    raw  = int(ta.get("amount", 0))
+                    dec  = int(ta.get("decimals", 6))
+                    if mint and raw > 0:
+                        result[mint] = {
+                            "ui_amount": raw / (10 ** dec),
+                            "raw":       raw,
+                            "decimals":  dec,
+                        }
+            except Exception as e:
+                logger.debug("get_all_token_balances error: %s", e)
+                return None
+        return result  # may be empty dict {} if wallet has no tokens — that is valid
             return {}
 
     def get_transaction_token_change(self, signature: str, base_mint: str) -> dict:

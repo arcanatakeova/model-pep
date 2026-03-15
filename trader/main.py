@@ -811,8 +811,13 @@ class AITrader:
             # ── Live wallet: verify SOL balance using cached value (avoids RPC per trade)
             if token.chain_id == "solana" and self.solana.is_connected:
                 _sol, _usdc, _sol_usd, _cache_ts = self._wallet_balance_cache
-                # Use cached value if fresh (<10s), else fall back to portfolio.cash
-                sol_bal_usd = _sol_usd if (time.time() - _cache_ts) < 10 else self.portfolio.cash
+                # Use cached value if fresh (<10s), else fall back to portfolio.cash.
+                # Take max() to guard against the cache returning $0 during a 429 burst
+                # while portfolio.cash still holds the last good balance.
+                sol_bal_usd = max(
+                    _sol_usd if (time.time() - _cache_ts) < 10 else 0.0,
+                    self.portfolio.cash,
+                )
                 if sol_bal_usd < size_usd + 1.0:   # Need trade size + $1 flat for Solana fees
                     logger.warning("SOL balance $%.2f insufficient for $%.2f trade — skipping",
                                    sol_bal_usd, size_usd)
@@ -1074,7 +1079,7 @@ class AITrader:
                     _last_token_reconcile = now_ts
                     try:
                         on_chain = self.solana.get_all_token_balances()
-                        if on_chain:
+                        if on_chain is not None:  # None = RPC error; {} = empty wallet (valid)
                             _skip = {SOL_MINT, USDC_MINT, USDT_MINT}
                             for pair_addr, pos in list(self._dex_positions.items()):
                                 mint = pos.get("address", "")
@@ -1691,8 +1696,8 @@ class AITrader:
             return
         try:
             on_chain = self.solana.get_all_token_balances()
-            if not on_chain:
-                logger.debug("Wallet reconciliation: empty wallet or RPC error")
+            if on_chain is None:
+                logger.debug("Wallet reconciliation: RPC error — skipping")
                 return
 
             _skip  = {SOL_MINT, USDC_MINT, USDT_MINT}
@@ -1826,7 +1831,7 @@ class AITrader:
                 return
 
             on_chain = self.solana.get_all_token_balances()
-            if not on_chain:
+            if on_chain is None:
                 return  # RPC error — never remove positions on a failed read
 
             for pair_addr, pos in list(sol_positions.items()):
