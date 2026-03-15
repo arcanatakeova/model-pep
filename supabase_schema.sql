@@ -1,45 +1,55 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 --  AI Trader — Supabase Schema
 --  Run this ONCE in your Supabase SQL editor (Dashboard → SQL Editor → New query)
+--
+--  Uses Supabase Vault for secrets — encrypted at rest via pgsodium (AES-256-GCM).
+--  Secrets are NEVER stored as plaintext in the database; only decrypted in memory.
 -- ═══════════════════════════════════════════════════════════════════════════
 
--- ─── Helper: auto-update updated_at ─────────────────────────────────────────
-create or replace function update_updated_at()
-returns trigger language plpgsql as $$
+
+-- ─── 1. Vault RPC wrappers ──────────────────────────────────────────────────
+-- PostgREST can only access the `public` schema, but Vault lives in `vault.*`.
+-- These thin wrappers let the bot call vault functions via supabase.rpc().
+-- Both are SECURITY DEFINER + restricted to service_role only.
+
+-- Read all decrypted secrets (service_role only)
+create or replace function get_vault_secrets()
+returns table (name text, decrypted_secret text)
+language sql security definer
+as $$
+    select name, decrypted_secret from vault.decrypted_secrets;
+$$;
+
+revoke execute on function get_vault_secrets from public, anon, authenticated;
+grant execute on function get_vault_secrets to service_role;
+
+-- Upsert a secret (service_role only)
+create or replace function set_vault_secret(
+    p_name text,
+    p_value text,
+    p_description text default ''
+) returns uuid
+language plpgsql security definer
+as $$
+declare
+    existing_id uuid;
 begin
-    new.updated_at = now();
-    return new;
+    select id into existing_id from vault.secrets where name = p_name;
+    if existing_id is not null then
+        perform vault.update_secret(existing_id, p_value, p_name, p_description);
+        return existing_id;
+    else
+        return vault.create_secret(p_value, p_name, p_description);
+    end if;
 end;
 $$;
 
--- ─── 1. Secrets vault ────────────────────────────────────────────────────────
--- Stores all private keys / API keys — never needs to live on disk.
--- REQUIRES service_role key to read/write (anon key is blocked by RLS).
--- Get service_role key: Supabase dashboard → Settings → API → service_role
+revoke execute on function set_vault_secret from public, anon, authenticated;
+grant execute on function set_vault_secret to service_role;
 
-create table if not exists secrets (
-    id          uuid primary key default gen_random_uuid(),
-    key         text unique not null,
-    value       text not null,
-    description text default '',
-    created_at  timestamptz default now(),
-    updated_at  timestamptz default now()
-);
-
-alter table secrets enable row level security;
-
-drop policy if exists "service_role_only_secrets" on secrets;
-create policy "service_role_only_secrets"
-    on secrets
-    using (auth.role() = 'service_role');
-
-drop trigger if exists secrets_updated_at on secrets;
-create trigger secrets_updated_at
-    before update on secrets
-    for each row execute function update_updated_at();
 
 -- ─── 2. Trades ───────────────────────────────────────────────────────────────
--- Full history of every closed trade. Uses anon key — bot inserts only.
+-- Full history of every closed trade. Append-only. Anon key can insert+read.
 
 create table if not exists trades (
     id           uuid primary key default gen_random_uuid(),
@@ -68,8 +78,9 @@ create policy "anon_select_trades" on trades for select to anon using (true);
 create index if not exists trades_closed_at_idx on trades (closed_at desc);
 create index if not exists trades_symbol_idx    on trades (symbol);
 
+
 -- ─── 3. Equity curve ─────────────────────────────────────────────────────────
--- Time-series written every 5 seconds. Uses anon key.
+-- Time-series written every 5 seconds while the bot runs. Anon key.
 
 create table if not exists equity_curve (
     ts         timestamptz primary key default now(),
@@ -85,8 +96,9 @@ drop policy if exists "anon_select_equity" on equity_curve;
 create policy "anon_insert_equity" on equity_curve for insert to anon with check (true);
 create policy "anon_select_equity" on equity_curve for select to anon using (true);
 
+
 -- ─── 4. Bot state snapshot ───────────────────────────────────────────────────
--- Single-row upsert (id=1) every 5 s. Uses anon key.
+-- Single-row upsert (id=1) every 5 s. Anon key.
 
 create table if not exists bot_state (
     id         int primary key default 1,
@@ -101,19 +113,23 @@ drop policy if exists "anon_select_bot_state" on bot_state;
 create policy "anon_upsert_bot_state" on bot_state for all to anon using (true) with check (true);
 create policy "anon_select_bot_state" on bot_state for select to anon using (true);
 
+
 -- ═══════════════════════════════════════════════════════════════════════════
---  AFTER running this schema:
+--  AFTER running this schema, store your secrets in the Vault:
 --
---  1. Get service_role key from: Settings → API → service_role (secret)
---     Add to .env:  SUPABASE_SERVICE_KEY=eyJ...
+--  Option A — via Supabase Dashboard:
+--    Go to Project Settings → Vault → Add new secret
+--    Name each secret exactly as the env var name (e.g. PHANTOM_PRIVATE_KEY)
 --
---  2. Insert your secrets (using service_role key or Supabase Table Editor):
+--  Option B — via SQL (run in SQL Editor):
 --
--- insert into secrets (key, value, description) values
---   ('PHANTOM_PRIVATE_KEY',  'your_base58_key',   'Phantom wallet'),
---   ('BIRDEYE_API_KEY',      'your_key',           'Birdeye Solana data'),
---   ('FINNHUB_KEY',          'your_key',           'Finnhub stocks'),
---   ('COINBASE_KEY_NAME',    'organizations/...',  'Coinbase CDP key name'),
---   ('COINBASE_SECRET',      '-----BEGIN EC PRIVATE KEY-----\nMHQ...\n-----END EC PRIVATE KEY-----', 'Coinbase private key')
--- on conflict (key) do update set value = excluded.value, updated_at = now();
+--  select set_vault_secret('PHANTOM_PRIVATE_KEY',  'your_base58_key',     'Phantom wallet');
+--  select set_vault_secret('BIRDEYE_API_KEY',      'your_key',            'Birdeye Solana data');
+--  select set_vault_secret('FINNHUB_KEY',          'your_key',            'Finnhub stocks');
+--  select set_vault_secret('COINBASE_KEY_NAME',    'organizations/...',   'Coinbase CDP key name');
+--  select set_vault_secret('COINBASE_SECRET',      '-----BEGIN EC....',   'Coinbase private key');
+--  select set_vault_secret('SOLANA_RPC_URL',       'https://mainnet.helius-rpc.com/?api-key=xxx', 'Helius RPC');
+--
+--  Then add service_role key to .env:
+--    SUPABASE_SERVICE_KEY=eyJ...  (from Settings → API → service_role)
 -- ═══════════════════════════════════════════════════════════════════════════

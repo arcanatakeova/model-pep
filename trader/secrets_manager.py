@@ -1,30 +1,32 @@
 """
-Supabase Secrets Manager + Persistence Layer
+Supabase Vault Secrets Manager + Persistence Layer
 
 Responsibilities:
-  1. load_secrets()          — fetch all private keys from Supabase `secrets` table
-                               and inject into os.environ before config is read.
+  1. load_secrets()          — fetch all secrets from Supabase Vault (encrypted at rest
+                               via pgsodium AES-256-GCM) and inject into os.environ.
   2. persist_trade()         — write a closed trade to Supabase `trades` table.
   3. persist_equity()        — append an equity-curve point every 5 s.
   4. persist_bot_state()     — upsert the latest bot state snapshot (single row).
 
 Security model:
-  Only SUPABASE_URL + SUPABASE_SERVICE_KEY need to be in .env (or the host
-  environment).  Every other secret (PHANTOM_PRIVATE_KEY, COINBASE_KEY_NAME,
-  BIRDEYE_API_KEY, …) lives encrypted in Supabase and is fetched at startup.
+  Secrets are encrypted at rest by Supabase Vault (pgsodium). They are NEVER stored
+  as plaintext in the database — only decrypted in memory when read through
+  vault.decrypted_secrets. Backups and replication streams only see ciphertext.
+
+  Only SUPABASE_URL + SUPABASE_SERVICE_KEY need to be in .env.
+  The service_role key is required to read secrets from the Vault.
+  The anon key is sufficient for trades / equity / bot_state persistence.
 
 Fallback:
-  If Supabase is unreachable the bot continues normally using whatever is
-  already in os.environ / .env.  A warning is logged but nothing crashes.
+  If Supabase is unreachable the bot continues using whatever is already in
+  os.environ / .env.  A warning is logged but nothing crashes.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
 import time
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +40,7 @@ def _get_client(require_service_role: bool = False):
     """
     Return cached Supabase client, or None if not configured.
     require_service_role=True: only returns client if service_role key is available
-    (needed for the secrets table which has strict RLS).
+    (needed for Vault access which has strict RLS).
     """
     global _client, _connected
     if _client is not None:
@@ -72,15 +74,17 @@ def _get_client(require_service_role: bool = False):
         return _client
 
 
-# ── 1. Secret loading ──────────────────────────────────────────────────────
+# ── 1. Vault secret loading ──────────────────────────────────────────────────
 
 def load_secrets() -> bool:
     """
-    Fetch all rows from the Supabase `secrets` table and inject them into
-    os.environ.  Call this once at process startup, before config.py is
-    imported, so every os.getenv() call in config picks up the Supabase values.
+    Fetch all secrets from Supabase Vault via the get_vault_secrets() RPC
+    function and inject them into os.environ.
 
-    Requires service_role key (secrets table has strict RLS).
+    Call this once at process startup, BEFORE config.py is imported, so every
+    os.getenv() call in config picks up the Vault-stored values.
+
+    Requires service_role key (Vault RPC functions are restricted).
     Falls back gracefully if only anon key is available.
 
     Returns True if at least one secret was loaded.
@@ -89,20 +93,20 @@ def load_secrets() -> bool:
     if client is None:
         return False
     try:
-        resp = client.table("secrets").select("key,value").execute()
+        resp = client.rpc("get_vault_secrets").execute()
         loaded = 0
         for row in (resp.data or []):
-            k = (row.get("key") or "").strip()
-            v = (row.get("value") or "").strip()
-            if k:
+            name   = (row.get("name") or "").strip()
+            secret = (row.get("decrypted_secret") or "").strip()
+            if name and secret:
                 # Restore real newlines in PEM keys stored with escaped \n
-                os.environ[k] = v.replace("\\n", "\n")
+                os.environ[name] = secret.replace("\\n", "\n")
                 loaded += 1
         if loaded:
-            logger.info("Loaded %d secrets from Supabase vault", loaded)
+            logger.info("Loaded %d secrets from Supabase Vault (encrypted at rest)", loaded)
         return loaded > 0
     except Exception as e:
-        logger.warning("Failed to load Supabase secrets: %s — using .env fallback", e)
+        logger.warning("Failed to load Vault secrets: %s — using .env fallback", e)
         return False
 
 
@@ -200,26 +204,27 @@ def persist_bot_state(state: dict) -> None:
         logger.debug("Supabase persist_bot_state error: %s", e)
 
 
-# ── 5. Secret upsert helper (for setup scripts / dashboard) ───────────────
+# ── 5. Vault upsert helper (for setup scripts) ───────────────────────────
 
 def upsert_secret(key: str, value: str, description: str = "") -> bool:
     """
-    Store or update a single secret in Supabase.
-    Useful for initial setup: call once per key from a setup script.
+    Store or update a secret in Supabase Vault (encrypted at rest).
+    Uses the set_vault_secret() RPC function.
+    Requires service_role key.
     """
-    client = _get_client()
+    client = _get_client(require_service_role=True)
     if client is None:
         return False
     try:
-        client.table("secrets").upsert({
-            "key":         key,
-            "value":       value,
-            "description": description,
+        client.rpc("set_vault_secret", {
+            "p_name":        key,
+            "p_value":       value,
+            "p_description": description,
         }).execute()
-        logger.info("Upserted secret: %s", key)
+        logger.info("Vault secret upserted: %s", key)
         return True
     except Exception as e:
-        logger.warning("Failed to upsert secret %s: %s", key, e)
+        logger.warning("Failed to upsert Vault secret %s: %s", key, e)
         return False
 
 
