@@ -5,52 +5,80 @@ All trading parameters, API endpoints, and strategy weights.
 import os
 
 # ─── Trading Mode ─────────────────────────────────────────────────────────────
-PAPER_TRADING = True          # Set False to enable live trading (requires API keys)
-INITIAL_CAPITAL = 10_000.0    # Starting capital in USD (overridden by wallet balance)
+PAPER_TRADING = False         # Live mode by default — real Solana DEX trades via Phantom
+INITIAL_CAPITAL = 100_000.0   # Starting capital in USD (overridden by wallet balance)
 
 # ─── Risk Management ──────────────────────────────────────────────────────────
-MAX_POSITION_PCT = 0.10       # Max 10% of portfolio per position
-MAX_OPEN_POSITIONS = 12       # Maximum concurrent positions (more markets = more slots)
-STOP_LOSS_PCT = 0.03          # 3% stop loss
-TAKE_PROFIT_PCT = 0.06        # 6% take profit (2:1 R/R ratio)
-RISK_PER_TRADE_PCT = 0.02     # Risk 2% of portfolio per trade (Kelly-based)
-MIN_SIGNAL_STRENGTH = 0.45    # Minimum ensemble score to trigger trade
-TRAILING_STOP_PCT = 0.025     # 2.5% trailing stop
+MAX_POSITION_PCT = 0.18       # Max 18% of portfolio per position (up from 15%)
+MAX_OPEN_POSITIONS = 15       # Max concurrent positions (up from 12)
+STOP_LOSS_PCT = 0.03          # 3% stop loss (CEX only — DEX uses dynamic stops)
+TAKE_PROFIT_PCT = 0.06        # 6% take profit (CEX only — DEX uses dynamic targets)
+RISK_PER_TRADE_PCT = 0.05     # Risk 5% of portfolio per trade (aggressive Kelly, up from 4%)
+MIN_SIGNAL_STRENGTH = 0.22    # Min ensemble score (lowered: capture trades in neutral markets)
+TRAILING_STOP_PCT = 0.08      # 8% trailing stop (wider = lets winners run further)
+
+# ─── Disabled strategies (Solana DEX only) ────────────────────────────────────
+FUTURES_ENABLED      = False   # No Binance futures
+FUNDING_ARB_ENABLED  = False   # No funding rate arb
+GRID_TRADING_ENABLED = False   # No grid trading
+SCALP_ENABLED        = False   # No CEX scalping
+FOREX_ENABLED        = False   # No forex (set once — do not override below)
+
+# ─── Futures / Leverage constants (safe stubs — FUTURES_ENABLED=False above) ──
+FUTURES_DAILY_LOSS_LIMIT = 0.05    # 5% daily hard stop if futures were ever re-enabled
+FUTURES_RISK_PCT         = 0.01    # 1% equity risk per futures trade
+MAX_LEVERAGE             = 3       # Conservative max leverage
+LEVERAGE_BY_CONVICTION   = [       # (min_conviction, leverage) pairs
+    (0.80, 3),
+    (0.60, 2),
+    (0.0,  1),
+]
+SCALP_INTERVAL_SEC       = 30      # Stub — scalping disabled
 
 # ─── Market Coverage ──────────────────────────────────────────────────────────
-CRYPTO_TOP_N = 50             # Watch top N cryptocurrencies by market cap
-CRYPTO_MIN_VOLUME_USD = 5_000_000   # Minimum 24h volume to consider
+CRYPTO_TOP_N = 30             # Scan top 30 coins — broader coverage, more signals
+CRYPTO_MIN_VOLUME_USD = 5_000_000   # Minimum $5M 24h volume (filters noise)
 
-# Target crypto assets (overrides top-N if set)
+# Target crypto assets (always scanned, merged with top-N)
 CRYPTO_WATCHLIST = [
-    "bitcoin", "ethereum", "solana", "bnb", "avalanche-2",
-    "chainlink", "polkadot", "cardano", "polygon", "arbitrum",
-    "optimism", "uniswap", "aave", "maker", "compound-governance-token",
+    "bitcoin",
+    "ethereum",
+    "solana",
+    "chainlink",
+    "avalanche-2",
+    "the-open-network",
+    "sui",
+    "injective-protocol",
+    "arbitrum",
+    "optimism",
 ]
 
-# Major forex pairs (base/quote)
-FOREX_PAIRS = [
-    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD",
-    "USD/CAD", "USD/CHF", "NZD/USD",
-]
+# Major forex pairs (kept for reference, not traded — FOREX_ENABLED=False above)
+FOREX_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD"]
 
-# Stock/ETF symbols (via Yahoo Finance unofficial)
-STOCK_WATCHLIST = [
-    "SPY", "QQQ", "IWM",       # Major index ETFs
-    "AAPL", "MSFT", "GOOGL",   # Tech megacaps
-    "NVDA", "AMD", "TSM",       # Semiconductors
-    "GLD", "SLV", "USO",        # Commodities ETFs
-    "TLT", "HYG",               # Bond ETFs
-]
+# ─── Forex Strategy parameters (stubs — FOREX_ENABLED=False) ─────────────────
+FOREX_SESSION_FILTER = False  # Disabled
+FOREX_MIN_ADX        = 20     # Skip ranging markets (ADX < 20 = no clear trend)
+FOREX_MIN_SCORE      = 0.35   # Min signal score (higher bar than crypto 0.22)
+FOREX_ATR_STOP_MULTIPLIER = 1.5  # Stop = 1.5× ATR from entry
+FOREX_RR_RATIO       = 2.2    # Target = 2.2× stop (minimum R:R)
+FOREX_MAX_CORRELATED_PAIRS = 1   # Max 1 position per correlation group
+FOREX_SPREADS_PIPS = {        # Typical retail spread per pair (pips)
+    "EUR/USD": 0.5, "GBP/USD": 0.8, "USD/JPY": 0.6,
+    "AUD/USD": 0.7, "USD/CAD": 1.0,
+}
+
+# Stock/ETF symbols — enabled
+STOCK_WATCHLIST = ["SPY", "QQQ", "NVDA", "TSLA", "META", "COIN", "MSTR", "MARA"]
 
 # ─── Strategy Weights ─────────────────────────────────────────────────────────
 STRATEGY_WEIGHTS = {
-    "rsi":         0.20,   # RSI overbought/oversold
-    "macd":        0.20,   # MACD crossover
-    "bollinger":   0.15,   # Bollinger Band mean reversion
-    "ema_cross":   0.20,   # EMA 9/21 crossover
-    "momentum":    0.15,   # Price momentum
-    "volume":      0.10,   # Volume analysis
+    "rsi":         0.12,   # RSI — noisy on small caps, reduced
+    "macd":        0.18,   # MACD crossover — good for trends
+    "bollinger":   0.10,   # Bollinger — mean reversion, less relevant for memecoins
+    "ema_cross":   0.15,   # EMA 9/21 crossover
+    "momentum":    0.20,   # Price momentum — key for memecoins
+    "volume":      0.25,   # Volume — strongest alpha signal for DEX tokens
 }
 
 # ─── Technical Indicator Parameters ───────────────────────────────────────────
@@ -77,22 +105,35 @@ CRYPTOCOMPARE_BASE = "https://min-api.cryptocompare.com/data"
 MESSARI_BASE = "https://data.messari.io/api/v1"
 EXCHANGERATE_BASE = "https://open.er-api.com/v6"
 
-# Optional API keys (from environment)
+# ─── Supabase (secrets vault + trade/state persistence) ───────────────────────
+# Only these two values need to be in .env — everything else is stored in Supabase.
+SUPABASE_URL         = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")   # service_role key
+SUPABASE_ANON_KEY    = os.getenv("SUPABASE_ANON_KEY", "")      # anon key (fallback)
+
+# Optional API keys (from environment or fetched from Supabase vault at startup)
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")
-ALPHAVANTAGE_KEY = os.getenv("ALPHAVANTAGE_KEY", "")
-FINNHUB_KEY = os.getenv("FINNHUB_KEY", "")
+ALPHAVANTAGE_KEY  = os.getenv("ALPHAVANTAGE_KEY", "")
+FINNHUB_KEY       = os.getenv("FINNHUB_KEY", "")
+
+# ─── Birdeye API (Real-time Solana data) ──────────────────────────────────────
+# Get key at https://birdeye.so — Starter plan ($99/mo) recommended
+BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "")
 
 # Exchange API keys for live CEX trading (optional)
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_SECRET  = os.getenv("BINANCE_SECRET", "")
-COINBASE_API_KEY = os.getenv("COINBASE_API_KEY", "")
-COINBASE_SECRET  = os.getenv("COINBASE_SECRET", "")
+# Coinbase Advanced Trade (CDP): COINBASE_KEY_NAME = organizations/xxx/apiKeys/yyy
+#                                 COINBASE_SECRET   = EC private key (PEM, \n escaped)
+COINBASE_KEY_NAME = os.getenv("COINBASE_KEY_NAME", "")   # CDP API key name
+COINBASE_API_KEY  = os.getenv("COINBASE_API_KEY",  "")   # Legacy / fallback key
+COINBASE_SECRET   = os.getenv("COINBASE_SECRET",   "")   # Private key or secret
 
 # ─── Timing ───────────────────────────────────────────────────────────────────
-SCAN_INTERVAL_SEC = 60        # Scan markets every 60 seconds (every minute)
+SCAN_INTERVAL_SEC = 5         # Scan markets every 5 seconds (short-trade focus)
 OHLCV_CANDLES = 100           # Number of candles to fetch for analysis
-CANDLE_INTERVAL = "1h"        # 1-hour candles for analysis (crypto)
-DATA_CACHE_TTL = 45           # Cache market data for 45 seconds
+CANDLE_INTERVAL = "1h"        # 1-hour candles for swing analysis
+DATA_CACHE_TTL = 8            # Cache market data for 8 seconds (shorter than 5s cycle × 2)
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 LOG_LEVEL = "INFO"
@@ -101,26 +142,79 @@ TRADE_LOG_FILE = "trades.json"
 PORTFOLIO_SNAPSHOT_INTERVAL = 300   # Save portfolio snapshot every 5 minutes
 
 # ─── DEX / On-Chain Settings ──────────────────────────────────────────────────
-DEX_MIN_SCORE = 0.50               # Minimum DEX token score to trade
-DEX_MAX_POSITION_USD = 500.0       # Max per DEX token (volatile = small size)
-DEX_PREFERRED_CHAINS = ["solana", "base", "ethereum", "bsc", "arbitrum"]
-DEX_SCAN_INTERVAL_SEC = 60        # Scan DEX every minute for new opportunities
-NEW_PAIR_MAX_AGE_HOURS = 24        # Only consider pairs newer than 24h for new-pair strategy
-NEW_PAIR_MIN_LIQUIDITY = 30_000    # $30k minimum liquidity for new pairs
+DEX_MIN_SCORE = 0.30               # Quality gate (lowered from 0.38: 3-5x more candidates)
+DEX_MAX_POSITION_USD = 750.0       # Max per DEX token (raised from $500)
+DEX_PREFERRED_CHAINS = ["solana"]  # Solana only
+DEX_SCAN_INTERVAL_SEC = 4          # Scan DEX every 4s — catch entries faster
+NEW_PAIR_MAX_AGE_HOURS = 24        # Only tokens < 24h old (memecoins die after day 1)
+NEW_PAIR_MIN_LIQUIDITY = 5_000     # $5k minimum liquidity (catch very early pumps)
+
+# ─── Token Safety / Rug Protection (Balanced Mode) ──────────────────────────
+MIN_SAFETY_SCORE = 0.28            # Lowered: high-conviction overrides, more trades
+SAFETY_SCORE_WEIGHT = 0.12         # Reduced weight (was 0.15): momentum > safety for memecoins
+ENABLE_SELL_SIMULATION = True      # Honeypot check via Jupiter round-trip quote
+SELL_SIM_AMOUNT_USD = 1.0          # Dollar amount for sell simulation
+MAX_ROUND_TRIP_TAX_PCT = 0.45      # Max acceptable round-trip tax (memecoins have high fees)
+RUGCHECK_CACHE_TTL = 300           # Cache safety results for 5 minutes
+SAFETY_CHECK_TIMEOUT = 10          # Seconds before safety check times out
+BLOCK_HONEYPOTS = True             # Hard block if sell simulation fails completely
+MAX_TOP10_HOLDER_PCT = 0.85        # Penalize if top 10 holders own > 85% (loosened from 80%)
+
+# ─── Volatility-Adjusted Position Sizing ────────────────────────────────────
+DEX_BASE_POSITION_USD = 100.0      # Base position for memecoin trades (raised from $75)
+DEX_MIN_POSITION_USD = 1.0         # Minimum position size (covers Solana fees ~$0.50)
+POSITION_VOL_SCALAR = 1.0          # Multiplier for vol-adjusted sizing
+MAX_MEMECOIN_ALLOCATION_PCT = 0.65 # Max 65% of equity in memecoins (raised from 50%)
+
+# ─── Time-Based Exit Rules ──────────────────────────────────────────────────
+DEX_MAX_HOLD_HOURS = 10            # Force exit after 10h (raised from 6h — let winners run)
+DEX_STALE_EXIT_HOURS = 2.5         # Exit if no momentum after 2.5h (raised from 1.5h)
+DEX_STALE_MIN_GAIN_PCT = 0.015     # Need +1.5% gain to justify holding (lowered from 3%)
+
+# ─── Partial Profit Taking ──────────────────────────────────────────────────
+PARTIAL_PROFIT_ENABLED = True
+PARTIAL_PROFIT_TIERS = [
+    (0.25, 0.15),   # At +25% gain, sell 15% — secure initial profit (was 20%/20%)
+    (0.60, 0.15),   # At +60% gain, sell another 15%
+    (1.20, 0.15),   # At +120% gain, sell another 15% (2.2x)
+    (2.50, 0.15),   # At +250% gain, sell another 15% (3.5x)
+    # Remaining 40% rides with trailing stop — moonshot runner (up from 20%)
+]
+
+# ─── MEV / Sandwich Protection ──────────────────────────────────────────────
+MEV_PROTECTION_ENABLED = True
+MEV_MAX_SLIPPAGE_BPS = 100         # Tighter slippage (1%) for MEV protection
+MEV_PRIORITY_FEE_LAMPORTS = 50000  # Higher priority fee to front-run sandwich
+
+# ─── Concentration Limits ───────────────────────────────────────────────────
+MAX_DEX_POSITIONS = 15             # Max concurrent DEX/memecoin positions (up from 10)
+MAX_SAME_DEX_POSITIONS = 10        # Max positions on same DEX
+MIN_LIQUIDITY_RATIO = 0.15         # Position must be < 15% of pool liquidity (up from 8%)
 
 # ─── Solana / Phantom Wallet ──────────────────────────────────────────────────
 PHANTOM_PRIVATE_KEY = os.getenv("PHANTOM_PRIVATE_KEY", "")
+# Use Helius for premium RPC + priority fee estimation:
+#   https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
-SOL_TRADE_SIZE_USD = 50.0          # Default Solana trade size in USD
-SOL_MAX_SLIPPAGE_BPS = 150         # 1.5% max slippage for Solana swaps
-SOL_PRIORITY_FEE_LAMPORTS = 10000  # Priority fee for fast execution
+SOL_TRADE_SIZE_USD        = 50.0    # Default Solana trade size in USD
+SOL_MAX_SLIPPAGE_BPS      = 300     # 3% hard cap on slippage (dynamic calc stays under this)
+SOL_PRIORITY_FEE_LAMPORTS = 100_000  # Fallback priority fee (lamports) when Helius unavailable
+
+# ─── Jito MEV Bundle Protection ───────────────────────────────────────────────
+# Jito routes transactions through the block engine to prevent sandwich attacks.
+# The tip is paid in SOL to a random Jito tip account alongside the swap tx.
+JITO_TIP_LAMPORTS = 1_000_000      # 0.001 SOL tip — market-rate to avoid MEV sandwiching
 
 # ─── Polymarket ───────────────────────────────────────────────────────────────
 POLYMARKET_PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY", "")  # Polygon EVM key
+# L2 API credentials (auto-derived on first run via create_or_derive_api_creds)
+POLYMARKET_API_KEY    = os.getenv("POLYMARKET_API_KEY",    "")
+POLYMARKET_API_SECRET = os.getenv("POLYMARKET_API_SECRET", "")
+POLYMARKET_PASSPHRASE = os.getenv("POLYMARKET_PASSPHRASE", "")
 POLYMARKET_MIN_EDGE = 0.04         # Minimum 4% edge to trade
 POLYMARKET_MIN_VOLUME = 5_000      # Minimum $5k/24h market volume
 POLYMARKET_MAX_POSITION_USD = 200  # Max per prediction market position
-POLYMARKET_SCAN_INTERVAL_SEC = 120 # Scan Polymarket every 2 minutes
+POLYMARKET_SCAN_INTERVAL_SEC = 300 # Scan Polymarket every 5 minutes (was 2 min — too frequent)
 
 # ─── Compounding ──────────────────────────────────────────────────────────────
 COMPOUND_ALL_PROFITS = True        # Always reinvest — never withdraw

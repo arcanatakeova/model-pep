@@ -1,36 +1,78 @@
 """
 DEX Screener — Token Discovery and On-Chain Market Intelligence
 ==============================================================
-Free API, no key required. Covers 50+ chains.
+Multi-source deep scanner covering:
+- DexScreener boosted/trending/profiles (500+ candidates per scan)
+- Pump.fun live feed (brand-new Solana token launches)
+- Raydium pool feed (highest-volume Solana AMM pools)
+- Birdeye trending + new listings (real-time Solana price intelligence)
+- Jupiter price validation (pre-trade price confirmation)
 
-Strategies:
-- Trending token detection (volume surge + buy pressure)
-- New pair sniping (fresh liquidity with strong momentum)
-- Breakout detection (price action + transaction velocity)
-- Liquidity safety scoring (rug-pull risk filter)
+Scoring engine v2:
+- 5-minute momentum (strongest short-term predictor)
+- Volume acceleration (is it accelerating or decelerating?)
+- Transaction velocity (raw tx count, not just ratio)
+- Age-adjusted momentum (new pairs get bigger early-mover bonus)
+- Concurrent safety checks via ThreadPoolExecutor
 """
+from __future__ import annotations
 import logging
 import time
+import concurrent.futures
 import requests
-import pandas as pd
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional
 
+import config
+from token_safety import TokenSafetyChecker
+
+# Birdeye client — lazy-loaded only if API key is set
+_birdeye_client = None
+
+
+def _get_birdeye():
+    global _birdeye_client
+    if _birdeye_client is None and config.BIRDEYE_API_KEY:
+        try:
+            from birdeye import BirdeyeClient
+            _birdeye_client = BirdeyeClient(config.BIRDEYE_API_KEY)
+        except Exception:
+            pass
+    return _birdeye_client
+
+
 logger = logging.getLogger(__name__)
 
 DEXSCREENER_BASE = "https://api.dexscreener.com"
+PUMPFUN_BASE     = "https://frontend-api.pump.fun"
+RAYDIUM_BASE     = "https://api-v3.raydium.io"
+JUPITER_PRICE    = "https://api.jup.ag/price/v2"
 
-# ── Filters ────────────────────────────────────────────────────────────────────
-MIN_LIQUIDITY_USD    = 25_000      # At least $25k liquidity (rug safety)
-MIN_VOLUME_H1_USD    = 5_000       # At least $5k/hr volume
-MIN_VOLUME_H24_USD   = 50_000      # At least $50k/24h volume
-MAX_PAIR_AGE_HOURS   = 72          # For new pair scanner (3 days max)
-MIN_BUY_SELL_RATIO   = 1.2         # Buys must exceed sells by 20%
-MIN_MARKET_CAP       = 100_000     # At least $100k mcap
-MAX_MARKET_CAP       = 500_000_000 # Under $500M (room to run)
-MIN_PRICE_CHANGE_H1  = 3.0         # At least +3% last hour for momentum
-PREFERRED_CHAINS     = ["solana", "base", "ethereum", "bsc", "arbitrum", "polygon"]
+# ── Hard filters (applied before scoring) ──────────────────────────────────────
+MIN_LIQUIDITY_USD  = 5_000       # $5k — catch early pumps (was 8k: missed entries)
+MIN_VOLUME_H24_USD = 10_000      # $10k/24h (was 15k: too restrictive for new tokens)
+MIN_MARKET_CAP     = 15_000      # $15k mcap (was 30k: pump.fun starts small)
+MAX_MARKET_CAP     = 500_000_000 # $500M ceiling
+MAX_PAIR_AGE_HOURS = 24          # 24h max (was 96: dead tokens waste API calls)
+PREFERRED_CHAINS   = ["solana"]
+
+
+def _safe_float(val, default: float = 0.0) -> float:
+    """Convert value to float, handling None, NaN strings, and invalid types."""
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        if f != f:  # NaN check (NaN != NaN)
+            return default
+        return f
+    except (ValueError, TypeError):
+        return default
+
+
+# Search terms — broad coverage across naming conventions
+_SEARCH_QUERIES = ["PUMP", "MEME", "AI", "DOG", "WIF", "PEPE"]
 
 
 @dataclass
@@ -55,15 +97,28 @@ class DexToken:
     sells_h1: int
     buys_h24: int
     sells_h24: int
-    pair_created_at: Optional[int]  # unix timestamp ms
+    pair_created_at: Optional[int]   # unix timestamp ms
     url: str
     score: float = 0.0
     signals: list[str] = field(default_factory=list)
+    safety_report: Optional[object] = None
+    # Extended fields populated by enrichment
+    volume_m5: float = 0.0          # 5-min volume (from pair txns if available)
+    buys_m5: int = 0
+    sells_m5: int = 0
+    source: str = "dexscreener"     # Where this token was discovered
+    holder_count: int = 0           # Unique holders (from Birdeye token_overview)
+    unique_wallets_24h: int = 0     # Unique trading wallets last 24h (Birdeye)
 
     @property
     def buy_sell_ratio_h1(self) -> float:
         total = self.buys_h1 + self.sells_h1
         return self.buys_h1 / total if total > 0 else 0.5
+
+    @property
+    def buy_sell_ratio_m5(self) -> float:
+        total = self.buys_m5 + self.sells_m5
+        return self.buys_m5 / total if total > 0 else 0.5
 
     @property
     def age_hours(self) -> Optional[float]:
@@ -79,6 +134,7 @@ class DexToken:
             "address": self.base_address,
             "pair_address": self.pair_address,
             "price_usd": self.price_usd,
+            "change_5m_pct": self.price_change_m5,
             "change_1h_pct": self.price_change_h1,
             "change_24h_pct": self.price_change_h24,
             "volume_1h": self.volume_h1,
@@ -89,103 +145,195 @@ class DexToken:
             "age_hours": self.age_hours,
             "score": round(self.score, 3),
             "signals": self.signals,
+            "source": self.source,
             "url": self.url,
+            "safety_score": self.safety_report.safety_score if self.safety_report else None,
+            "risk_level": self.safety_report.risk_level if self.safety_report else None,
+            "risk_flags": self.safety_report.risk_flags if self.safety_report else [],
         }
 
 
 class DexScreener:
     """
-    DEX Screener API client and token opportunity scorer.
+    Multi-source DEX scanner with concurrent safety checks.
+    Sources: DexScreener, Pump.fun, Raydium, Birdeye, Jupiter.
     """
+
+    _CACHE_MAX = 500
 
     def __init__(self):
         self._cache: dict = {}
-        self._cache_ttl = 60  # seconds
+        self._cache_ttl = 25   # 25s — aggressive freshness for fast markets
+        self._safety_checker = TokenSafetyChecker()
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=20, thread_name_prefix="dex-scanner")
 
     # ─── Public API ───────────────────────────────────────────────────────────
 
-    def get_trending_tokens(self, min_score: float = 0.5) -> list[DexToken]:
+    def get_trending_tokens(self, min_score: float = 0.40) -> list[DexToken]:
         """
-        Find high-momentum tokens across all chains.
-        Combines boosted tokens + volume surge detection.
+        Parallel fetch from all sources, concurrent safety checks, scored and filtered.
         """
-        tokens = []
+        # Launch all data fetches in parallel
+        futures = {
+            "boosted":   self._executor.submit(self._fetch_boosted_tokens),
+            "profiles":  self._executor.submit(self._fetch_token_profiles),
+            "pumpfun":   self._executor.submit(self._fetch_pumpfun_tokens),
+            "raydium":   self._executor.submit(self._fetch_raydium_pools),
+            "be_trend":  self._executor.submit(self._fetch_birdeye_trending),
+        }
+        # Also kick off multi-query DexScreener searches in parallel
+        search_futures = {
+            f"search_{q}": self._executor.submit(
+                self._search_top_pairs, "solana", q, 50)
+            for q in _SEARCH_QUERIES
+        }
+        futures.update(search_futures)
 
-        # 1. Boosted / trending tokens
-        boosted = self._fetch_boosted_tokens()
-        tokens.extend(self._fetch_pairs_for_tokens(boosted))
+        raw_tokens: list[DexToken] = []
 
-        # 2. Top gainers by search on preferred chains
-        for chain in PREFERRED_CHAINS[:4]:
-            gainers = self._search_top_pairs(chain)
-            tokens.extend(gainers)
+        # Collect boosted + profiles via pair batch lookup
+        for key in ("boosted", "profiles"):
+            try:
+                metas = futures[key].result(timeout=12)
+                raw_tokens.extend(self._fetch_pairs_for_tokens(metas))
+            except Exception as e:
+                logger.debug("%s fetch error: %s", key, e)
 
-        # Deduplicate by pair address
+        # Collect already-parsed token lists
+        for key in ("pumpfun", "raydium", "be_trend") + tuple(search_futures):
+            try:
+                result = futures[key].result(timeout=12)
+                raw_tokens.extend(result)
+            except Exception as e:
+                logger.debug("%s fetch error: %s", key, e)
+
+        # Deduplicate
         seen = set()
         unique = []
-        for t in tokens:
-            if t.pair_address not in seen:
+        for t in raw_tokens:
+            if t.pair_address and t.pair_address not in seen:
                 seen.add(t.pair_address)
                 unique.append(t)
 
-        # Score and filter
+        # ── Batch price refresh via Birdeye (1 CU total for all tokens) ──────────
+        # DexScreener data can be up to 25s stale. Birdeye has 3s cache.
+        # Replace price, market_cap, and liquidity for all Solana candidates at once.
+        be = _get_birdeye()
+        if be:
+            sol_mints = [t.base_address for t in unique
+                         if t.chain_id == "solana" and t.base_address]
+            if sol_mints:
+                try:
+                    fresh_prices = be.get_multi_price(sol_mints)
+                    for t in unique:
+                        bp = fresh_prices.get(t.base_address)
+                        if bp and bp.price_usd > 0:
+                            t.price_usd = bp.price_usd
+                            if bp.market_cap > 0:
+                                t.market_cap = bp.market_cap
+                            if bp.liquidity_usd > 0:
+                                t.liquidity_usd = bp.liquidity_usd
+                except Exception as e:
+                    logger.debug("Batch price refresh error: %s", e)
+
+        # Concurrent safety checks for Solana tokens above pre-score threshold
+        # (pre-score without safety to decide which ones are worth checking)
+        pre_scored = []
+        for t in unique:
+            ps = self._pre_score(t)
+            if ps >= 0.20 or abs(t.price_change_h1) > 10 or abs(t.price_change_m5) > 5:
+                pre_scored.append(t)
+
+        if pre_scored:
+            self._run_concurrent_safety_checks(pre_scored)
+
+        # Full score + filter
+        scored = []
+        for t in unique:
+            s = self._score_token(t)
+            if s >= min_score:
+                scored.append(t)
+        scored.sort(key=lambda t: t.score, reverse=True)
+
+        logger.info("Trending scan: %d sources → %d candidates → %d scored >= %.2f",
+                    len(futures), len(unique), len(scored), min_score)
+        return scored
+
+    def get_new_pairs(self, max_age_hours: float = 48,
+                      min_score: float = 0.40) -> list[DexToken]:
+        """
+        New pair sniping: DexScreener search + Birdeye new listings + Pump.fun new.
+        """
+        futures = {
+            "be_new":    self._executor.submit(self._fetch_birdeye_new_listings),
+            "pump_new":  self._executor.submit(self._fetch_pumpfun_new),
+        }
+        search_futures = {
+            f"search_{q}": self._executor.submit(
+                self._search_top_pairs, "solana", q, 50)
+            for q in ["SOL", "USDC", "USD"]
+        }
+        futures.update(search_futures)
+
+        raw: list[DexToken] = []
+        for key, fut in futures.items():
+            try:
+                raw.extend(fut.result(timeout=12))
+            except Exception as e:
+                logger.debug("new_pairs %s error: %s", key, e)
+
+        # Filter by age + liquidity
+        fresh = [t for t in raw
+                 if (t.age_hours is None or t.age_hours <= max_age_hours)
+                 and t.liquidity_usd >= MIN_LIQUIDITY_USD]
+
+        # Dedup
+        seen = set()
+        unique = []
+        for t in fresh:
+            if t.pair_address and t.pair_address not in seen:
+                seen.add(t.pair_address)
+                unique.append(t)
+
+        # ── Batch Birdeye price refresh for new pairs ─────────────────────────────
+        be = _get_birdeye()
+        if be:
+            sol_mints = [t.base_address for t in unique
+                         if t.chain_id == "solana" and t.base_address]
+            if sol_mints:
+                try:
+                    fresh_prices = be.get_multi_price(sol_mints)
+                    for t in unique:
+                        bp = fresh_prices.get(t.base_address)
+                        if bp and bp.price_usd > 0:
+                            t.price_usd = bp.price_usd
+                            if bp.market_cap > 0:
+                                t.market_cap = bp.market_cap
+                            if bp.liquidity_usd > 0:
+                                t.liquidity_usd = bp.liquidity_usd
+                except Exception as e:
+                    logger.debug("New pairs batch price refresh error: %s", e)
+
+        # Safety checks for new pairs (most likely to be rugs — always check)
+        self._run_concurrent_safety_checks(unique)
+
         scored = [t for t in unique if self._score_token(t) >= min_score]
         scored.sort(key=lambda t: t.score, reverse=True)
-        logger.info("DEX Screener: %d trending tokens (score >= %.2f)", len(scored), min_score)
+        logger.info("New pairs scan: %d candidates → %d scored >= %.2f",
+                    len(unique), len(scored), min_score)
         return scored
-
-    def get_new_pairs(self, max_age_hours: float = MAX_PAIR_AGE_HOURS,
-                      min_score: float = 0.55) -> list[DexToken]:
-        """
-        Find newly created pairs with strong early momentum.
-        These can be 10-100x opportunities — also highest risk.
-        """
-        all_pairs = []
-        for chain in PREFERRED_CHAINS[:4]:
-            pairs = self._search_top_pairs(chain, limit=30)
-            new = [p for p in pairs
-                   if p.age_hours is not None and p.age_hours <= max_age_hours
-                   and p.liquidity_usd >= MIN_LIQUIDITY_USD]
-            all_pairs.extend(new)
-
-        scored = [t for t in all_pairs if self._score_token(t) >= min_score]
-        scored.sort(key=lambda t: t.score, reverse=True)
-        logger.info("DEX Screener: %d new pairs (< %.0fh old)", len(scored), max_age_hours)
-        return scored
-
-    def get_token_info(self, token_address: str, chain: str = "solana") -> Optional[DexToken]:
-        """Fetch data for a specific token address."""
-        data = self._get(f"{DEXSCREENER_BASE}/latest/dex/tokens/{token_address}")
-        if not data or not data.get("pairs"):
-            return None
-        pairs = [p for p in data["pairs"] if p.get("chainId") == chain]
-        if not pairs:
-            pairs = data["pairs"]
-        # Return the highest liquidity pair
-        pairs.sort(key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
-        token = self._parse_pair(pairs[0])
-        if token:
-            self._score_token(token)
-        return token
-
-    def search_token(self, query: str) -> list[DexToken]:
-        """Search tokens by name or symbol."""
-        data = self._get(f"{DEXSCREENER_BASE}/latest/dex/search", params={"q": query})
-        if not data or not data.get("pairs"):
-            return []
-        tokens = [self._parse_pair(p) for p in data["pairs"][:20]]
-        tokens = [t for t in tokens if t is not None]
-        for t in tokens:
-            self._score_token(t)
-        return sorted(tokens, key=lambda t: t.score, reverse=True)
 
     def get_multi_chain_opportunities(self) -> list[DexToken]:
         """
-        Full scan: trending + new pairs across all preferred chains.
-        Returns deduplicated, scored, and filtered list.
+        Full scan combining trending + new pairs. Used by main trading cycle.
         """
-        trending = self.get_trending_tokens(min_score=0.45)
-        new_pairs = self.get_new_pairs(max_age_hours=24, min_score=0.50)
+        # Run both in parallel since they hit different API endpoints
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            f_trend = ex.submit(self.get_trending_tokens, config.DEX_MIN_SCORE)
+            f_new   = ex.submit(self.get_new_pairs, config.NEW_PAIR_MAX_AGE_HOURS, config.DEX_MIN_SCORE)
+            trending  = f_trend.result(timeout=30)
+            new_pairs = f_new.result(timeout=30)
 
         all_tokens = trending + new_pairs
         seen = set()
@@ -196,19 +344,85 @@ class DexScreener:
                 unique.append(t)
 
         unique.sort(key=lambda t: t.score, reverse=True)
+        logger.info("Full DEX scan complete: %d unique opportunities", len(unique))
         return unique
+
+    def get_token_info(self, token_address: str, chain: str = "solana") -> Optional[DexToken]:
+        """
+        Fetch data for a specific token, enriched with Birdeye real-time price.
+        """
+        data = self._get(f"{DEXSCREENER_BASE}/latest/dex/tokens/{token_address}")
+        if not data or not data.get("pairs"):
+            return None
+        pairs = [p for p in data["pairs"] if p.get("chainId") == chain]
+        if not pairs:
+            pairs = data["pairs"]
+        pairs.sort(key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
+        token = self._parse_pair(pairs[0])
+        if not token:
+            return None
+
+        be = _get_birdeye()
+        if be and chain == "solana":
+            try:
+                bp = be.get_price(token_address)
+                if bp and bp.price_usd > 0:
+                    token.price_usd        = bp.price_usd
+                    token.price_change_h24 = bp.price_change_24h_pct
+                    if bp.volume_24h_usd > 0:
+                        token.volume_h24   = bp.volume_24h_usd
+                    if bp.liquidity_usd > 0:
+                        token.liquidity_usd = bp.liquidity_usd
+                    if bp.market_cap > 0:
+                        token.market_cap   = bp.market_cap  # Birdeye mcap > DexScreener FDV
+            except Exception:
+                pass
+
+        self._score_token(token)
+        return token
+
+    def search_token(self, query: str) -> list[DexToken]:
+        data = self._get(f"{DEXSCREENER_BASE}/latest/dex/search", params={"q": query})
+        if not data or not data.get("pairs"):
+            return []
+        tokens = [self._parse_pair(p) for p in data["pairs"][:20]]
+        tokens = [t for t in tokens if t is not None]
+        for t in tokens:
+            self._score_token(t)
+        return sorted(tokens, key=lambda t: t.score, reverse=True)
 
     # ─── Scoring ──────────────────────────────────────────────────────────────
 
+    def _pre_score(self, token: DexToken) -> float:
+        """Fast pre-score without safety checks — used to decide if safety check is worth running."""
+        if token.liquidity_usd < MIN_LIQUIDITY_USD:
+            return 0.0
+        if token.volume_h24 < MIN_VOLUME_H24_USD:
+            return 0.0
+        s = 0.0
+        if token.price_change_m5 > 3:
+            s += 0.25
+        if token.price_change_h1 > 10:
+            s += 0.20
+        elif token.price_change_h1 > 5:
+            s += 0.12
+        if token.volume_h1 > 0 and token.volume_h24 > 0:
+            ratio = token.volume_h1 / (token.volume_h24 / 24)
+            if ratio > 3:
+                s += 0.20
+        if token.buy_sell_ratio_h1 > 0.65:
+            s += 0.15
+        return s
+
     def _score_token(self, token: DexToken) -> float:
         """
-        Multi-factor token opportunity score [0, 1].
-        Higher = stronger opportunity.
+        Full multi-factor scoring engine v2.
+        Weights tuned for short-term Solana memecoin momentum trading.
         """
         score = 0.0
         signals = []
 
-        # ── Safety checks (disqualifiers) ────────────────────────────────
+        # ── Hard disqualifiers ────────────────────────────────────────────
         if token.liquidity_usd < MIN_LIQUIDITY_USD:
             token.score = 0.0
             return 0.0
@@ -218,157 +432,562 @@ class DexScreener:
         if token.market_cap > 0 and token.market_cap < MIN_MARKET_CAP:
             token.score = 0.0
             return 0.0
+        if token.market_cap > MAX_MARKET_CAP:
+            token.score = 0.0
+            return 0.0
+        # Mcap/liquidity ratio: > 200x means only 0.5% of market cap is actually
+        # tradeable — buying this is buying exit liquidity from whales.
+        if (token.market_cap > 0 and token.liquidity_usd > 0 and
+                token.market_cap / token.liquidity_usd > 200):
+            token.score = 0.0
+            return 0.0
 
-        # ── Price momentum (30%) ─────────────────────────────────────────
-        pc_h1 = token.price_change_h1
-        if pc_h1 > 20:
-            score += 0.30
-            signals.append(f"Explosive +{pc_h1:.0f}% 1h")
-        elif pc_h1 > 10:
+        # ── 5-minute momentum (25%) — best predictor for short trades ─────
+        # If it's moving hard right now, that's the signal we care about most
+        m5 = token.price_change_m5
+        if m5 > 15:
             score += 0.25
-            signals.append(f"Strong +{pc_h1:.0f}% 1h")
-        elif pc_h1 > 5:
-            score += 0.18
-            signals.append(f"Bullish +{pc_h1:.0f}% 1h")
-        elif pc_h1 > 2:
-            score += 0.10
-        elif pc_h1 < -10:
-            score -= 0.20
-        elif pc_h1 < -5:
+            signals.append(f"Explosive +{m5:.0f}% 5m")
+        elif m5 > 8:
+            score += 0.20
+            signals.append(f"Hot +{m5:.0f}% 5m")
+        elif m5 > 4:
+            score += 0.14
+            signals.append(f"Moving +{m5:.0f}% 5m")
+        elif m5 > 2:
+            score += 0.08
+            signals.append(f"+{m5:.0f}% 5m")
+        elif m5 < -8:
+            score -= 0.20   # Dumping hard — avoid
+        elif m5 < -4:
             score -= 0.10
 
-        # 24h context
-        pc_h24 = token.price_change_h24
-        if pc_h24 > 50:
-            score += 0.10
-            signals.append(f"+{pc_h24:.0f}% 24h")
-        elif pc_h24 > 20:
-            score += 0.06
+        # ── 1-hour price momentum (20%) ───────────────────────────────────
+        h1 = token.price_change_h1
+        if h1 > 50:
+            score += 0.20
+            signals.append(f"Parabolic +{h1:.0f}% 1h")
+        elif h1 > 20:
+            score += 0.18
+            signals.append(f"Explosive +{h1:.0f}% 1h")
+        elif h1 > 10:
+            score += 0.14
+            signals.append(f"Strong +{h1:.0f}% 1h")
+        elif h1 > 5:
+            score += 0.09
+            signals.append(f"Bullish +{h1:.0f}% 1h")
+        elif h1 > 2:
+            score += 0.04
+        elif h1 < -15:
+            score -= 0.18
+        elif h1 < -8:
+            score -= 0.10
 
-        # ── Volume surge (25%) ───────────────────────────────────────────
+        # ── 24h context (5%) — sustained trend vs one-hour pump ───────────
+        h24 = token.price_change_h24
+        if h24 > 300:
+            score += 0.10   # Extreme multi-hundred-percent mover — highest tier
+            signals.append(f"EXTREME +{h24:.0f}% 24h")
+        elif h24 > 150:
+            score += 0.07
+            signals.append(f"Massive +{h24:.0f}% 24h")
+        elif h24 > 100:
+            score += 0.05
+            signals.append(f"+{h24:.0f}% 24h")
+        elif h24 > 50:
+            score += 0.04
+        elif h24 > 20:
+            score += 0.02
+        elif h24 < -30:
+            score -= 0.05
+
+        # ── Market cap sweet spot (5%) — optimal memecoin size ────────────
+        # $100k-$5M mcap = early enough to 10x, large enough to have liquidity
+        mcap = token.market_cap
+        if 0 < mcap < 100_000:
+            score += 0.04   # Very early, ultra-high upside
+            signals.append(f"Micro mcap ${mcap/1000:.0f}k")
+        elif mcap < 500_000:
+            score += 0.06   # Sweet spot: $100k-$500k — best risk/reward
+            signals.append(f"Early mcap ${mcap/1000:.0f}k")
+        elif mcap < 2_000_000:
+            score += 0.05   # $500k-$2M — still strong upside
+        elif mcap < 10_000_000:
+            score += 0.03   # $2M-$10M — decent but smaller upside
+        elif mcap > 50_000_000:
+            score -= 0.05   # Too big for memecoin alpha
+
+        # ── Volume acceleration (20%) — is buying pressure building? ──────
         if token.volume_h1 > 0 and token.volume_h24 > 0:
             hourly_avg = token.volume_h24 / 24
             if hourly_avg > 0:
                 vol_ratio = token.volume_h1 / hourly_avg
-                if vol_ratio > 5:
-                    score += 0.25
-                    signals.append(f"Volume surge {vol_ratio:.0f}x")
+                if vol_ratio > 10:
+                    score += 0.20
+                    signals.append(f"Vol explosion {vol_ratio:.0f}x avg")
+                elif vol_ratio > 5:
+                    score += 0.16
+                    signals.append(f"Vol surge {vol_ratio:.0f}x avg")
                 elif vol_ratio > 3:
-                    score += 0.18
-                    signals.append(f"Volume spike {vol_ratio:.1f}x")
-                elif vol_ratio > 2:
                     score += 0.12
-                    signals.append(f"Volume up {vol_ratio:.1f}x")
-                elif vol_ratio > 1.5:
-                    score += 0.06
+                    signals.append(f"Vol spike {vol_ratio:.1f}x avg")
+                elif vol_ratio > 2:
+                    score += 0.08
+                    signals.append(f"Vol up {vol_ratio:.1f}x")
+                elif vol_ratio > 1.3:
+                    score += 0.04
+                elif vol_ratio < 0.5:
+                    score -= 0.05   # Volume fading
 
-        # ── Buy pressure (20%) ───────────────────────────────────────────
-        bsr = token.buy_sell_ratio_h1
-        total_txns = token.buys_h1 + token.sells_h1
-        if bsr > 0.75 and total_txns > 50:
-            score += 0.20
-            signals.append(f"Strong buy pressure {bsr:.0%}")
-        elif bsr > 0.65 and total_txns > 20:
-            score += 0.14
-            signals.append(f"Buy pressure {bsr:.0%}")
-        elif bsr > 0.55:
-            score += 0.07
-        elif bsr < 0.40:
-            score -= 0.10
-
-        # ── Liquidity quality (15%) ──────────────────────────────────────
-        liq = token.liquidity_usd
-        if liq > 1_000_000:
+        # ── BURST MODE detection — strongest alpha signal ────────────────
+        # When vol explodes + price pumps + heavy buying all at once = BURST
+        # These tokens move 200-500% — get in immediately
+        _vol_ratio = 0.0
+        if token.volume_h1 > 0 and token.volume_h24 > 0:
+            _hourly_avg = token.volume_h24 / 24
+            _vol_ratio = token.volume_h1 / _hourly_avg if _hourly_avg > 0 else 0
+        _is_burst = (
+            _vol_ratio > 5
+            and token.price_change_h1 > 10
+            and token.buys_h1 > 100
+        )
+        if _is_burst:
             score += 0.15
-        elif liq > 500_000:
-            score += 0.12
-        elif liq > 200_000:
-            score += 0.10
-        elif liq > 100_000:
-            score += 0.07
-        elif liq > 50_000:
-            score += 0.04
+            signals.append("BURST MODE: vol+price+buys aligned")
 
-        # ── New pair bonus (10%) — early mover advantage ─────────────────
+        # ── Transaction velocity (15%) — raw activity level ───────────────
+        total_txns_h1 = token.buys_h1 + token.sells_h1
+        bsr = token.buy_sell_ratio_h1
+
+        # Absolute buy count (not just ratio) matters — low-liquidity pairs
+        # can have 100% buy ratio with only 5 transactions (manipulated)
+        if bsr > 0.75 and total_txns_h1 > 200:
+            score += 0.15
+            signals.append(f"Frenzy: {token.buys_h1} buys/h ({bsr:.0%})")
+        elif bsr > 0.70 and total_txns_h1 > 100:
+            score += 0.12
+            signals.append(f"Strong buys: {token.buys_h1}/h ({bsr:.0%})")
+        elif bsr > 0.65 and total_txns_h1 > 50:
+            score += 0.09
+            signals.append(f"Buy pressure {bsr:.0%}")
+        elif bsr > 0.60 and total_txns_h1 > 20:
+            score += 0.05
+        elif bsr < 0.40 and total_txns_h1 > 20:
+            score -= 0.10   # Heavy selling
+
+        # 5-min buy pressure (ultra-recent signal)
+        if token.buys_m5 > 0:
+            bsr_m5 = token.buy_sell_ratio_m5
+            if bsr_m5 > 0.80 and token.buys_m5 > 20:
+                score += 0.05
+                signals.append(f"5m buy frenzy ({token.buys_m5} buys)")
+            elif bsr_m5 > 0.70 and token.buys_m5 > 10:
+                score += 0.03
+
+        # ── Liquidity depth (10%) ─────────────────────────────────────────
+        liq = token.liquidity_usd
+        if liq > 2_000_000:
+            score += 0.10
+        elif liq > 500_000:
+            score += 0.08
+        elif liq > 200_000:
+            score += 0.06
+        elif liq > 100_000:
+            score += 0.04
+        elif liq > 50_000:
+            score += 0.02
+
+        # ── Age bonus (10%) — early mover advantage (boosted) ────────────
         age = token.age_hours
         if age is not None:
-            if age < 1:
-                score += 0.10
-                signals.append("Brand new pair (<1h)")
+            if age < 0.25:
+                score += 0.15   # <15min — maximum alpha window
+                signals.append("FRESH (<15min)")
+            elif age < 0.5:
+                score += 0.12   # Brand new (<30min)
+                signals.append("Brand new (<30min)")
+            elif age < 1:
+                score += 0.09
+                signals.append(f"Very new ({age*60:.0f}min old)")
+            elif age < 3:
+                score += 0.06
+                signals.append(f"New ({age*60:.0f}min old)")
             elif age < 6:
-                score += 0.08
-                signals.append(f"New pair ({age:.0f}h old)")
-            elif age < 24:
-                score += 0.05
-            elif age > 168:  # > 1 week old
-                score -= 0.03
+                score += 0.04
+            elif age < 12:
+                score += 0.02
+            elif age > 18:
+                score -= 0.05   # Stale — momentum probably dead
 
-        # ── Chain preference ─────────────────────────────────────────────
+        # ── Holder concentration guard (Birdeye token_overview data) ─────
+        if token.holder_count > 0:
+            if token.holder_count < 20:
+                # <20 holders = almost certainly a rug (hard block)
+                token.score = 0.0
+                token.signals = [f"BLOCKED: only {token.holder_count} holders"]
+                return 0.0
+            elif token.holder_count < 50:
+                # 20-50: risky but allow if token is very new (< 1h old)
+                if age is not None and age < 1:
+                    score -= 0.05   # Mild penalty — new tokens always start small
+                    signals.append(f"New token, {token.holder_count} holders")
+                else:
+                    score -= 0.15   # Older token with few holders = red flag
+                    signals.append(f"Few holders ({token.holder_count})")
+            elif token.holder_count < 200:
+                score -= 0.06
+            elif token.holder_count > 2000:
+                score += 0.04
+                signals.append(f"Good distribution ({token.holder_count} holders)")
+
+        # ── Unique wallets + holder growth velocity ──────────────────────
+        # Many unique wallets = organic interest, not 1 whale pumping
+        # Rapid holder growth = accumulation phase (early)
+        if token.unique_wallets_24h > 2000:
+            score += 0.05
+            signals.append(f"Viral: {token.unique_wallets_24h} wallets/24h")
+        elif token.unique_wallets_24h > 500:
+            score += 0.03
+        elif token.unique_wallets_24h > 0 and token.unique_wallets_24h < 20:
+            score -= 0.05   # Thin trading = manipulation risk
+
+        # Holder growth velocity: if holders growing fast → accumulation phase
+        if token.holder_count > 0 and token.age_hours and token.age_hours > 0:
+            holder_velocity = token.holder_count / token.age_hours  # holders/hour
+            if holder_velocity > 200:
+                score += 0.06
+                signals.append(f"Viral growth: {holder_velocity:.0f} holders/h")
+            elif holder_velocity > 50:
+                score += 0.04
+                signals.append(f"Growing: {holder_velocity:.0f} holders/h")
+            elif holder_velocity > 10:
+                score += 0.02
+
+        # ── Source bonus ──────────────────────────────────────────────────
+        if token.source == "pumpfun_new":
+            score += 0.08   # Freshest pump.fun tokens — fastest movers
+            signals.append("Pump.fun NEW")
+        elif token.source == "pumpfun":
+            score += 0.05
+        elif token.source == "raydium":
+            score += 0.02
+
+        # ── Solana chain preference ───────────────────────────────────────
         if token.chain_id == "solana":
-            score += 0.03   # Solana: high velocity, Phantom-tradeable
+            score += 0.02
 
-        token.score = float(np.clip(score, 0, 1))
-        token.signals = signals
+        # ── Safety check (blended in — never skipped for Solana) ──────────
+        if token.chain_id == "solana":
+            if token.safety_report is None:
+                # Not yet checked — do it now (fallback for tokens that slipped
+                # through the concurrent pre-check phase)
+                try:
+                    safety = self._safety_checker.check_token_safety(token.base_address)
+                    token.safety_report = safety
+                except Exception as e:
+                    logger.debug("Safety check error %s: %s", token.base_symbol, e)
+
+            if token.safety_report is not None:
+                safety = token.safety_report
+                if not safety.is_safe_to_trade:
+                    # Conviction-based override: allow MEDIUM-risk tokens if score
+                    # is high enough (good momentum beats borderline safety flags)
+                    if score >= 0.50 and safety.risk_level == "MEDIUM":
+                        score *= 0.70   # 30% penalty for MEDIUM risk override
+                        signals.append(f"OVERRIDE: MEDIUM risk (conviction {score:.2f})")
+                    elif score >= 0.70 and safety.risk_level == "HIGH":
+                        score *= 0.45   # 55% penalty for HIGH risk — possible but costly
+                        signals.append(f"OVERRIDE: HIGH risk (strong signal)")
+                    else:
+                        token.score = 0.0
+                        token.signals = [f"BLOCKED: {safety.risk_level} risk"] + safety.risk_flags[:2]
+                        return 0.0
+                else:
+                    w = config.SAFETY_SCORE_WEIGHT
+                    score = score * (1 - w) + safety.safety_score * w
+                    # Bonus for verified safe tokens — confidence boost
+                    if safety.risk_level == "SAFE" and safety.safety_score >= 0.80:
+                        score += 0.04
+                if safety.risk_level in ("SAFE", "LOW"):
+                    signals.append(f"Safe ({safety.safety_score:.2f})")
+                elif safety.risk_level == "MEDIUM":
+                    flag = safety.risk_flags[0] if safety.risk_flags else "caution"
+                    signals.append(f"MEDIUM risk: {flag}")
+                elif safety.risk_level == "HIGH":
+                    score *= 0.50   # Heavy penalty for HIGH risk
+                    signals.append(f"HIGH risk ({safety.safety_score:.2f})")
+            else:
+                score *= 0.88   # Unverified — mild penalty only
+
+        token.score = float(np.clip(score, 0.0, 1.0))
+        token.signals = signals[:5]   # cap at 5 signal tags
         return token.score
 
-    # ─── Data Fetching ────────────────────────────────────────────────────────
+    def _run_concurrent_safety_checks(self, tokens: list[DexToken]):
+        """Run safety checks for all tokens in parallel, update in-place."""
+        sol_tokens = [t for t in tokens
+                      if t.chain_id == "solana" and t.safety_report is None]
+        if not sol_tokens:
+            return
+
+        def _check(t: DexToken):
+            try:
+                t.safety_report = self._safety_checker.check_token_safety(t.base_address)
+            except Exception as e:
+                logger.debug("Safety check error %s: %s", t.base_symbol, e)
+
+        futures = [self._executor.submit(_check, t) for t in sol_tokens]
+        # Wait with a generous timeout — safety checks can be slow
+        for f in concurrent.futures.as_completed(futures, timeout=20):
+            try:
+                f.result()
+            except Exception:
+                pass
+
+    # ─── Data Sources ─────────────────────────────────────────────────────────
 
     def _fetch_boosted_tokens(self) -> list[dict]:
-        """Fetch trending/boosted tokens from DexScreener."""
-        # Latest boosted
-        data = self._get(f"{DEXSCREENER_BASE}/token-boosts/latest/v1")
+        data  = self._get(f"{DEXSCREENER_BASE}/token-boosts/latest/v1")
         boosted = data if isinstance(data, list) else []
-
-        # Top boosted
         data2 = self._get(f"{DEXSCREENER_BASE}/token-boosts/top/v1")
-        top = data2 if isinstance(data2, list) else []
+        top   = data2 if isinstance(data2, list) else []
+        return boosted[:50] + top[:50]
 
-        return boosted[:20] + top[:20]
+    def _fetch_token_profiles(self) -> list[dict]:
+        data = self._get(f"{DEXSCREENER_BASE}/token-profiles/latest/v1")
+        return data if isinstance(data, list) else []
 
     def _fetch_pairs_for_tokens(self, token_metas: list[dict]) -> list[DexToken]:
-        """Fetch pair data for a list of token metadata objects."""
-        tokens = []
-        # Group by chain to batch requests
+        """Batch-fetch pair data (30 addresses per request)."""
         by_chain: dict[str, list[str]] = {}
         for t in token_metas:
             chain = t.get("chainId", "")
             addr  = t.get("tokenAddress", "")
-            if chain and addr:
+            if chain in PREFERRED_CHAINS and addr:
                 by_chain.setdefault(chain, []).append(addr)
 
+        tokens = []
         for chain, addresses in by_chain.items():
-            if chain not in PREFERRED_CHAINS:
-                continue
-            for addr in addresses[:10]:
-                data = self._get(f"{DEXSCREENER_BASE}/latest/dex/tokens/{addr}")
-                if data and data.get("pairs"):
-                    pairs = [p for p in data["pairs"] if p.get("chainId") == chain]
-                    if pairs:
-                        # Take highest-liquidity pair
-                        pairs.sort(key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
-                        token = self._parse_pair(pairs[0])
-                        if token:
-                            tokens.append(token)
-
+            addr_list = list(dict.fromkeys(addresses))  # preserve order, dedup
+            # DexScreener batch: up to 30 comma-separated addresses
+            for i in range(0, len(addr_list), 30):
+                batch = addr_list[i:i + 30]
+                data = self._get(f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(batch)}")
+                if not data or not data.get("pairs"):
+                    continue
+                by_addr: dict[str, list] = {}
+                for p in data["pairs"]:
+                    if p.get("chainId") != chain:
+                        continue
+                    a = p.get("baseToken", {}).get("address", "")
+                    by_addr.setdefault(a, []).append(p)
+                for addr_pairs in by_addr.values():
+                    addr_pairs.sort(
+                        key=lambda p: p.get("liquidity", {}).get("usd", 0), reverse=True)
+                    t = self._parse_pair(addr_pairs[0])
+                    if t:
+                        tokens.append(t)
         return tokens
 
-    def _search_top_pairs(self, chain: str, query: str = "USD", limit: int = 20) -> list[DexToken]:
-        """Search for top pairs on a given chain."""
-        data = self._get(f"{DEXSCREENER_BASE}/latest/dex/search",
-                         params={"q": query})
+    def _search_top_pairs(self, chain: str, query: str = "SOL",
+                          limit: int = 50) -> list[DexToken]:
+        data = self._get(f"{DEXSCREENER_BASE}/latest/dex/search", params={"q": query})
         if not data or not data.get("pairs"):
             return []
-
         chain_pairs = [p for p in data["pairs"] if p.get("chainId") == chain]
         tokens = []
         for p in chain_pairs[:limit]:
-            token = self._parse_pair(p)
-            if token:
-                tokens.append(token)
+            t = self._parse_pair(p)
+            if t:
+                tokens.append(t)
         return tokens
 
+    def _fetch_pumpfun_tokens(self) -> list[DexToken]:
+        """
+        Fetch most recently traded pump.fun tokens — highest real-time activity.
+        Cross-referenced with DexScreener for full pair data.
+        """
+        try:
+            data = self._get(
+                f"{PUMPFUN_BASE}/coins",
+                params={"limit": 50, "sort": "last_trade_unix_time",
+                        "order": "DESC", "includeNsfw": "false"},
+                timeout=8)
+            if not isinstance(data, list):
+                return []
+            mints = [c["mint"] for c in data if c.get("mint")][:30]
+            if not mints:
+                return []
+            result = self._get(
+                f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not result or not result.get("pairs"):
+                return []
+            tokens = []
+            seen = set()
+            for p in result["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "pumpfun"
+                    tokens.append(t)
+            logger.debug("Pump.fun active: %d tokens", len(tokens))
+            return tokens
+        except Exception as e:
+            logger.debug("Pump.fun fetch error: %s", e)
+            return []
+
+    def _fetch_pumpfun_new(self) -> list[DexToken]:
+        """Fetch newest pump.fun launches — these haven't even trended yet."""
+        try:
+            data = self._get(
+                f"{PUMPFUN_BASE}/coins",
+                params={"limit": 50, "sort": "created_timestamp",
+                        "order": "DESC", "includeNsfw": "false"},
+                timeout=8)
+            if not isinstance(data, list):
+                return []
+            mints = [c["mint"] for c in data if c.get("mint")][:30]
+            if not mints:
+                return []
+            result = self._get(
+                f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not result or not result.get("pairs"):
+                return []
+            tokens = []
+            seen = set()
+            for p in result["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "pumpfun"
+                    tokens.append(t)
+            return tokens
+        except Exception as e:
+            logger.debug("Pump.fun new fetch error: %s", e)
+            return []
+
+    def _fetch_raydium_pools(self) -> list[DexToken]:
+        """
+        Fetch top Raydium pools by 24h volume — catches tokens not on DexScreener trending.
+        """
+        try:
+            data = self._get(
+                f"{RAYDIUM_BASE}/pools/info/list",
+                params={"poolType": "all", "poolSortField": "volume24h",
+                        "sortType": "desc", "pageSize": 50, "page": 1},
+                timeout=10)
+            if not data or not data.get("data", {}).get("data"):
+                return []
+            pools = data["data"]["data"]
+            # Extract base token mint addresses
+            mints = []
+            for p in pools:
+                mint = p.get("mintA", {}).get("address") or p.get("mintB", {}).get("address")
+                if mint and mint not in mints:
+                    mints.append(mint)
+            mints = mints[:30]
+            if not mints:
+                return []
+            result = self._get(
+                f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not result or not result.get("pairs"):
+                return []
+            tokens = []
+            seen = set()
+            for p in result["pairs"]:
+                if p.get("chainId") != "solana" or p.get("dexId") != "raydium":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "raydium"
+                    tokens.append(t)
+            logger.debug("Raydium pools: %d tokens", len(tokens))
+            return tokens
+        except Exception as e:
+            logger.debug("Raydium fetch error: %s", e)
+            return []
+
+    def _fetch_birdeye_trending(self) -> list[DexToken]:
+        """Birdeye top 50 trending Solana tokens → enriched via DexScreener."""
+        be = _get_birdeye()
+        if not be or not be.enabled:
+            return []
+        try:
+            trending = be.get_trending_tokens(limit=50, min_liquidity=MIN_LIQUIDITY_USD)
+            mints = [t["address"] for t in trending if t.get("address")][:30]
+            if not mints:
+                return []
+            data = self._get(f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not data or not data.get("pairs"):
+                return []
+            tokens = []
+            seen = set()
+            for p in data["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "birdeye"
+                    tokens.append(t)
+            logger.debug("Birdeye trending: %d tokens", len(tokens))
+            return tokens
+        except Exception as e:
+            logger.debug("Birdeye trending error: %s", e)
+            return []
+
+    def _fetch_birdeye_new_listings(self) -> list[DexToken]:
+        """Birdeye newest Solana listings → enriched via DexScreener."""
+        be = _get_birdeye()
+        if not be or not be.enabled:
+            return []
+        try:
+            new_listings = be.get_new_listings(limit=30, min_liquidity=MIN_LIQUIDITY_USD)
+            mints = [t["address"] for t in new_listings if t.get("address")][:30]
+            if not mints:
+                return []
+            data = self._get(f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not data or not data.get("pairs"):
+                return []
+            tokens = []
+            seen = set()
+            for p in data["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "birdeye_new"
+                    tokens.append(t)
+            logger.debug("Birdeye new listings: %d tokens", len(tokens))
+            return tokens
+        except Exception as e:
+            logger.debug("Birdeye new listings error: %s", e)
+            return []
+
+    # ─── Parsing ──────────────────────────────────────────────────────────────
+
     def _parse_pair(self, pair: dict) -> Optional[DexToken]:
-        """Parse a DexScreener pair dict into a DexToken."""
         try:
             price_str = pair.get("priceUsd") or "0"
             price = float(price_str) if price_str else 0.0
@@ -379,6 +998,9 @@ class DexScreener:
             volume = pair.get("volume", {})
             change = pair.get("priceChange", {})
             liq    = pair.get("liquidity", {})
+            txns_m5 = txns.get("m5", {})
+            txns_h1 = txns.get("h1", {})
+            txns_h24 = txns.get("h24", {})
 
             return DexToken(
                 chain_id       = pair.get("chainId", ""),
@@ -388,18 +1010,21 @@ class DexScreener:
                 base_address   = pair.get("baseToken", {}).get("address", ""),
                 quote_symbol   = pair.get("quoteToken", {}).get("symbol", ""),
                 price_usd      = price,
-                price_change_m5  = float(change.get("m5") or 0),
-                price_change_h1  = float(change.get("h1") or 0),
-                price_change_h6  = float(change.get("h6") or 0),
-                price_change_h24 = float(change.get("h24") or 0),
-                volume_h1  = float(volume.get("h1") or 0),
-                volume_h24 = float(volume.get("h24") or 0),
-                liquidity_usd = float(liq.get("usd") or 0),
-                market_cap    = float(pair.get("marketCap") or pair.get("fdv") or 0),
-                buys_h1   = int(txns.get("h1", {}).get("buys", 0)),
-                sells_h1  = int(txns.get("h1", {}).get("sells", 0)),
-                buys_h24  = int(txns.get("h24", {}).get("buys", 0)),
-                sells_h24 = int(txns.get("h24", {}).get("sells", 0)),
+                price_change_m5  = _safe_float(change.get("m5")),
+                price_change_h1  = _safe_float(change.get("h1")),
+                price_change_h6  = _safe_float(change.get("h6")),
+                price_change_h24 = _safe_float(change.get("h24")),
+                volume_h1   = _safe_float(volume.get("h1")),
+                volume_h24  = _safe_float(volume.get("h24")),
+                volume_m5   = _safe_float(volume.get("m5")),
+                liquidity_usd = _safe_float(liq.get("usd")),
+                market_cap    = _safe_float(pair.get("marketCap") or pair.get("fdv")),
+                buys_h1   = int(txns_h1.get("buys", 0)),
+                sells_h1  = int(txns_h1.get("sells", 0)),
+                buys_h24  = int(txns_h24.get("buys", 0)),
+                sells_h24 = int(txns_h24.get("sells", 0)),
+                buys_m5   = int(txns_m5.get("buys", 0)),
+                sells_m5  = int(txns_m5.get("sells", 0)),
                 pair_created_at = pair.get("pairCreatedAt"),
                 url = pair.get("url", ""),
             )
@@ -407,26 +1032,42 @@ class DexScreener:
             logger.debug("Parse error: %s", e)
             return None
 
-    def _get(self, url: str, params: dict = None, timeout: int = 10) -> Optional[dict | list]:
+    # ─── HTTP ─────────────────────────────────────────────────────────────────
+
+    def _get(self, url: str, params: dict = None,
+             timeout: int = 10) -> Optional[dict | list]:
         cache_key = f"{url}:{params}"
+        now = time.time()
         if cache_key in self._cache:
             val, ts = self._cache[cache_key]
-            if time.time() - ts < self._cache_ttl:
+            if now - ts < self._cache_ttl:
                 return val
 
         for attempt in range(3):
             try:
                 resp = requests.get(url, params=params, timeout=timeout,
-                                    headers={"User-Agent": "ai-trader/1.0"})
+                                    headers={"User-Agent": "ai-trader/2.0"})
                 if resp.status_code == 429:
                     time.sleep(2 ** attempt * 2)
                     continue
+                if resp.status_code == 404:
+                    return None
                 resp.raise_for_status()
                 data = resp.json()
-                self._cache[cache_key] = (data, time.time())
+                self._cache[cache_key] = (data, now)
+                # Evict stale + overflow entries
+                if len(self._cache) > self._CACHE_MAX:
+                    expired = [k for k, (_, ts) in self._cache.items()
+                               if now - ts > self._cache_ttl]
+                    for k in expired:
+                        del self._cache[k]
+                    if len(self._cache) > self._CACHE_MAX:
+                        oldest = sorted(self._cache.items(), key=lambda x: x[1][1])
+                        for k, _ in oldest[:len(self._cache) - self._CACHE_MAX]:
+                            del self._cache[k]
                 return data
             except Exception as e:
-                logger.debug("DexScreener request error: %s", e)
+                logger.debug("Request error [%s]: %s", url[:60], e)
                 if attempt < 2:
                     time.sleep(2 ** attempt)
         return None

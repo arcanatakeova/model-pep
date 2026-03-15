@@ -3,6 +3,7 @@ Ensemble Signal Engine
 Aggregates multiple technical signals into a single actionable trade decision.
 Applies regime filtering, trend confirmation, and conviction scoring.
 """
+from __future__ import annotations
 import logging
 import numpy as np
 import pandas as pd
@@ -210,19 +211,21 @@ class EnsembleSignal:
 
     def _conviction(self, components: dict, score: float) -> float:
         """
-        Conviction = fraction of signals agreeing with the final score direction.
-        Weighted by absolute magnitude.
+        Conviction = magnitude-weighted signal agreement in the direction of final score.
+        Measures what fraction of total signal energy aligns vs. opposes.
         """
         if score == 0:
             return 0.0
         direction = np.sign(score)
-        agreed = sum(1 for v in components.values() if np.sign(v) == direction and abs(v) > 0.1)
-        total  = sum(1 for v in components.values() if abs(v) > 0.1)
+        aligned  = sum(abs(v) for v in components.values() if np.sign(v) == direction)
+        opposing = sum(abs(v) for v in components.values()
+                       if np.sign(v) != direction and np.sign(v) != 0)
+        total = aligned + opposing
         if total == 0:
             return 0.0
-        agreement_ratio = agreed / total
-        # Boost by absolute score magnitude
-        return float(np.clip(agreement_ratio * (0.5 + abs(score) * 0.5), 0, 1))
+        # Net agreement ratio weighted by score strength
+        net_ratio = (aligned - opposing) / total
+        return float(np.clip(net_ratio * abs(score), 0, 1))
 
     def _compute_levels(self, close: pd.Series, high: pd.Series, low: pd.Series,
                         signal: str, price: float) -> tuple[float, float]:

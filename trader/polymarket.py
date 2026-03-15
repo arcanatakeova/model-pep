@@ -10,9 +10,11 @@ Edge sources:
 - High-volume markets with inefficient pricing
 - Event-correlated position building
 """
+from __future__ import annotations
 import logging
 import time
 import requests
+import concurrent.futures
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -20,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 CLOB_BASE   = "https://clob.polymarket.com"
 GAMMA_BASE  = "https://gamma-api.polymarket.com"
+DATA_BASE   = "https://data-api.polymarket.com"
 
 
 @dataclass
@@ -106,56 +109,106 @@ class PolymarketTrader:
             self._init_client()
 
     def _init_client(self):
-        """Initialize py-clob-client for live trading."""
+        """
+        Initialize py-clob-client with L2 API credentials.
+
+        Flow:
+        1. Build a base L1 client from the EVM private key.
+        2. Call create_or_derive_api_creds() — derives deterministic creds from
+           the wallet signature (idempotent: same key always gives same creds).
+        3. Re-initialise with the full ApiCreds so authenticated endpoints work.
+        """
         try:
             from py_clob_client.client import ClobClient
-            self._client = ClobClient(
+            from py_clob_client.clob_types import ApiCreds
+
+            import config as _cfg
+
+            # ── Step 1: L1 client (wallet-only, no creds yet) ─────────────
+            l1 = ClobClient(
                 host=CLOB_BASE,
                 key=self.private_key,
                 chain_id=self.chain_id,
             )
-            logger.info("Polymarket CLOB client initialized (live mode)")
+
+            # ── Step 2: derive or load L2 API credentials ─────────────────
+            if _cfg.POLYMARKET_API_KEY and _cfg.POLYMARKET_API_SECRET and _cfg.POLYMARKET_PASSPHRASE:
+                creds = ApiCreds(
+                    api_key=_cfg.POLYMARKET_API_KEY,
+                    api_secret=_cfg.POLYMARKET_API_SECRET,
+                    api_passphrase=_cfg.POLYMARKET_PASSPHRASE,
+                )
+                logger.info("Polymarket: using cached L2 API credentials")
+            else:
+                raw = l1.create_or_derive_api_creds()
+                creds = ApiCreds(
+                    api_key=raw.get("apiKey", ""),
+                    api_secret=raw.get("secret", ""),
+                    api_passphrase=raw.get("passphrase", ""),
+                )
+                logger.info(
+                    "Polymarket: derived L2 creds (set POLYMARKET_API_KEY/SECRET/PASSPHRASE "
+                    "in .env to skip re-derivation). apiKey=%s", creds.api_key
+                )
+
+            # ── Step 3: full authenticated client ─────────────────────────
+            self._client = ClobClient(
+                host=CLOB_BASE,
+                key=self.private_key,
+                chain_id=self.chain_id,
+                creds=creds,
+            )
+            logger.info("Polymarket CLOB client ready (live mode, L2 auth)")
+
         except ImportError:
-            logger.warning("py-clob-client not installed. Polymarket trading in data-only mode.")
+            logger.warning("py-clob-client not installed — Polymarket in data-only mode.")
         except Exception as e:
             logger.warning("Polymarket client init failed: %s", e)
 
     # ─── Market Scanning ──────────────────────────────────────────────────────
 
     def get_active_markets(self, limit: int = 100, min_volume: float = 1000) -> list[PolyMarket]:
-        """Fetch active markets sorted by 24h volume."""
+        """Fetch active markets sorted by 24h volume using Gamma API."""
         cache_key = f"markets_{limit}"
-        cached = self._cached(cache_key)
+        cached = self._cached(cache_key, ttl=300)
         if cached is not None:
             return cached
 
+        # Gamma API returns richer market data than CLOB /markets
         markets = []
         offset = 0
+        page_size = 100
 
         while len(markets) < limit:
-            data = self._get(f"{CLOB_BASE}/markets",
-                             params={"active": True, "closed": False,
-                                     "limit": min(50, limit - len(markets)),
-                                     "offset": offset})
-            if not data or not data.get("data"):
+            data = self._get(f"{GAMMA_BASE}/markets", params={
+                "active":    "true",
+                "closed":    "false",
+                "order":     "volume24hr",
+                "ascending": "false",
+                "limit":     page_size,
+                "offset":    offset,
+            })
+            if not data:
                 break
-
-            for m in data["data"]:
+            # Gamma returns a list directly
+            page = data if isinstance(data, list) else data.get("data", [])
+            if not page:
+                break
+            for m in page:
                 parsed = self._parse_market(m)
                 if parsed and parsed.active and parsed.accepting_orders:
                     markets.append(parsed)
-
-            if not data.get("next_cursor") or data["next_cursor"] == "LTE=":
+            if len(page) < page_size:
                 break
-            offset += 50
+            offset += page_size
 
         # Filter by volume
         markets = [m for m in markets if m.volume_24h >= min_volume]
         markets.sort(key=lambda m: m.volume_24h, reverse=True)
 
-        self._store(cache_key, markets)
-        logger.info("Polymarket: %d active markets loaded", len(markets))
-        return markets
+        self._store(cache_key, markets[:limit])
+        logger.info("Polymarket: %d active markets loaded (Gamma API)", len(markets))
+        return markets[:limit]
 
     def find_edges(self, min_edge: float = 0.04, min_volume: float = 5000) -> list[PolySignal]:
         """
@@ -167,7 +220,7 @@ class PolymarketTrader:
         3. Volume-weighted momentum (market moving one way = follow)
         4. Near-resolution high-confidence plays
         """
-        markets = self.get_active_markets(limit=200, min_volume=min_volume)
+        markets = self.get_active_markets(limit=50, min_volume=min_volume)
         signals = []
 
         for mkt in markets:
@@ -184,6 +237,15 @@ class PolymarketTrader:
         """Fetch order book for a token."""
         data = self._get(f"{CLOB_BASE}/book", params={"token_id": token_id})
         return data or {}
+
+    def get_data_markets(self, limit: int = 50) -> list[dict]:
+        """Fetch enriched market data from data-api (volume, liquidity, 24h activity)."""
+        data = self._get(f"{DATA_BASE}/markets", params={
+            "limit": limit, "sortBy": "volume24hr", "order": "DESC",
+        })
+        if isinstance(data, list):
+            return data
+        return (data or {}).get("data", [])
 
     # ─── Edge Analysis ────────────────────────────────────────────────────────
 
@@ -217,8 +279,11 @@ class PolymarketTrader:
 
         # ── Strategy 2: 50/50 markets with momentum ───────────────────────
         elif 0.40 <= yes_p <= 0.60:
-            # Efficient zone — look for order book imbalance
-            book = self.get_orderbook(mkt.yes_token_id)
+            # Orderbook calls were removed here — fetching a per-market orderbook
+            # for every market in the 40-60% range caused dozens of blocking HTTP
+            # requests per scan cycle, freezing the bot for minutes.
+            # The other three strategies already cover this zone sufficiently.
+            book = None
             if book:
                 bids = book.get("bids", [])
                 asks = book.get("asks", [])
@@ -288,28 +353,39 @@ class PolymarketTrader:
         Requires py-clob-client and a funded Polygon wallet.
         """
         if not self._client:
-            logger.info("Polymarket paper: WOULD BUY %s %s @ %.4f size $%.2f",
-                        signal.side, signal.market.question[:50],
-                        signal.target_price, size_usdc)
+            logger.info(
+                "POLY PAPER | %-3s %s | p=%.4f | edge=%.1f%% | $%.0f | vol=$%.0f | '%s'",
+                signal.side,
+                signal.market.condition_id[:8],
+                signal.target_price,
+                signal.edge_pct * 100,
+                size_usdc,
+                signal.market.volume_24h,
+                signal.market.question[:60],
+            )
             return {"paper": True, "side": signal.side, "size": size_usdc,
                     "price": signal.target_price, "market": signal.market.condition_id}
 
         try:
+            from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions
+            from py_clob_client.order_builder.constants import BUY
+
             token_id = (signal.market.yes_token_id
                         if signal.side == "YES"
                         else signal.market.no_token_id)
 
-            from py_clob_client.clob_types import OrderArgs, OrderType
             order_args = OrderArgs(
                 token_id=token_id,
-                price=signal.target_price,
-                size=size_usdc / signal.target_price,
-                side="BUY",
+                price=round(signal.target_price, 4),
+                size=round(size_usdc / signal.target_price, 2),
+                side=BUY,
             )
-            resp = self._client.create_and_post_order(order_args)
-            logger.info("Polymarket ORDER placed: %s %s @ %.4f (id: %s)",
+            signed = self._client.create_order(order_args)
+            resp   = self._client.post_order(signed)
+            order_id = (resp or {}).get("orderID", "?")
+            logger.info("Polymarket ORDER placed: %s %s @ %.4f size=%.2f (id: %s)",
                         signal.side, signal.market.question[:40],
-                        signal.target_price, resp.get("orderID", "?"))
+                        signal.target_price, size_usdc, order_id)
             return resp
         except Exception as e:
             logger.error("Polymarket order failed: %s", e)
@@ -329,31 +405,50 @@ class PolymarketTrader:
 
     def _parse_market(self, m: dict) -> Optional[PolyMarket]:
         try:
+            # Gamma API uses clobTokenIds list; CLOB API uses tokens list
             tokens = m.get("tokens", [])
             yes_tok = next((t for t in tokens if t.get("outcome", "").upper() == "YES"), {})
             no_tok  = next((t for t in tokens if t.get("outcome", "").upper() == "NO"),  {})
 
-            yes_price = float(yes_tok.get("price") or 0.5)
-            no_price  = float(no_tok.get("price")  or 0.5)
+            # Gamma API stores prices at top level as outcomePrices or bestBid/bestAsk
+            outcome_prices = m.get("outcomePrices", [])
+            if outcome_prices and len(outcome_prices) >= 2:
+                yes_price = float(outcome_prices[0] or 0.5)
+                no_price  = float(outcome_prices[1] or 0.5)
+            else:
+                yes_price = float(yes_tok.get("price") or m.get("bestBid") or 0.5)
+                no_price  = float(no_tok.get("price")  or 0.5)
+
+            # Token IDs — Gamma uses clobTokenIds list
+            clob_ids = m.get("clobTokenIds", [])
+            yes_token_id = clob_ids[0] if clob_ids else yes_tok.get("token_id", "")
+            no_token_id  = clob_ids[1] if len(clob_ids) > 1 else no_tok.get("token_id", "")
+
+            # Reward rates
+            rewards = m.get("rewards") or {}
+            if isinstance(rewards, dict):
+                rates = rewards.get("rates") or {}
+                yes_rate = float(rates.get("yes", 0) or 0)
+                no_rate  = float(rates.get("no",  0) or 0)
+            else:
+                yes_rate = no_rate = 0.0
 
             return PolyMarket(
-                condition_id   = m.get("condition_id", ""),
-                question       = m.get("question", ""),
-                slug           = m.get("market_slug", ""),
-                end_date       = m.get("end_date_iso", ""),
-                active         = bool(m.get("active")),
-                accepting_orders = bool(m.get("accepting_orders")),
-                volume_24h     = float(m.get("volume24hr") or m.get("volume_24h") or 0),
-                volume_total   = float(m.get("volume") or 0),
-                yes_token_id   = yes_tok.get("token_id", ""),
-                no_token_id    = no_tok.get("token_id", ""),
-                yes_price      = yes_price,
-                no_price       = no_price,
-                yes_reward_rate = float(m.get("rewards", {}).get("rates", {}).get("yes", 0) or 0)
-                    if isinstance(m.get("rewards"), dict) else 0.0,
-                no_reward_rate  = float(m.get("rewards", {}).get("rates", {}).get("no", 0) or 0)
-                    if isinstance(m.get("rewards"), dict) else 0.0,
-                tags = m.get("tags", []),
+                condition_id     = m.get("conditionId") or m.get("condition_id", ""),
+                question         = m.get("question", ""),
+                slug             = m.get("slug") or m.get("market_slug", ""),
+                end_date         = m.get("endDate") or m.get("end_date_iso", ""),
+                active           = bool(m.get("active")),
+                accepting_orders = bool(m.get("acceptingOrders", m.get("accepting_orders", True))),
+                volume_24h       = float(m.get("volume24hr") or m.get("volume_24h") or 0),
+                volume_total     = float(m.get("volume") or 0),
+                yes_token_id     = yes_token_id,
+                no_token_id      = no_token_id,
+                yes_price        = yes_price,
+                no_price         = no_price,
+                yes_reward_rate  = yes_rate,
+                no_reward_rate   = no_rate,
+                tags             = m.get("tags", []),
             )
         except Exception as e:
             logger.debug("Polymarket parse error: %s", e)
@@ -370,7 +465,7 @@ class PolymarketTrader:
                 resp = requests.get(url, params=params, timeout=10,
                                     headers={"Accept": "application/json"})
                 if resp.status_code == 429:
-                    time.sleep(5 * (attempt + 1))
+                    time.sleep(2 + attempt * 2)   # 2s, 4s, 6s — was 5/10/15s
                     continue
                 if resp.ok:
                     data = resp.json()
@@ -391,4 +486,9 @@ class PolymarketTrader:
         return None
 
     def _store(self, key: str, val):
+        # Evict oldest entries when cache grows too large (memory leak prevention)
+        if len(self._cache) >= 200:
+            oldest = sorted(self._cache, key=lambda k: self._cache[k][1])
+            for k in oldest[:50]:
+                del self._cache[k]
         self._cache[key] = (val, time.time())

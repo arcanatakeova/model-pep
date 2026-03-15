@@ -2,6 +2,7 @@
 Technical Indicators — pure NumPy/Pandas implementations.
 No external TA library required.
 """
+from __future__ import annotations
 import numpy as np
 import pandas as pd
 from typing import Optional
@@ -38,7 +39,10 @@ def rsi(close: pd.Series, period: int = config.RSI_PERIOD) -> pd.Series:
     avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
     avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    # Pure uptrend (avg_loss = 0, avg_gain > 0) → RSI should be 100, not NaN
+    rsi = rsi.where(avg_loss != 0, other=100.0)
+    return rsi
 
 
 def rsi_signal(close: pd.Series) -> float:
@@ -58,8 +62,6 @@ def rsi_signal(close: pd.Series) -> float:
     elif latest <= config.RSI_OVERSOLD:
         return 0.5 + 0.5 * (config.RSI_OVERSOLD - latest) / (config.RSI_OVERSOLD - 20)
     elif latest <= 50:
-        return 0.5 * (50 - latest) / (50 - config.RSI_OVERSOLD)
-    elif latest < 50:
         return 0.5 * (50 - latest) / (50 - config.RSI_OVERSOLD)
     elif latest < config.RSI_OVERBOUGHT:
         return -0.5 * (latest - 50) / (config.RSI_OVERBOUGHT - 50)
@@ -145,7 +147,7 @@ def bollinger_signal(close: pd.Series) -> float:
     l1 = lower.iloc[-2]
 
     band_width = u - l
-    if band_width == 0:
+    if band_width == 0 or pd.isna(band_width):
         return 0.0
 
     # Position within bands: -1 at lower, 0 at mid, +1 at upper
@@ -184,7 +186,7 @@ def ema_cross_signal(close: pd.Series,
 
     diff     = f.iloc[-1] - s.iloc[-1]
     diff_prev = f.iloc[-2] - s.iloc[-2]
-    spread   = abs(diff) / s.iloc[-1] if s.iloc[-1] != 0 else 0
+    spread   = abs(diff) / s.iloc[-1] if (s.iloc[-1] != 0 and not pd.isna(s.iloc[-1])) else 0
 
     score = 0.0
     # Direction: 0.5
@@ -208,7 +210,7 @@ def momentum_signal(close: pd.Series, period: int = config.MOMENTUM_PERIOD) -> f
     if not _validate(close, period + 5):
         return 0.0
 
-    roc = (close.iloc[-1] / close.iloc[-period - 1] - 1) if close.iloc[-period - 1] != 0 else 0
+    roc = close.pct_change(periods=period).iloc[-1]  # rate-of-change over exactly `period` bars
     recent = close.tail(period)
     rng = recent.max() - recent.min()
     pos = (close.iloc[-1] - recent.min()) / rng if rng > 0 else 0.5
