@@ -1109,9 +1109,9 @@ class SolanaWallet:
                     data=bytes([1]),
                 )
                 fund_ix  = transfer(TransferParams(from_pubkey=user, to_pubkey=user_wsol_ata, lamports=max_quote_in))
-                sync_ix  = Instruction(TOKEN_PROG,
-                                       [AccountMeta(user_wsol_ata, False, True)],
-                                       bytes([17]))   # syncNative = 17
+                sync_ix  = Instruction(program_id=TOKEN_PROG,
+                                       accounts=[AccountMeta(user_wsol_ata, False, True)],
+                                       data=bytes([17]))   # syncNative = 17
                 create_base_ix = Instruction(
                     program_id=ATA_PROG,
                     accounts=[
@@ -1124,11 +1124,11 @@ class SolanaWallet:
                     ],
                     data=bytes([1]),
                 )
-                close_ix = Instruction(TOKEN_PROG,
-                                       [AccountMeta(user_wsol_ata, False, True),
-                                        AccountMeta(user,          False, True),
-                                        AccountMeta(user,          True,  False)],
-                                       bytes([9]))    # closeAccount = 9
+                close_ix = Instruction(program_id=TOKEN_PROG,
+                                       accounts=[AccountMeta(user_wsol_ata, False, True),
+                                                 AccountMeta(user,          False, True),
+                                                 AccountMeta(user,          True,  False)],
+                                       data=bytes([9]))    # closeAccount = 9
                 instructions = [cu_limit_ix, cu_price_ix, create_wsol_ix,
                                  fund_ix, sync_ix, create_base_ix, main_ix, close_ix]
             else:
@@ -1145,11 +1145,11 @@ class SolanaWallet:
                     ],
                     data=bytes([1]),
                 )
-                close_ix = Instruction(TOKEN_PROG,
-                                       [AccountMeta(user_wsol_ata, False, True),
-                                        AccountMeta(user,          False, True),
-                                        AccountMeta(user,          True,  False)],
-                                       bytes([9]))
+                close_ix = Instruction(program_id=TOKEN_PROG,
+                                       accounts=[AccountMeta(user_wsol_ata, False, True),
+                                                 AccountMeta(user,          False, True),
+                                                 AccountMeta(user,          True,  False)],
+                                       data=bytes([9]))
                 instructions = [cu_limit_ix, cu_price_ix, create_wsol_ix, main_ix, close_ix]
 
             bh  = self._client.get_latest_blockhash().value.blockhash
@@ -1393,7 +1393,7 @@ class SolanaWallet:
                             logger.error("TX failed on-chain: %s err=%s",
                                          signature[:16], s.err)
                             return False
-                        if str(s.confirmation_status) == "finalized":
+                        if "Finalized" in str(s.confirmation_status):
                             logger.info("TX finalized: %s", signature[:16])
                             return True
                         # Log progress without spamming
@@ -1476,36 +1476,32 @@ class SolanaWallet:
     def _get_token_raw_balance(self, mint_address: str) -> tuple[int, int]:
         """
         Returns (raw_amount_in_smallest_units, decimals) for a token.
-        Supports both legacy SPL Token and Token-2022 (Token Extensions) program.
+        Uses direct RPC with jsonParsed encoding to avoid solana-py API quirks.
         """
         if not self.is_connected:
             return 0, 6
         try:
-            from solders.pubkey import Pubkey
-            mint_pk = Pubkey.from_string(mint_address)
-
-            # Try legacy SPL Token program first
-            for program_id in (
-                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   # SPL Token
-                "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",   # Token-2022
-            ):
-                try:
-                    resp = self._client.get_token_accounts_by_owner(
-                        self._keypair.pubkey(),
-                        {"mint": mint_pk},
-                        commitment="confirmed",
-                    )
-                    if resp.value:
-                        for acc in resp.value:
-                            info = acc.account.data.parsed
-                            ta = info.get("info", {}).get("tokenAmount", {})
-                            raw = int(ta.get("amount", 0))
-                            dec = int(ta.get("decimals", 6))
-                            if raw > 0:
-                                return raw, dec
-                except Exception:
-                    pass
-
+            resp = requests.post(config.SOLANA_RPC_URL, json={
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    self._pubkey,
+                    {"mint": mint_address},
+                    {"encoding": "jsonParsed", "commitment": "confirmed"},
+                ],
+            }, timeout=10)
+            if not resp.ok:
+                return 0, 6
+            for acc in resp.json().get("result", {}).get("value", []):
+                ta = (acc.get("account", {})
+                        .get("data", {})
+                        .get("parsed", {})
+                        .get("info", {})
+                        .get("tokenAmount", {}))
+                raw = int(ta.get("amount", 0))
+                dec = int(ta.get("decimals", 6))
+                if raw > 0:
+                    return raw, dec
             return 0, 6
         except Exception as e:
             logger.debug("Token raw balance error: %s", e)
