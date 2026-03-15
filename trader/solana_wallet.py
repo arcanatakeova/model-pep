@@ -129,6 +129,7 @@ class SolanaWallet:
         self._pubkey    = None
         self._client    = None
         self._sol_price_cache: tuple[float, float] = (0.0, 0.0)  # (price, ts)
+        self._cached_lamports: int = 0  # last known-good lamport balance (fallback on RPC 429)
 
         if private_key_b58:
             self._init_wallet()
@@ -263,12 +264,17 @@ class SolanaWallet:
             return 0.0
 
     def get_sol_balance_lamports(self) -> int:
-        """Get SOL balance in lamports."""
+        """Get SOL balance in lamports. Returns cached value on RPC failure (avoids false-low on 429)."""
         if not self.is_connected:
             return 0
         try:
-            return self._client.get_balance(self._keypair.pubkey()).value
-        except Exception:
+            val = self._client.get_balance(self._keypair.pubkey()).value
+            self._cached_lamports = val  # update cache on success
+            return val
+        except Exception as e:
+            if self._cached_lamports > 0:
+                logger.debug("get_sol_balance_lamports RPC error (%s) — using cached %d", e, self._cached_lamports)
+                return self._cached_lamports
             return 0
 
     def get_token_balance(self, mint_address: str) -> float:
@@ -974,8 +980,13 @@ class SolanaWallet:
             # ── Step 4: AMM calculation (~1% total fees) ──────────────────────
             if not is_sell:
                 # BUY: sol_in → tokens_out
-                sol_in_eff    = amount_raw * 9900 // 10000
-                token_out     = (base_reserve * sol_in_eff) // (quote_reserve + sol_in_eff)
+                # Use single-step integer arithmetic to avoid intermediate truncation
+                # producing a token_out that's too large for the on-chain reverse check.
+                # Apply 98% safety factor to prevent overflow error 0x1787 in buy.rs.
+                _num     = base_reserve * amount_raw * 9900
+                _den     = (quote_reserve * 10000) + (amount_raw * 9900)
+                token_out = _num // _den
+                token_out = token_out * 98 // 100   # 2% margin: avoids on-chain arithmetic overflow
                 max_quote_in  = int(amount_raw * (1 + slippage_bps / 10000))
                 arg0, arg1    = token_out, max_quote_in
                 out_amount    = token_out
@@ -1023,13 +1034,16 @@ class SolanaWallet:
                 [b"creator_vault", bytes(coin_creator)], PUMPSWAP)
             creator_wsol_ata = _ata(creator_wallet, WSOL_MINT)
 
-            # Volume accumulator PDAs (PumpSwap Anchor program)
+            # Volume accumulator PDAs — owned by the pfee program, NOT by PUMPSWAP.
+            # The pfee program (pfeeUxB6j...) initialises and owns these accounts;
+            # passing a PDA derived from PUMPSWAP seeds causes error 0xbbf (AccountOwnedByWrongProgram).
             _pool_pk = Pubkey.from_string(pool_address)
+            PFEE_PROG = Pubkey.from_string("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ")
             global_volume_acc, _ = Pubkey.find_program_address(
-                [b"global_volume_accumulator"], PUMPSWAP)
+                [b"global_volume_accumulator"], PFEE_PROG)
             # user_volume_accumulator is per-user (NOT per-pool)
             user_volume_acc, _ = Pubkey.find_program_address(
-                [b"user_volume_accumulator", bytes(user)], PUMPSWAP)
+                [b"user_volume_accumulator", bytes(user)], PFEE_PROG)
             logger.debug("PumpSwap PDAs: global_va=%s user_va=%s",
                          str(global_volume_acc)[:16], str(user_volume_acc)[:16])
 
