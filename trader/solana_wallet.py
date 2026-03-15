@@ -979,28 +979,35 @@ class SolanaWallet:
                     res = r2.json().get("result")
                     if not res:
                         continue
+                    meta = res.get("meta") or {}
+                    # Skip failed transactions
+                    if meta.get("err") is not None:
+                        continue
                     ref_tx  = VersionedTransaction.from_bytes(
                         base64.b64decode(res["transaction"][0]))
                     ref_msg = ref_tx.message
                     rkeys   = [str(k) for k in ref_msg.account_keys]
-                    h       = ref_msg.header
-                    ns, rrs, rns = (h.num_required_signatures,
-                                    h.num_readonly_signed_accounts,
-                                    h.num_readonly_unsigned_accounts)
-                    nst = len(rkeys)
+                    # Append ALT-resolved addresses so ALT-based txs are not skipped
+                    loaded = meta.get("loadedAddresses") or {}
+                    rkeys.extend(loaded.get("writable", []))
+                    rkeys.extend(loaded.get("readonly", []))
                     for inst in ref_msg.instructions:
+                        if inst.program_id_index >= len(rkeys):
+                            continue
                         if "pAMM" not in rkeys[inst.program_id_index]:
                             continue
                         if len(inst.accounts) != 24:
                             continue
                         if bytes(inst.data)[:8] != _PUMP_BUY_DISC:
                             continue
-                        if not all(idx < nst for idx in inst.accounts):
-                            continue   # skip ALT-based txs
+                        if not all(idx < len(rkeys) for idx in inst.accounts):
+                            continue
                         cloned = [rkeys[idx] for idx in inst.accounts]
-                        cloned[1] = str(user)
-                        cloned[5] = str(user_base_ata)
-                        cloned[6] = str(user_wsol_ata)
+                        cloned[1]  = str(user)
+                        cloned[5]  = str(user_base_ata)
+                        cloned[6]  = str(user_wsol_ata)
+                        cloned[9]  = str(user)           # self-referral
+                        cloned[10] = str(user_wsol_ata)  # referral_wsol = our WSOL ATA
                         ref_accs = cloned
                         break
                     if ref_accs:
