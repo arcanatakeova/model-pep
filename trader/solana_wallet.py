@@ -949,9 +949,13 @@ class SolanaWallet:
 
             user_base_ata = _ata(user, base_mint_pk, base_token_prog)
             user_wsol_ata = _ata(user, WSOL_MINT)
-            # Creator wallet and WSOL ATA from pool data (offset 11)
-            creator_wallet  = Pubkey.from_bytes(pool_data[11:43])
+            # Creator wallet from pool data (offset 11:43 = pool-level creator field)
+            # and coin_creator = bonding-curve creator stored at pool_data[211:243]
+            creator_wallet   = Pubkey.from_bytes(pool_data[11:43])
             creator_wsol_ata = _ata(creator_wallet, WSOL_MINT)
+            # coin_creator (original pump.fun bonding-curve creator) = pool_data[211:243]
+            # Used for [23] derivation via the pfee program PDA
+            coin_creator     = Pubkey.from_bytes(pool_data[211:243]) if len(pool_data) >= 243 else creator_wallet
 
             # Volume accumulator PDAs (PumpSwap Anchor program)
             _pool_pk = Pubkey.from_string(pool_address)
@@ -965,12 +969,22 @@ class SolanaWallet:
 
             # ── Step 6: try to clone fixed accounts from reference tx ─────────
             # (preferred path: validates our hardcoded constants against reality)
-            _GLOBAL_CONFIG = "ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw"
-            _EVENT_AUTH    = "GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR"
-            _TOKEN22_PROG  = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-            _CONST_21      = "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"
-            _CONST_22      = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
-            _CONST_23      = "96LyJcE6LR56Ask37D9bHYGieoSfyFYxwaD3mxXxVnTg"
+            _GLOBAL_CONFIG    = "ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw"
+            _EVENT_AUTH       = "GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR"
+            _TOKEN22_PROG_STR = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+            _SPL_TOKEN_PROG   = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+            _CONST_21         = "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"
+            _CONST_22         = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
+            # [23] is a per-pool pfee-program PDA: seeds = ["coin_creator_vault", coin_creator]
+            # coin_creator = pool_data[211:243] = bonding-curve bc[49:81]
+            _PFEE_PROG        = Pubkey.from_string(_CONST_22)
+            _coin_creator_vault_23, _ = Pubkey.find_program_address(
+                [b"coin_creator_vault", bytes(coin_creator)], _PFEE_PROG)
+            # Default fee recipient: any entry from global_config's valid fee-recipient list.
+            # The pAMM program checks [9] is in the global_config list — use a known-valid one.
+            # [10] = WSOL ATA of the fee recipient (SPL Token program).
+            _DEFAULT_FEE_RECIP    = Pubkey.from_string("G5UZAVbAf46s7cKWoyKu8kYTip9DGTpbLZ2qa9Aq69dP")
+            _fee_recip_wsol_ata   = _ata(_DEFAULT_FEE_RECIP, WSOL_MINT)
 
             ref_accs = None
             try:
@@ -1014,8 +1028,8 @@ class SolanaWallet:
                         cloned[1]  = str(user)
                         cloned[5]  = str(user_base_ata)
                         cloned[6]  = str(user_wsol_ata)
-                        cloned[9]  = str(user)           # self-referral
-                        cloned[10] = str(user_wsol_ata)  # referral_wsol = our WSOL ATA
+                        # [9] = protocol_fee_recipient — keep from ref tx (pool-agnostic valid entry)
+                        # [10] = fee_recipient_wsol_ata — keep from ref tx (derived from [9])
                         cloned[20] = str(user_volume_acc)  # user_volume_accumulator (ours)
                         ref_accs = cloned
                         break
@@ -1038,49 +1052,49 @@ class SolanaWallet:
             #  [6] W  user_wsol_ata
             #  [7] W  pool_base_token_account
             #  [8] W  pool_quote_token_account
-            #  [9] R  referral_wallet  → self
-            # [10] W  referral_wsol_ata → user_wsol_ata
+            #  [9] R  protocol_fee_recipient — valid entry from global_config
+            # [10] W  fee_recipient_wsol_ata — ATA(fee_recipient, WSOL)
             # [11] R  Token-2022 program (constant)
-            # [12] R  Token program (constant)
+            # [12] R  SPL Token program (constant, always — WSOL uses SPL Token)
             # [13] R  System program (constant)
             # [14] R  ATA program (constant)
             # [15] R  EventAuthority (constant)
             # [16] R  PumpSwap program (constant)
-            # [17] W  creator_wsol_ata  (ATA(creator, WSOL))
+            # [17] W  creator_wsol_ata  (ATA(creator_wallet, WSOL))
             # [18] R  creator_wallet    (pool_data[11:43])
             # [19] W  global_volume_accumulator  PDA(pAMM, ["global_volume_accumulator"])
-            # [20] W  user_volume_accumulator   PDA(pAMM, ["user_volume_accumulator", user, pool])
-            # [21] R  constant
-            # [22] R  constant
-            # [23] R  constant
+            # [20] W  user_volume_accumulator   PDA(pAMM, ["user_volume_accumulator", user])
+            # [21] R  pfee state account (constant)
+            # [22] R  pfee program (constant)
+            # [23] W  coin_creator_vault PDA(pfee, ["coin_creator_vault", coin_creator])
             if not ref_accs:
                 logger.info("PumpSwap: no ref tx for pool %s — deriving accounts",
                             pool_address[:16])
                 ref_accs = [
-                    pool_address,            # [0]
-                    str(user),               # [1]
-                    _GLOBAL_CONFIG,          # [2]
-                    pump_mint,               # [3]
-                    str(WSOL_MINT),          # [4]
-                    str(user_base_ata),      # [5]
-                    str(user_wsol_ata),      # [6]
-                    str(pool_base_ta),       # [7]
-                    str(pool_quote_ta),      # [8]
-                    str(user),               # [9] self-referral
-                    str(user_wsol_ata),      # [10] referral_wsol = user_wsol
-                    _TOKEN22_PROG_STR,       # [11]
-                    str(base_token_prog),    # [12] SPL Token or Token-2022 per mint
-                    _SYSTEM_PROG,            # [13]
-                    _ATA_PROG,               # [14]
-                    _EVENT_AUTH,             # [15]
-                    str(PUMPSWAP),           # [16]
-                    str(creator_wsol_ata),      # [17]
-                    str(creator_wallet),        # [18]
-                    str(global_volume_acc),     # [19] global_volume_accumulator PDA
-                    str(user_volume_acc),       # [20] user_volume_accumulator PDA
-                    _CONST_21,                  # [21]
-                    _CONST_22,                  # [22]
-                    _CONST_23,                  # [23]
+                    pool_address,                        # [0]
+                    str(user),                           # [1]
+                    _GLOBAL_CONFIG,                      # [2]
+                    pump_mint,                           # [3]
+                    str(WSOL_MINT),                      # [4]
+                    str(user_base_ata),                  # [5]
+                    str(user_wsol_ata),                  # [6]
+                    str(pool_base_ta),                   # [7]
+                    str(pool_quote_ta),                  # [8]
+                    str(_DEFAULT_FEE_RECIP),             # [9] valid protocol fee recipient
+                    str(_fee_recip_wsol_ata),            # [10] fee_recipient WSOL ATA
+                    _TOKEN22_PROG_STR,                   # [11] Token-2022 program
+                    _SPL_TOKEN_PROG,                     # [12] SPL Token program (WSOL)
+                    _SYSTEM_PROG,                        # [13]
+                    _ATA_PROG,                           # [14]
+                    _EVENT_AUTH,                         # [15]
+                    str(PUMPSWAP),                       # [16]
+                    str(creator_wsol_ata),               # [17] ATA(creator_wallet, WSOL)
+                    str(creator_wallet),                 # [18] pool_data[11:43]
+                    str(global_volume_acc),              # [19] global_volume_accumulator PDA
+                    str(user_volume_acc),                # [20] user_volume_accumulator PDA
+                    _CONST_21,                           # [21] pfee state account
+                    _CONST_22,                           # [22] pfee program
+                    str(_coin_creator_vault_23),         # [23] pfee PDA(coin_creator_vault, coin_creator)
                 ]
 
             # Writable / signer flags for each of the 24 accounts
@@ -1106,9 +1120,9 @@ class SolanaWallet:
                 (False, False),  # [18] creator      R
                 (True,  False),  # [19] global_vol_acc  W (init_if_needed)
                 (True,  False),  # [20] user_vol_acc   W (init_if_needed)
-                (False, False),  # [21] const          R
-                (False, False),  # [22] const        R
-                (False, False),  # [23] const        R
+                (False, False),  # [21] pfee state     R
+                (False, False),  # [22] pfee program   R
+                (True,  False),  # [23] coin_creator_vault W (init_if_needed PDA)
             ]
 
             account_metas = [
