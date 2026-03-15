@@ -15,6 +15,8 @@ Supported:
 - Slippage protection
 - Priority fees for fast execution
 """
+from __future__ import annotations
+
 import base64
 import json
 import logging
@@ -23,11 +25,13 @@ from typing import Optional
 
 import requests
 
+import config as _cfg
+
 logger = logging.getLogger(__name__)
 
 JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote"
 JUPITER_SWAP_URL  = "https://quote-api.jup.ag/v6/swap"
-SOLANA_RPC_URL    = "https://api.mainnet-beta.solana.com"
+SOLANA_RPC_URL    = _cfg.SOLANA_RPC_URL
 
 # Common token mints
 SOL_MINT   = "So11111111111111111111111111111111111111112"
@@ -61,12 +65,31 @@ class SolanaWallet:
             from solders.keypair import Keypair
             from solana.rpc.api import Client
 
-            # Phantom exports private key as base58 or byte array
+            # Phantom exports private key as base58 string or JSON byte array
+            key_str = self.private_key_b58.strip()
             try:
-                key_bytes = base64.b58decode(self.private_key_b58)
+                # Try base58 decode (most common Phantom export format)
+                import base58
+                key_bytes = base58.b58decode(key_str)
+            except ImportError:
+                # base58 not installed — try solders' from_base58_string
+                try:
+                    self._keypair = Keypair.from_base58_string(key_str)
+                    self._pubkey = str(self._keypair.pubkey())
+                    self._client = Client(SOLANA_RPC_URL)
+                    logger.info("Phantom wallet connected: %s...%s",
+                                self._pubkey[:6], self._pubkey[-4:])
+                    return
+                except Exception:
+                    # Last resort: JSON byte array [1,2,3,...]
+                    key_bytes = bytes(json.loads(key_str))
             except Exception:
-                # Try as JSON array
-                key_bytes = bytes(json.loads(self.private_key_b58))
+                # Not base58 — try JSON byte array
+                try:
+                    key_bytes = bytes(json.loads(key_str))
+                except Exception:
+                    logger.error("Cannot parse Phantom key — expected base58 string or JSON byte array")
+                    return
 
             self._keypair = Keypair.from_bytes(key_bytes)
             self._pubkey  = str(self._keypair.pubkey())
@@ -76,7 +99,7 @@ class SolanaWallet:
                         self._pubkey[:6], self._pubkey[-4:])
         except ImportError:
             logger.warning("solana/solders not installed. Solana trading disabled.")
-            logger.warning("Install: pip install solana solders")
+            logger.warning("Install: pip3 install solana solders")
         except Exception as e:
             logger.error("Wallet init failed: %s", e)
 
@@ -201,7 +224,7 @@ class SolanaWallet:
                 "quoteResponse": quote,
                 "userPublicKey": self._pubkey,
                 "wrapAndUnwrapSol": True,
-                "prioritizationFeeLamports": 10000,  # ~$0.001 priority fee
+                "prioritizationFeeLamports": _cfg.SOL_PRIORITY_FEE_LAMPORTS,
                 "dynamicComputeUnitLimit": True,
             }
             resp = requests.post(JUPITER_SWAP_URL, json=swap_payload, timeout=15)
@@ -295,7 +318,21 @@ class SolanaWallet:
             return int(usd_amount * 1e6)
 
     def _get_sol_price(self) -> float:
-        """Get current SOL price in USD."""
+        """Get current SOL price in USD via CoinCap (free, no key)."""
+        # Primary: CoinCap (reliable, free, no auth)
+        try:
+            resp = requests.get(
+                "https://api.coincap.io/v2/assets/solana",
+                timeout=5,
+                headers={"Accept": "application/json"},
+            )
+            if resp.ok:
+                price = float(resp.json()["data"]["priceUsd"])
+                if price > 0:
+                    return price
+        except Exception:
+            pass
+        # Fallback: CoinGecko
         try:
             resp = requests.get(
                 "https://api.coingecko.com/api/v3/simple/price",
@@ -306,4 +343,5 @@ class SolanaWallet:
                 return float(resp.json()["solana"]["usd"])
         except Exception:
             pass
-        return 150.0  # Fallback estimate
+        logger.warning("Could not fetch live SOL price from any source")
+        return 0.0

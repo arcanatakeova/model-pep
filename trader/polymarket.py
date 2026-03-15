@@ -10,6 +10,8 @@ Edge sources:
 - High-volume markets with inefficient pricing
 - Event-correlated position building
 """
+from __future__ import annotations
+
 import logging
 import time
 import requests
@@ -333,8 +335,12 @@ class PolymarketTrader:
             yes_tok = next((t for t in tokens if t.get("outcome", "").upper() == "YES"), {})
             no_tok  = next((t for t in tokens if t.get("outcome", "").upper() == "NO"),  {})
 
-            yes_price = float(yes_tok.get("price") or 0.5)
-            no_price  = float(no_tok.get("price")  or 0.5)
+            yes_price_raw = yes_tok.get("price")
+            no_price_raw  = no_tok.get("price")
+            if yes_price_raw is None and no_price_raw is None:
+                return None  # Skip markets with no price data
+            yes_price = float(yes_price_raw) if yes_price_raw is not None else 1.0 - float(no_price_raw)
+            no_price  = float(no_price_raw)  if no_price_raw is not None  else 1.0 - yes_price
 
             return PolyMarket(
                 condition_id   = m.get("condition_id", ""),

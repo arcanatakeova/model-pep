@@ -19,6 +19,8 @@ Usage:
   python main.py --report         # Full JSON report, exit
   python main.py --growth         # Show projected compound growth table
 """
+from __future__ import annotations
+
 import argparse
 import json
 import logging
@@ -28,12 +30,14 @@ import sys
 import time
 from datetime import datetime, timezone
 
-# Load .env if available
+# .env is loaded in config.py; this is a backup in case config hasn't been imported yet
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass
+    import sys
+    print("WARNING: python-dotenv not installed. API keys from .env won't load.", file=sys.stderr)
+    print("Install: pip3 install python-dotenv", file=sys.stderr)
 
 import config
 from portfolio import Portfolio
@@ -45,6 +49,7 @@ from dex_screener import DexScreener
 from polymarket import PolymarketTrader
 from solana_wallet import SolanaWallet
 import data_fetcher as df_mod
+import dashboard as _dash
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -107,6 +112,10 @@ class AITrader:
         # Load saved state
         self.portfolio.load()
         self.risk_mgr.reset_daily_loss_tracker()
+
+        # ── Start web dashboard ────────────────────────────────────────────
+        _dash.set_trader(self)
+        self._dashboard_thread = _dash.start_dashboard_thread(port=8888)
 
         # Sync initial capital with Phantom wallet if connected
         if self.solana.is_connected and live:

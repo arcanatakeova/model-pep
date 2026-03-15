@@ -2,6 +2,8 @@
 Portfolio — Tracks cash, open positions, trade history, and P&L.
 Thread-safe for concurrent market scanning.
 """
+from __future__ import annotations
+
 import json
 import logging
 import threading
@@ -125,9 +127,9 @@ class Portfolio:
             }
             self.closed_trades.append(trade)
 
-            emoji = "✓" if pnl >= 0 else "✗"
-            logger.info("%s CLOSE %s %s @ $%.4f | PnL: $%.2f (%.2f%%) | %s",
-                        emoji, side.upper(), asset_id, price,
+            tag = "WIN" if pnl >= 0 else "LOSS"
+            logger.info("[%s] CLOSE %s %s @ $%.4f | PnL: $%.2f (%.2f%%) | %s",
+                        tag, side.upper(), asset_id, price,
                         pnl, pnl_pct, reason)
 
             # Update peak equity
@@ -151,9 +153,19 @@ class Portfolio:
             return {
                 "equity": round(eq, 2),
                 "cash": round(self.cash, 2),
+                "initial_capital": self.initial_capital,
                 "total_return_pct": round(total_return, 2),
+                "total_pnl_usd": 0.0,
                 "total_trades": 0,
+                "winning_trades": 0,
+                "losing_trades": 0,
+                "win_rate_pct": 0.0,
+                "avg_win_pct": 0.0,
+                "avg_loss_pct": 0.0,
+                "profit_factor": 0.0,
+                "max_drawdown_pct": round(max_dd, 2),
                 "open_positions": len(self.open_positions),
+                "markets": {},
             }
 
         winning = [t for t in closed if t["pnl_usd"] > 0]

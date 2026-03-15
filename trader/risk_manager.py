@@ -8,6 +8,8 @@ Implements:
 - Daily loss circuit breaker
 - Volatility-adjusted position sizing
 """
+from __future__ import annotations
+
 import logging
 import math
 from typing import Optional
@@ -26,8 +28,8 @@ class RiskManager:
     def __init__(self, portfolio):
         self.portfolio = portfolio
         self._daily_loss_start_equity: Optional[float] = None
-        self._daily_loss_limit = 0.05    # 5% max daily drawdown before circuit break
-        self._max_drawdown_limit = 0.15  # 15% max drawdown from peak
+        self._daily_loss_limit = 0.10    # 10% max daily drawdown before circuit break
+        self._max_drawdown_limit = 0.25  # 25% max drawdown from peak
 
     # ─────────────────────────────────────────────────────────────────────────
     # Position Sizing

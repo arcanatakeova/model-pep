@@ -1,5 +1,5 @@
 """
-Data Fetcher - Retrieves market data from free public APIs.
+Data Fetcher — Retrieves market data from free public APIs.
 
 Sources:
   - CoinGecko  : crypto OHLCV, market cap, volume (free, no key)
@@ -8,6 +8,8 @@ Sources:
   - ExchangeRate API: forex rates (free, no key)
   - Yahoo Finance (yfinance): stocks & ETFs (unofficial, no key)
 """
+from __future__ import annotations
+
 import time
 import logging
 import requests
@@ -45,13 +47,16 @@ def _get(url: str, params: dict = None, timeout: int = 10) -> Optional[dict]:
             resp = requests.get(url, params=params, headers=headers, timeout=timeout)
             if resp.status_code == 429:
                 wait = 2 ** attempt * 5
-                logger.warning("Rate limited by %s, waiting %ds", url, wait)
+                logger.debug("Rate limited by %s, waiting %ds", url, wait)
                 time.sleep(wait)
                 continue
+            if resp.status_code in (401, 403):
+                logger.debug("Auth required for %s (free tier limit) — skipping", url)
+                return None
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as e:
-            logger.warning("Request failed (%s): %s", url, e)
+            logger.debug("Request failed (%s): %s", url, e)
             if attempt < 2:
                 time.sleep(2 ** attempt)
     return None
@@ -81,16 +86,51 @@ def get_top_coins(n: int = config.CRYPTO_TOP_N) -> list[dict]:
     return _store(key, result)
 
 
+# CoinGecko ID → CryptoCompare ticker symbol
+_CG_TO_CC: dict = {
+    "bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL",
+    "binancecoin": "BNB", "bnb": "BNB", "avalanche-2": "AVAX",
+    "chainlink": "LINK", "polkadot": "DOT", "cardano": "ADA",
+    "polygon": "MATIC", "matic-network": "MATIC", "arbitrum": "ARB",
+    "optimism": "OP", "uniswap": "UNI", "aave": "AAVE",
+    "maker": "MKR", "compound-governance-token": "COMP",
+    "cosmos": "ATOM", "near-protocol": "NEAR", "fantom": "FTM",
+    "algorand": "ALGO", "hedera-hashgraph": "HBAR", "dogecoin": "DOGE",
+    "ripple": "XRP", "litecoin": "LTC", "stellar": "XLM",
+    "tron": "TRX", "ethereum-classic": "ETC", "bitcoin-cash": "BCH",
+    "internet-computer": "ICP", "filecoin": "FIL", "aptos": "APT",
+    "sui": "SUI", "injective-protocol": "INJ", "render-token": "RNDR",
+    "the-graph": "GRT", "decentraland": "MANA", "sandbox": "SAND",
+    "axie-infinity": "AXS", "mantle": "MNT", "rain": "RAIN",
+    "whitebit": "WBT", "ethena-usde": "USDE", "usds": "USDS",
+    "usd-coin": "USDC", "tether": "USDT", "figure-heloc": "HELOC",
+    "crypto-com-chain": "CRO",
+}
+
+
+def _cc_symbol(coin_id: str) -> str:
+    """Map a CoinGecko coin ID to its CryptoCompare ticker symbol."""
+    return _CG_TO_CC.get(coin_id.lower(), coin_id.upper().split("-")[0])
+
+
 def get_coin_ohlcv(coin_id: str, days: int = 30, interval: str = "hourly") -> pd.DataFrame:
     """
-    Fetch OHLCV data for a coin from CoinGecko.
-    Returns DataFrame with columns: timestamp, open, high, low, close, volume.
+    Fetch OHLCV data for a coin.
+    Uses CryptoCompare as primary source (free, reliable, no key needed).
+    Falls back to CoinGecko /ohlc if CryptoCompare returns nothing.
     """
     key = f"ohlcv_{coin_id}_{days}_{interval}"
     cached = _cached(key, ttl=120)
     if cached is not None:
         return cached
 
+    # ── Primary: CryptoCompare (full OHLCV, no API key required) ─────────────
+    cc_sym = _cc_symbol(coin_id)
+    df = get_crypto_ohlcv_cc(cc_sym, limit=min(days * 24, 100))
+    if not df.empty:
+        return _store(key, df)
+
+    # ── Fallback: CoinGecko /ohlc (no volume, no market_chart) ───────────────
     data = _get(
         f"{config.COINGECKO_BASE}/coins/{coin_id}/ohlc",
         params={"vs_currency": "usd", "days": days},
@@ -101,32 +141,30 @@ def get_coin_ohlcv(coin_id: str, days: int = 30, interval: str = "hourly") -> pd
     df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     df = df.sort_values("timestamp").reset_index(drop=True)
-
-    # CoinGecko OHLC doesn't include volume — fetch it separately
-    vol_data = _get(
-        f"{config.COINGECKO_BASE}/coins/{coin_id}/market_chart",
-        params={"vs_currency": "usd", "days": days, "interval": interval},
-    )
-    if vol_data and "total_volumes" in vol_data:
-        vdf = pd.DataFrame(vol_data["total_volumes"], columns=["timestamp", "volume"])
-        vdf["timestamp"] = pd.to_datetime(vdf["timestamp"], unit="ms", utc=True)
-        # Resample volumes to match OHLC frequency
-        vdf = vdf.set_index("timestamp").resample("1h").last().reset_index()
-        df = pd.merge_asof(df.sort_values("timestamp"), vdf.sort_values("timestamp"),
-                           on="timestamp", direction="nearest")
-    else:
-        df["volume"] = 0.0
+    df["volume"] = 0.0   # /ohlc has no volume; market_chart requires paid key
 
     return _store(key, df)
 
 
 def get_coin_price(coin_id: str) -> Optional[float]:
-    """Get current USD price of a coin."""
+    """Get current USD price of a coin. Tries CoinCap first, CoinGecko fallback."""
     key = f"price_{coin_id}"
     cached = _cached(key, ttl=30)
     if cached is not None:
         return cached
 
+    # Primary: CoinCap (free, no key, reliable)
+    coincap_id = coin_id.lower().replace("_", "-")
+    cap_data = _get(f"{config.COINCAP_BASE}/assets/{coincap_id}")
+    if cap_data and "data" in cap_data:
+        try:
+            price = float(cap_data["data"]["priceUsd"])
+            if price > 0:
+                return _store(key, price)
+        except (KeyError, ValueError, TypeError):
+            pass
+
+    # Fallback: CoinGecko
     data = _get(
         f"{config.COINGECKO_BASE}/simple/price",
         params={"ids": coin_id, "vs_currencies": "usd", "include_24hr_vol": True},

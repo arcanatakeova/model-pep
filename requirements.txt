@@ -1,8 +1,9 @@
 # AI Trader — Python Dependencies
-# Install: pip install -r requirements.txt
+# Install: pip3 install -r requirements.txt
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 requests>=2.31.0            # HTTP client for all API calls
+flask>=3.0.0                # Web dashboard server (http://localhost:8888)
 pandas>=2.0.0               # Data manipulation and time series analysis
 numpy>=1.24.0               # Numerical computations for indicators
 python-dotenv>=1.0.0        # Load API keys from .env file
@@ -14,14 +15,14 @@ yfinance>=0.2.18            # Yahoo Finance (stocks, ETFs, indices)
 # Required for live Solana trading via Phantom wallet + Jupiter DEX
 solana>=0.30.2              # Solana Python SDK (RPC client)
 solders>=0.18.1             # Rust-based Solana types (Keypair, Pubkey, etc.)
+base58>=2.1.0               # Base58 encoding for Phantom private keys
 
 # ── Polymarket ────────────────────────────────────────────────────────────────
 # Required for live Polymarket prediction market trading
 py-clob-client>=0.12.0      # Official Polymarket CLOB client
 
-# ── CEX Live Trading (optional) ───────────────────────────────────────────────
-# Uncomment to enable live trading on Binance, Coinbase, etc.
-# ccxt>=4.0.0               # Unified crypto exchange API
+# ── CEX Live Trading ─────────────────────────────────────────────────────────
+ccxt>=4.0.0                 # Unified crypto exchange API (Coinbase, Binance, etc.)
 
 # ── Development ───────────────────────────────────────────────────────────────
 # pytest>=7.0.0

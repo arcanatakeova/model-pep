@@ -16,12 +16,18 @@ Philosophy:
 - Rotate capital into highest-performing market types
 - Scale aggression as the system proves itself
 """
+from __future__ import annotations
+
 import json
 import logging
 import os
 import time
 from datetime import datetime, timezone
 from typing import Optional
+
+import numpy as np
+
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +155,6 @@ class CompoundingEngine:
         max_pos = market_budget * 0.25 * scale
 
         # Also cap at absolute position limit from risk manager config
-        import config
         abs_max = self.portfolio.equity() * config.MAX_POSITION_PCT * scale
         return min(max_pos, abs_max)
 
@@ -211,7 +216,6 @@ class CompoundingEngine:
         Reward markets that are making money, reduce losing markets.
         Uses a softmax-style reweighting.
         """
-        import numpy as np
 
         # Performance scores per market
         scores = {}
@@ -258,7 +262,7 @@ class CompoundingEngine:
                 prev_eq = self._equity_at_last_rebalance
                 if prev_eq < threshold <= equity:
                     pct = (equity - self.portfolio.initial_capital) / self.portfolio.initial_capital * 100
-                    logger.info("🎯 MILESTONE: %s Portfolio ($%.0f) | +%.1f%% total return",
+                    logger.info("MILESTONE: %s Portfolio ($%.0f) | +%.1f%% total return",
                                 name, equity, pct)
 
     # ─── Compound Growth Calculator ───────────────────────────────────────────

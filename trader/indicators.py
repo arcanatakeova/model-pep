@@ -2,6 +2,8 @@
 Technical Indicators — pure NumPy/Pandas implementations.
 No external TA library required.
 """
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from typing import Optional
@@ -52,19 +54,19 @@ def rsi_signal(close: pd.Series) -> float:
     latest = r.iloc[-1]
     if pd.isna(latest):
         return 0.0
-    # Linear mapping: 20→+1, 35→+0.5, 50→0, 65→-0.5, 80→-1
-    if latest <= 20:
+    # Linear mapping using config thresholds
+    deep_oversold = config.RSI_OVERSOLD - 15  # e.g. 20 if oversold=35
+    deep_overbought = config.RSI_OVERBOUGHT + 15  # e.g. 80 if overbought=65
+    if latest <= deep_oversold:
         return 1.0
     elif latest <= config.RSI_OVERSOLD:
-        return 0.5 + 0.5 * (config.RSI_OVERSOLD - latest) / (config.RSI_OVERSOLD - 20)
+        return 0.5 + 0.5 * (config.RSI_OVERSOLD - latest) / (config.RSI_OVERSOLD - deep_oversold)
     elif latest <= 50:
-        return 0.5 * (50 - latest) / (50 - config.RSI_OVERSOLD)
-    elif latest < 50:
         return 0.5 * (50 - latest) / (50 - config.RSI_OVERSOLD)
     elif latest < config.RSI_OVERBOUGHT:
         return -0.5 * (latest - 50) / (config.RSI_OVERBOUGHT - 50)
-    elif latest < 80:
-        return -0.5 - 0.5 * (latest - config.RSI_OVERBOUGHT) / (80 - config.RSI_OVERBOUGHT)
+    elif latest < deep_overbought:
+        return -0.5 - 0.5 * (latest - config.RSI_OVERBOUGHT) / (deep_overbought - config.RSI_OVERBOUGHT)
     else:
         return -1.0
 
