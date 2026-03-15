@@ -407,7 +407,7 @@ class DexScreener:
             logger.debug("Parse error: %s", e)
             return None
 
-    def _get(self, url: str, params: dict = None, timeout: int = 10) -> Optional[dict | list]:
+    def _get(self, url: str, params: dict = None, timeout: int = 10):
         cache_key = f"{url}:{params}"
         if cache_key in self._cache:
             val, ts = self._cache[cache_key]
