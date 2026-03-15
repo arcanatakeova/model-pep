@@ -219,10 +219,12 @@ class TradeExecutor:
             signal.asset_id, "long", qty, fill_price,
             signal.stop_loss, signal.take_profit, signal.to_dict()
         )
-        if pos:
-            PositionMonitor(signal.asset_id, self)
-            logger.info("EXECUTED BUY  %-12s $%.4f × %.6f = $%.2f | Score: %.2f | Conv: %.2f",
-                        signal.symbol, fill_price, qty, size_usd, signal.score, signal.conviction)
+        if not pos:
+            self.portfolio.cash += commission  # Restore commission if open failed
+            return None
+        PositionMonitor(signal.asset_id, self)
+        logger.info("EXECUTED BUY  %-12s $%.4f × %.6f = $%.2f | Score: %.2f | Conv: %.2f",
+                    signal.symbol, fill_price, qty, size_usd, signal.score, signal.conviction)
         return pos
 
     def _open_short(self, signal: TradeSignal) -> Optional[dict]:
@@ -265,10 +267,12 @@ class TradeExecutor:
             signal.asset_id, "short", qty, fill_price,
             signal.stop_loss, signal.take_profit, signal.to_dict()
         )
-        if pos:
-            PositionMonitor(signal.asset_id, self)
-            logger.info("EXECUTED SELL %-12s $%.4f × %.6f = $%.2f | Score: %.2f | Conv: %.2f",
-                        signal.symbol, fill_price, qty, size_usd, signal.score, signal.conviction)
+        if not pos:
+            self.portfolio.cash += commission  # Restore commission if open failed
+            return None
+        PositionMonitor(signal.asset_id, self)
+        logger.info("EXECUTED SELL %-12s $%.4f × %.6f = $%.2f | Score: %.2f | Conv: %.2f",
+                    signal.symbol, fill_price, qty, size_usd, signal.score, signal.conviction)
         return pos
 
     def _maybe_close(self, asset_id: str, current_price: float, signal: TradeSignal) -> Optional[dict]:

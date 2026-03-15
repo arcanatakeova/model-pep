@@ -153,23 +153,27 @@ class BirdeyeClient:
                  for m in mint_addresses if m not in stale}
 
         if stale:
-            # Birdeye multi_price: list_address is comma-separated
-            data = self._get("/defi/multi_price",
-                             {"list_address": ",".join(stale)})
-            if data and data.get("success"):
-                for addr, d in (data.get("data") or {}).items():
-                    if not d:
-                        continue
-                    p = BirdeyePrice(
-                        address=addr,
-                        price_usd=float(d.get("value", 0) or 0),
-                        price_change_24h_pct=float(d.get("priceChange24H", 0) or 0),
-                        volume_24h_usd=float(d.get("volume24H", 0) or 0),
-                        liquidity_usd=float(d.get("liquidity", 0) or 0),
-                        fetched_at=now,
-                    )
-                    self._price_cache[addr] = (p, now)
-                    fresh[addr] = p
+            # Birdeye multi_price: list_address is comma-separated.
+            # Cap batch size at 100 to avoid silent URL truncation.
+            _BATCH = 100
+            for i in range(0, len(stale), _BATCH):
+                batch = stale[i:i + _BATCH]
+                data = self._get("/defi/multi_price",
+                                 {"list_address": ",".join(batch)})
+                if data and data.get("success"):
+                    for addr, d in (data.get("data") or {}).items():
+                        if not d:
+                            continue
+                        p = BirdeyePrice(
+                            address=addr,
+                            price_usd=float(d.get("value", 0) or 0),
+                            price_change_24h_pct=float(d.get("priceChange24H", 0) or 0),
+                            volume_24h_usd=float(d.get("volume24H", 0) or 0),
+                            liquidity_usd=float(d.get("liquidity", 0) or 0),
+                            fetched_at=now,
+                        )
+                        self._price_cache[addr] = (p, now)
+                        fresh[addr] = p
             self._evict_cache(self._price_cache, self._PRICE_TTL)
 
         return fresh

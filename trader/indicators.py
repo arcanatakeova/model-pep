@@ -39,7 +39,10 @@ def rsi(close: pd.Series, period: int = config.RSI_PERIOD) -> pd.Series:
     avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
     avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    # Pure uptrend (avg_loss = 0, avg_gain > 0) → RSI should be 100, not NaN
+    rsi = rsi.where(avg_loss != 0, other=100.0)
+    return rsi
 
 
 def rsi_signal(close: pd.Series) -> float:
