@@ -201,6 +201,9 @@ class AITrader:
             self._equity_curve = []
 
         self.portfolio.load()
+        # Restart PositionMonitor threads for any CEX positions loaded from disk
+        # so existing open positions are still monitored for stop-loss / take-profit.
+        self.executor.restart_monitors_for_loaded_positions()
         self._load_dex_positions()
         self._reconcile_wallet_positions()
         self.risk_mgr.reset_daily_loss_tracker()
@@ -487,9 +490,11 @@ class AITrader:
             # Update existing grids
             self.grid_trader.update_all_grids()
             self.grid_trader.recenter_grids()
-            # Auto-open grids when market is ranging
-            if self._cex_signals_cache:
-                self.grid_trader.maybe_open_grids(self._cex_signals_cache)
+            # Auto-open grids when market is ranging (copy under lock to avoid race)
+            with self._cex_cache_lock:
+                cached_signals = list(self._cex_signals_cache)
+            if cached_signals:
+                self.grid_trader.maybe_open_grids(cached_signals)
             summary = self.grid_trader.summary()
             if summary["active_grids"] > 0:
                 logger.info("Grid: %d active | %d fills | pnl=$%.2f",
@@ -621,15 +626,20 @@ class AITrader:
 
                 confirms = self._has_confirming_signal(symbol, pos["side"])
                 if confirms:
+                    # Mark pyramided before the atomic add to prevent double-pyramid
+                    # if another thread sees the position between the two writes.
                     pos["pyramided"] = True
-                    # Add to position at current price
                     fill = self.executor._fill_price(current, "buy" if pos["side"] == "long" else "sell")
                     qty_add = self.risk_mgr.qty_from_usd(add_size, fill)
                     if qty_add <= 0:
                         logger.warning("Pyramid skipped %s: invalid fill price %.4f", symbol, fill)
+                        pos["pyramided"] = False   # Roll back the flag
                         continue
-                    pos["qty"] = pos.get("qty", 0) + qty_add
-                    self.portfolio.cash -= add_size
+                    # Use atomic portfolio method — protects qty and cash under the lock
+                    if not self.portfolio.add_to_position(asset_id, qty_add, add_size):
+                        logger.warning("Pyramid failed %s: insufficient cash or position gone", symbol)
+                        pos["pyramided"] = False
+                        continue
                     logger.info("PYRAMID %-12s +25%% ($%.2f) @ $%.4f | pnl so far: +%.1f%%",
                                 symbol, add_size, fill, pnl_pct * 100)
         except Exception as e:

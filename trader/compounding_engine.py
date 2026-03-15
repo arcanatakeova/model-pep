@@ -23,6 +23,8 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
+import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,7 +65,9 @@ class CompoundingEngine:
             (1_000_000, "Million"),
         ]
 
-        self._equity_at_last_rebalance = 0.0
+        # Initialise to current equity so _check_milestones doesn't fire every
+        # milestone below the starting balance on the first rebalance cycle.
+        self._equity_at_last_rebalance = portfolio.equity()
         self._cycle_count = 0
         self._stats_processed_count = 0   # Incremental cursor for market stats
 
@@ -147,7 +151,6 @@ class CompoundingEngine:
         max_pos = market_budget * 0.25 * scale
 
         # Also cap at absolute position limit from risk manager config
-        import config
         abs_max = self.portfolio.equity() * config.MAX_POSITION_PCT * scale
         return min(max_pos, abs_max)
 

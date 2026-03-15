@@ -135,7 +135,6 @@ class RiskManager:
         trail_stop    = position.get("trailing_stop")
 
         if side == "long":
-            pnl_pct = (current_price - entry_price) / entry_price
             # Take profit
             if current_price >= take_profit:
                 return True, f"Take profit hit ({current_price:.4f} >= {take_profit:.4f})"
@@ -146,7 +145,6 @@ class RiskManager:
             if trail_stop and current_price <= trail_stop:
                 return True, f"Trailing stop hit ({current_price:.4f} <= {trail_stop:.4f})"
         else:  # short
-            pnl_pct = (entry_price - current_price) / entry_price
             if current_price <= take_profit:
                 return True, f"Take profit hit ({current_price:.4f} <= {take_profit:.4f})"
             if current_price >= stop_loss:
