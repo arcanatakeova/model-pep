@@ -1346,6 +1346,7 @@ class AITrader:
         from portfolio import _MAX_CLOSED_TRADES_MEMORY
         if len(self.portfolio.closed_trades) > _MAX_CLOSED_TRADES_MEMORY:
             self.portfolio._archive_old_trades()
+        return True
 
     def _execute_partial_profit(self, pair_addr: str, pos: dict,
                                  fraction: float, reason: str, threshold_pct: float = 0):
