@@ -109,17 +109,59 @@ class PolymarketTrader:
             self._init_client()
 
     def _init_client(self):
-        """Initialize py-clob-client for live trading."""
+        """
+        Initialize py-clob-client with L2 API credentials.
+
+        Flow:
+        1. Build a base L1 client from the EVM private key.
+        2. Call create_or_derive_api_creds() — derives deterministic creds from
+           the wallet signature (idempotent: same key always gives same creds).
+        3. Re-initialise with the full ApiCreds so authenticated endpoints work.
+        """
         try:
             from py_clob_client.client import ClobClient
-            self._client = ClobClient(
+            from py_clob_client.clob_types import ApiCreds
+
+            import config as _cfg
+
+            # ── Step 1: L1 client (wallet-only, no creds yet) ─────────────
+            l1 = ClobClient(
                 host=CLOB_BASE,
                 key=self.private_key,
                 chain_id=self.chain_id,
             )
-            logger.info("Polymarket CLOB client initialized (live mode)")
+
+            # ── Step 2: derive or load L2 API credentials ─────────────────
+            if _cfg.POLYMARKET_API_KEY and _cfg.POLYMARKET_API_SECRET and _cfg.POLYMARKET_PASSPHRASE:
+                creds = ApiCreds(
+                    api_key=_cfg.POLYMARKET_API_KEY,
+                    api_secret=_cfg.POLYMARKET_API_SECRET,
+                    api_passphrase=_cfg.POLYMARKET_PASSPHRASE,
+                )
+                logger.info("Polymarket: using cached L2 API credentials")
+            else:
+                raw = l1.create_or_derive_api_creds()
+                creds = ApiCreds(
+                    api_key=raw.get("apiKey", ""),
+                    api_secret=raw.get("secret", ""),
+                    api_passphrase=raw.get("passphrase", ""),
+                )
+                logger.info(
+                    "Polymarket: derived L2 creds (set POLYMARKET_API_KEY/SECRET/PASSPHRASE "
+                    "in .env to skip re-derivation). apiKey=%s", creds.api_key
+                )
+
+            # ── Step 3: full authenticated client ─────────────────────────
+            self._client = ClobClient(
+                host=CLOB_BASE,
+                key=self.private_key,
+                chain_id=self.chain_id,
+                creds=creds,
+            )
+            logger.info("Polymarket CLOB client ready (live mode, L2 auth)")
+
         except ImportError:
-            logger.warning("py-clob-client not installed. Polymarket trading in data-only mode.")
+            logger.warning("py-clob-client not installed — Polymarket in data-only mode.")
         except Exception as e:
             logger.warning("Polymarket client init failed: %s", e)
 
@@ -325,21 +367,25 @@ class PolymarketTrader:
                     "price": signal.target_price, "market": signal.market.condition_id}
 
         try:
+            from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions
+            from py_clob_client.order_builder.constants import BUY
+
             token_id = (signal.market.yes_token_id
                         if signal.side == "YES"
                         else signal.market.no_token_id)
 
-            from py_clob_client.clob_types import OrderArgs, OrderType
             order_args = OrderArgs(
                 token_id=token_id,
-                price=signal.target_price,
-                size=size_usdc / signal.target_price,
-                side="BUY",
+                price=round(signal.target_price, 4),
+                size=round(size_usdc / signal.target_price, 2),
+                side=BUY,
             )
-            resp = self._client.create_and_post_order(order_args)
-            logger.info("Polymarket ORDER placed: %s %s @ %.4f (id: %s)",
+            signed = self._client.create_order(order_args)
+            resp   = self._client.post_order(signed)
+            order_id = (resp or {}).get("orderID", "?")
+            logger.info("Polymarket ORDER placed: %s %s @ %.4f size=%.2f (id: %s)",
                         signal.side, signal.market.question[:40],
-                        signal.target_price, resp.get("orderID", "?"))
+                        signal.target_price, size_usdc, order_id)
             return resp
         except Exception as e:
             logger.error("Polymarket order failed: %s", e)

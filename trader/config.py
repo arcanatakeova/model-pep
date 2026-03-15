@@ -207,6 +207,10 @@ JITO_TIP_LAMPORTS = 1_000_000      # 0.001 SOL tip — market-rate to avoid MEV 
 
 # ─── Polymarket ───────────────────────────────────────────────────────────────
 POLYMARKET_PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY", "")  # Polygon EVM key
+# L2 API credentials (auto-derived on first run via create_or_derive_api_creds)
+POLYMARKET_API_KEY    = os.getenv("POLYMARKET_API_KEY",    "")
+POLYMARKET_API_SECRET = os.getenv("POLYMARKET_API_SECRET", "")
+POLYMARKET_PASSPHRASE = os.getenv("POLYMARKET_PASSPHRASE", "")
 POLYMARKET_MIN_EDGE = 0.04         # Minimum 4% edge to trade
 POLYMARKET_MIN_VOLUME = 5_000      # Minimum $5k/24h market volume
 POLYMARKET_MAX_POSITION_USD = 200  # Max per prediction market position
