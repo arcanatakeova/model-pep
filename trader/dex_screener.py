@@ -50,11 +50,11 @@ RAYDIUM_BASE     = "https://api-v3.raydium.io"
 JUPITER_PRICE    = "https://api.jup.ag/price/v2"
 
 # ── Hard filters (applied before scoring) ──────────────────────────────────────
-MIN_LIQUIDITY_USD  = 8_000       # $8k — slightly lower catches early pumps
-MIN_VOLUME_H24_USD = 15_000      # $15k/24h
-MIN_MARKET_CAP     = 30_000      # $30k mcap (pump.fun tokens start small)
+MIN_LIQUIDITY_USD  = 5_000       # $5k — catch early pumps (was 8k: missed entries)
+MIN_VOLUME_H24_USD = 10_000      # $10k/24h (was 15k: too restrictive for new tokens)
+MIN_MARKET_CAP     = 15_000      # $15k mcap (was 30k: pump.fun starts small)
 MAX_MARKET_CAP     = 500_000_000 # $500M ceiling
-MAX_PAIR_AGE_HOURS = 96          # Up to 4 days
+MAX_PAIR_AGE_HOURS = 24          # 24h max (was 96: dead tokens waste API calls)
 PREFERRED_CHAINS   = ["solana"]
 
 # Search terms — broad coverage across naming conventions
@@ -503,6 +503,22 @@ class DexScreener:
                 elif vol_ratio < 0.5:
                     score -= 0.05   # Volume fading
 
+        # ── BURST MODE detection — strongest alpha signal ────────────────
+        # When vol explodes + price pumps + heavy buying all at once = BURST
+        # These tokens move 200-500% — get in immediately
+        _vol_ratio = 0.0
+        if token.volume_h1 > 0 and token.volume_h24 > 0:
+            _hourly_avg = token.volume_h24 / 24
+            _vol_ratio = token.volume_h1 / _hourly_avg if _hourly_avg > 0 else 0
+        _is_burst = (
+            _vol_ratio > 5
+            and token.price_change_h1 > 10
+            and token.buys_h1 > 100
+        )
+        if _is_burst:
+            score += 0.15
+            signals.append("BURST MODE: vol+price+buys aligned")
+
         # ── Transaction velocity (15%) — raw activity level ───────────────
         total_txns_h1 = token.buys_h1 + token.sells_h1
         bsr = token.buy_sell_ratio_h1
@@ -545,36 +561,47 @@ class DexScreener:
         elif liq > 50_000:
             score += 0.02
 
-        # ── Age bonus (5%) — early mover advantage ────────────────────────
+        # ── Age bonus (10%) — early mover advantage (boosted) ────────────
         age = token.age_hours
         if age is not None:
-            if age < 0.5:
-                score += 0.08   # Brand new (<30min) — maximum early bonus
-                signals.append(f"Brand new (<30min)")
-            elif age < 2:
-                score += 0.06
+            if age < 0.25:
+                score += 0.15   # <15min — maximum alpha window
+                signals.append("FRESH (<15min)")
+            elif age < 0.5:
+                score += 0.12   # Brand new (<30min)
+                signals.append("Brand new (<30min)")
+            elif age < 1:
+                score += 0.09
                 signals.append(f"Very new ({age*60:.0f}min old)")
+            elif age < 3:
+                score += 0.06
+                signals.append(f"New ({age*60:.0f}min old)")
             elif age < 6:
-                score += 0.05
-                signals.append(f"New ({age:.0f}h old)")
-            elif age < 24:
-                score += 0.03
-            elif age > 168:
-                score -= 0.03
+                score += 0.04
+            elif age < 12:
+                score += 0.02
+            elif age > 18:
+                score -= 0.05   # Stale — momentum probably dead
 
         # ── Holder concentration guard (Birdeye token_overview data) ─────
-        # Very few unique holders = concentrated ownership = rug risk regardless
-        # of how strong the price momentum looks.
         if token.holder_count > 0:
-            if token.holder_count < 50:
+            if token.holder_count < 20:
+                # <20 holders = almost certainly a rug (hard block)
                 token.score = 0.0
-                token.signals = [f"BLOCKED: only {token.holder_count} holders (rug risk)"]
+                token.signals = [f"BLOCKED: only {token.holder_count} holders"]
                 return 0.0
+            elif token.holder_count < 50:
+                # 20-50: risky but allow if token is very new (< 1h old)
+                if age is not None and age < 1:
+                    score -= 0.05   # Mild penalty — new tokens always start small
+                    signals.append(f"New token, {token.holder_count} holders")
+                else:
+                    score -= 0.15   # Older token with few holders = red flag
+                    signals.append(f"Few holders ({token.holder_count})")
             elif token.holder_count < 200:
-                score -= 0.10
-                signals.append(f"Few holders ({token.holder_count})")
+                score -= 0.06
             elif token.holder_count > 2000:
-                score += 0.03
+                score += 0.04
                 signals.append(f"Good distribution ({token.holder_count} holders)")
 
         # ── Unique wallets (trading breadth) ──────────────────────────────
@@ -585,11 +612,13 @@ class DexScreener:
             score -= 0.05   # Thin trading = manipulation risk
 
         # ── Source bonus ──────────────────────────────────────────────────
-        # Pump.fun tokens discovered on the live feed get a freshness bonus
-        if token.source == "pumpfun":
-            score += 0.04
+        if token.source == "pumpfun_new":
+            score += 0.08   # Freshest pump.fun tokens — fastest movers
+            signals.append("Pump.fun NEW")
+        elif token.source == "pumpfun":
+            score += 0.05
         elif token.source == "raydium":
-            score += 0.02   # Raydium = real liquidity, slight quality bonus
+            score += 0.02
 
         # ── Solana chain preference ───────────────────────────────────────
         if token.chain_id == "solana":
@@ -609,21 +638,28 @@ class DexScreener:
             if token.safety_report is not None:
                 safety = token.safety_report
                 if not safety.is_safe_to_trade:
-                    token.score = 0.0
-                    token.signals = [f"BLOCKED: {safety.risk_level} risk"] + safety.risk_flags[:2]
-                    return 0.0
-                w = config.SAFETY_SCORE_WEIGHT
-                score = score * (1 - w) + safety.safety_score * w
+                    # High-conviction override: if score is strong enough, allow
+                    # MEDIUM-risk tokens through with a penalty instead of hard block
+                    if score >= 0.55 and safety.risk_level == "MEDIUM":
+                        score *= 0.65
+                        signals.append(f"OVERRIDE: {safety.risk_level} risk (high conviction)")
+                    else:
+                        token.score = 0.0
+                        token.signals = [f"BLOCKED: {safety.risk_level} risk"] + safety.risk_flags[:2]
+                        return 0.0
+                else:
+                    w = config.SAFETY_SCORE_WEIGHT
+                    score = score * (1 - w) + safety.safety_score * w
                 if safety.risk_level in ("SAFE", "LOW"):
                     signals.append(f"Safe ({safety.safety_score:.2f})")
                 elif safety.risk_level == "MEDIUM":
                     flag = safety.risk_flags[0] if safety.risk_flags else "caution"
                     signals.append(f"MEDIUM risk: {flag}")
                 elif safety.risk_level == "HIGH":
-                    score *= 0.60   # Heavy penalty for HIGH risk
+                    score *= 0.50   # Heavy penalty for HIGH risk (was 0.60)
                     signals.append(f"HIGH risk ({safety.safety_score:.2f})")
             else:
-                score *= 0.80   # Penalise unverified tokens
+                score *= 0.85   # Mild penalty for unverified (was 0.80)
 
         token.score = float(np.clip(score, 0.0, 1.0))
         token.signals = signals[:5]   # cap at 5 signal tags

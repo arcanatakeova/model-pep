@@ -227,14 +227,13 @@ class TokenSafetyChecker:
             if top10 > 1:
                 top10 = top10 / 100.0
             if top10 > 0.90:
-                score -= 0.45
+                score -= 0.35
                 flags.append(f"Top 10 holders own {top10:.0%} (extreme concentration)")
-            elif top10 > 0.70:
-                # Tighter than old 0.85 threshold — memecoins with 70%+ top10 = rug risk
-                score -= 0.30
+            elif top10 > 0.80:
+                score -= 0.20
                 flags.append(f"Top 10 holders own {top10:.0%} (high concentration)")
-            elif top10 > 0.55:
-                score -= 0.10
+            elif top10 > 0.65:
+                score -= 0.08
                 flags.append(f"Top 10 holders own {top10:.0%}")
 
         # ─── LP lock status ────────────────────────────────────────────────────
@@ -269,10 +268,10 @@ class TokenSafetyChecker:
         # ─── Round-trip tax penalty ────────────────────────────────────────────
         if round_trip_tax is not None:
             if round_trip_tax > config.MAX_ROUND_TRIP_TAX_PCT:
-                score -= 0.30
+                score -= 0.20   # Was -0.30: too harsh for memecoins with built-in fees
                 flags.append(f"High tax: {round_trip_tax:.0%} round-trip loss")
-            elif round_trip_tax > 0.10:
-                score -= 0.10
+            elif round_trip_tax > 0.15:
+                score -= 0.08
                 flags.append(f"Moderate tax: {round_trip_tax:.0%} round-trip")
 
         # ─── Clamp and classify ────────────────────────────────────────────────

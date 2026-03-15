@@ -292,17 +292,18 @@ class RiskManager:
 
         base_size = config.DEX_BASE_POSITION_USD
 
-        # 1. Volatility adjustment (use h1/h6 changes as vol proxy)
+        # 1. Volatility adjustment — HIGH vol = big opportunity, size UP (not down)
+        # Clamp vol_proxy so we don't go crazy on 500% moves
         vol_proxy = (abs(price_change_h1) + abs(price_change_h6 / 6)) / 2
         vol_proxy = max(vol_proxy, 1.0)
-        scalar = max(config.POSITION_VOL_SCALAR, 0.01)   # Never divide by zero
-        vol_adjusted = base_size / (vol_proxy * scalar / 10)
+        vol_boost = min(1.0 + (vol_proxy - 1.0) * 0.15, 2.0)  # 1.0x–2.0x
+        vol_adjusted = base_size * vol_boost
 
         # 2. Safety scaling: riskier tokens get smaller positions
-        safety_multiplier = max(0.3, safety_score)
+        safety_multiplier = max(0.4, safety_score)
 
         # 3. Score scaling: higher score = closer to full size
-        score_multiplier = 0.5 + (token_score * 0.5)
+        score_multiplier = 0.4 + (token_score * 0.6)
 
         size = vol_adjusted * safety_multiplier * score_multiplier
 
@@ -369,9 +370,13 @@ class RiskManager:
           Score boost = higher conviction → higher target
         """
         h24 = abs(price_change_h24 or 0) / 100
-        base = max(h24 * 0.80, 0.35)
-        base = min(base, 2.50)
-        target = round(base * (1 + score * 0.3), 3)
+        # Tokens that already ran big can run further — set target proportionally
+        if h24 > 1.0:
+            base = h24 * 0.50   # Already 100%+ → target 50% of that (they continue)
+        else:
+            base = max(h24 * 0.80, 0.35)
+        base = min(base, 4.00)  # 400% ceiling (was 250% — too conservative)
+        target = round(base * (1 + score * 0.4), 3)
         logger.debug("Dynamic target: h24=%.1f%% score=%.2f → target=%.1f%%",
                      h24*100, score, target*100)
         return target

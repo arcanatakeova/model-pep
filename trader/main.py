@@ -692,14 +692,14 @@ class AITrader:
                 if token.base_address in {p.get("address", "") for p in self._dex_positions.values()}:
                     continue
                 candidates.append(token)
-                if len(candidates) >= 25:
+                if len(candidates) >= 40:
                     break
 
             logger.info("DEX scan: %d total → %d candidates above score %.2f",
                         len(tokens), len(candidates), config.DEX_MIN_SCORE)
 
             for token in candidates:
-                if traded >= 4:
+                if traded >= 6:
                     break
 
                 # Concentration limits
@@ -761,7 +761,7 @@ class AITrader:
                                 uw_24h  = int(overview.get("uniqueWallet24h", 0) or 0)
                                 token.holder_count      = h_count
                                 token.unique_wallets_24h = uw_24h
-                                if 0 < h_count < 50:
+                                if 0 < h_count < 20:
                                     logger.warning(
                                         "SKIP %s: only %d unique holders (rug risk)",
                                         token.base_symbol, h_count)
@@ -776,14 +776,16 @@ class AITrader:
                             candles = _be.get_ohlcv(token.base_address, interval="5m", limit=6)
                             if candles and len(candles) >= 3:
                                 recent = candles[-3:]
-                                bullish = sum(1 for c in recent if c.close >= c.open)
-                                if bullish < 2:
-                                    logger.info(
-                                        "SKIP %s: OHLCV weak momentum (%d/3 candles bullish)",
-                                        token.base_symbol, bullish)
-                                    continue
+                                # Last candle must be green (active buying right now)
+                                if recent[-1].close < recent[-1].open:
+                                    bullish = sum(1 for c in recent if c.close >= c.open)
+                                    if bullish < 1:
+                                        logger.info(
+                                            "SKIP %s: OHLCV no bullish candles",
+                                            token.base_symbol)
+                                        continue
                                 session_high = max(c.high for c in recent if c.high > 0)
-                                if session_high > 0 and token.price_usd < session_high * 0.80:
+                                if session_high > 0 and token.price_usd < session_high * 0.75:
                                     logger.info(
                                         "SKIP %s: price %.0f%% below recent high (reversal)",
                                         token.base_symbol,
@@ -981,23 +983,26 @@ class AITrader:
                     prev = pos.get("fast_prev_price", entry)
                     pos["fast_prev_price"] = current
 
-                    # ── 1. Spike capture: exit at the top of sudden pumps ─────
-                    # 12% surge in one 3s tick = parabolic — sell immediately
-                    if prev > 0 and pnl_pct > 0 and current > prev:
+                    # ── 1. Spike capture: only sell the spike if already well in profit
+                    # Don't sell early runners — only take spikes when you've already
+                    # captured a solid gain (>25%). Otherwise you sell the start of a moon.
+                    if prev > 0 and pnl_pct > 0.25 and current > prev:
                         surge = (current - prev) / prev
-                        if surge >= 0.12:
+                        if surge >= 0.15:
                             to_close.append((
                                 pair_addr, pos, current,
                                 f"FastMonitor spike: +{surge:.0%} in 3s (PnL +{pnl_pct:.0%})"))
                             continue
 
                     # ── 2. Reversal after peak: price dropped fast from ATH ───
-                    # If we're >15% off the peak while in profit, sell before
-                    # the dump wipes the gain
+                    # More generous: allow deeper pullbacks before selling
                     peak = pos.get("peak_price", entry)
                     if peak > entry and pnl_pct > 0:
                         reversal = (peak - current) / peak
-                        if reversal >= 0.15 and pnl_pct > 0.05:
+                        # Scale reversal threshold by profit: more profit = allow bigger pullback
+                        # At +10% profit, sell if -18% reversal. At +100%, sell if -25%
+                        reversal_threshold = min(0.18 + pnl_pct * 0.07, 0.30)
+                        if reversal >= reversal_threshold and pnl_pct > 0.08:
                             to_close.append((
                                 pair_addr, pos, current,
                                 f"FastMonitor reversal: -{reversal:.0%} from peak "

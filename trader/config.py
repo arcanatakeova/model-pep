@@ -9,13 +9,13 @@ PAPER_TRADING = False         # Live mode by default — real Solana DEX trades 
 INITIAL_CAPITAL = 100_000.0   # Starting capital in USD (overridden by wallet balance)
 
 # ─── Risk Management ──────────────────────────────────────────────────────────
-MAX_POSITION_PCT = 0.10       # Max 10% of portfolio per position
-MAX_OPEN_POSITIONS = 20       # Maximum concurrent positions
-STOP_LOSS_PCT = 0.03          # 3% stop loss
-TAKE_PROFIT_PCT = 0.06        # 6% take profit (2:1 R/R ratio)
-RISK_PER_TRADE_PCT = 0.02     # Risk 2% of portfolio per trade (Kelly-based)
-MIN_SIGNAL_STRENGTH = 0.22    # Minimum ensemble score to trigger trade (lower = more trades)
-TRAILING_STOP_PCT = 0.025     # 2.5% trailing stop
+MAX_POSITION_PCT = 0.15       # Max 15% of portfolio per position
+MAX_OPEN_POSITIONS = 12       # Max concurrent positions (focused, not spread thin)
+STOP_LOSS_PCT = 0.03          # 3% stop loss (CEX only — DEX uses dynamic stops)
+TAKE_PROFIT_PCT = 0.06        # 6% take profit (CEX only — DEX uses dynamic targets)
+RISK_PER_TRADE_PCT = 0.04     # Risk 4% of portfolio per trade (aggressive Kelly)
+MIN_SIGNAL_STRENGTH = 0.30    # Min ensemble score (raised: fewer but higher-quality trades)
+TRAILING_STOP_PCT = 0.05      # 5% trailing stop (wider = lets winners run)
 
 # ─── Disabled strategies (Solana DEX only) ────────────────────────────────────
 FUTURES_ENABLED      = False   # No Binance futures
@@ -73,12 +73,12 @@ STOCK_WATCHLIST = ["SPY", "QQQ", "NVDA", "TSLA", "META", "COIN", "MSTR", "MARA"]
 
 # ─── Strategy Weights ─────────────────────────────────────────────────────────
 STRATEGY_WEIGHTS = {
-    "rsi":         0.20,   # RSI overbought/oversold
-    "macd":        0.20,   # MACD crossover
-    "bollinger":   0.15,   # Bollinger Band mean reversion
-    "ema_cross":   0.20,   # EMA 9/21 crossover
-    "momentum":    0.15,   # Price momentum
-    "volume":      0.10,   # Volume analysis
+    "rsi":         0.12,   # RSI — noisy on small caps, reduced
+    "macd":        0.18,   # MACD crossover — good for trends
+    "bollinger":   0.10,   # Bollinger — mean reversion, less relevant for memecoins
+    "ema_cross":   0.15,   # EMA 9/21 crossover
+    "momentum":    0.20,   # Price momentum — key for memecoins
+    "volume":      0.25,   # Volume — strongest alpha signal for DEX tokens
 }
 
 # ─── Technical Indicator Parameters ───────────────────────────────────────────
@@ -142,43 +142,43 @@ TRADE_LOG_FILE = "trades.json"
 PORTFOLIO_SNAPSHOT_INTERVAL = 300   # Save portfolio snapshot every 5 minutes
 
 # ─── DEX / On-Chain Settings ──────────────────────────────────────────────────
-DEX_MIN_SCORE = 0.45               # Quality gate — filters low-conviction setups
+DEX_MIN_SCORE = 0.38               # Quality gate (lowered: was missing good setups at 0.45)
 DEX_MAX_POSITION_USD = 500.0       # Max per DEX token (volatile = small size)
 DEX_PREFERRED_CHAINS = ["solana"]  # Solana only
-DEX_SCAN_INTERVAL_SEC = 8          # Scan DEX every 8s — catch entries faster
-NEW_PAIR_MAX_AGE_HOURS = 48        # Consider pairs up to 48h old
-NEW_PAIR_MIN_LIQUIDITY = 15_000    # $15k minimum liquidity (lower for memecoins)
+DEX_SCAN_INTERVAL_SEC = 4          # Scan DEX every 4s — catch entries faster
+NEW_PAIR_MAX_AGE_HOURS = 24        # Only tokens < 24h old (memecoins die after day 1)
+NEW_PAIR_MIN_LIQUIDITY = 8_000     # $8k minimum liquidity (catch early pumps)
 
 # ─── Token Safety / Rug Protection (Balanced Mode) ──────────────────────────
-MIN_SAFETY_SCORE = 0.45            # Minimum safety score to trade (raised: 0.35 was too permissive)
-SAFETY_SCORE_WEIGHT = 0.20         # Weight of safety in overall token score
+MIN_SAFETY_SCORE = 0.35            # Min safety to trade (lowered: high-conviction overrides)
+SAFETY_SCORE_WEIGHT = 0.15         # Weight of safety in overall token score (was 0.20)
 ENABLE_SELL_SIMULATION = True      # Honeypot check via Jupiter round-trip quote
 SELL_SIM_AMOUNT_USD = 1.0          # Dollar amount for sell simulation
-MAX_ROUND_TRIP_TAX_PCT = 0.30      # Max acceptable round-trip tax (30% = balanced)
+MAX_ROUND_TRIP_TAX_PCT = 0.40      # Max acceptable round-trip tax (40%: memecoins have fees)
 RUGCHECK_CACHE_TTL = 300           # Cache safety results for 5 minutes
-SAFETY_CHECK_TIMEOUT = 8           # Seconds before safety check times out
+SAFETY_CHECK_TIMEOUT = 12          # Seconds before safety check times out (was 8: too short for new tokens)
 BLOCK_HONEYPOTS = True             # Hard block if sell simulation fails completely
-MAX_TOP10_HOLDER_PCT = 0.70        # Penalize heavily if top 10 holders own > 70% (tighter for memecoins)
+MAX_TOP10_HOLDER_PCT = 0.80        # Penalize if top 10 holders own > 80% (was 70%: too aggressive)
 
 # ─── Volatility-Adjusted Position Sizing ────────────────────────────────────
-DEX_BASE_POSITION_USD = 50.0       # Base position for memecoin trades
+DEX_BASE_POSITION_USD = 75.0       # Base position for memecoin trades (raised from 50)
 DEX_MIN_POSITION_USD = 2.0         # Minimum position size (covers Solana fees ~$0.50)
-POSITION_VOL_SCALAR = 1.0          # Multiplier: size = base / (vol * scalar)
-MAX_MEMECOIN_ALLOCATION_PCT = 0.40 # Max 40% of equity in memecoins total
+POSITION_VOL_SCALAR = 1.0          # Multiplier for vol-adjusted sizing
+MAX_MEMECOIN_ALLOCATION_PCT = 0.50 # Max 50% of equity in memecoins (was 40%: too conservative)
 
 # ─── Time-Based Exit Rules ──────────────────────────────────────────────────
-DEX_MAX_HOLD_HOURS = 8             # Force exit after 8h — memecoins live fast
-DEX_STALE_EXIT_HOURS = 2           # Exit if no momentum after 2 hours
-DEX_STALE_MIN_GAIN_PCT = 0.02      # Minimum 2% gain to avoid stale exit
+DEX_MAX_HOLD_HOURS = 6             # Force exit after 6h (was 8: memecoins die faster)
+DEX_STALE_EXIT_HOURS = 1.5         # Exit if no momentum after 1.5h (was 2: cut losers faster)
+DEX_STALE_MIN_GAIN_PCT = 0.03      # Need +3% gain to justify holding (was 2%)
 
 # ─── Partial Profit Taking ──────────────────────────────────────────────────
 PARTIAL_PROFIT_ENABLED = True
 PARTIAL_PROFIT_TIERS = [
-    (0.10, 0.25),   # At +10% gain, sell 25% — quick capture on small pumps
-    (0.25, 0.25),   # At +25% gain, sell another 25%
-    (0.50, 0.25),   # At +50% gain, sell another 25%
-    (1.00, 0.25),   # At +100% gain, sell last 25%
-    # Any remainder rides with trailing stop
+    (0.15, 0.20),   # At +15% gain, sell 20% — secure initial profit
+    (0.40, 0.20),   # At +40% gain, sell another 20%
+    (0.80, 0.20),   # At +80% gain, sell another 20%
+    (1.50, 0.20),   # At +150% gain, sell another 20%
+    # Remaining 20% rides with trailing stop — lets moonshots run
 ]
 
 # ─── MEV / Sandwich Protection ──────────────────────────────────────────────
@@ -187,9 +187,9 @@ MEV_MAX_SLIPPAGE_BPS = 100         # Tighter slippage (1%) for MEV protection
 MEV_PRIORITY_FEE_LAMPORTS = 50000  # Higher priority fee to front-run sandwich
 
 # ─── Concentration Limits ───────────────────────────────────────────────────
-MAX_DEX_POSITIONS = 8              # Max concurrent DEX/memecoin positions
-MAX_SAME_DEX_POSITIONS = 6         # Max positions on same DEX (e.g., Raydium/Pumpswap)
-MIN_LIQUIDITY_RATIO = 0.10         # Position must be < 10% of pool liquidity
+MAX_DEX_POSITIONS = 10             # Max concurrent DEX/memecoin positions (was 8)
+MAX_SAME_DEX_POSITIONS = 8         # Max positions on same DEX
+MIN_LIQUIDITY_RATIO = 0.08         # Position must be < 8% of pool liquidity (tighter to avoid slippage)
 
 # ─── Solana / Phantom Wallet ──────────────────────────────────────────────────
 PHANTOM_PRIVATE_KEY = os.getenv("PHANTOM_PRIVATE_KEY", "")
