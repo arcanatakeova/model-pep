@@ -11,6 +11,13 @@ try:
 except ImportError:
     pass
 
+# Load secrets from Supabase Vault (overrides .env if both exist)
+try:
+    from vault_loader import load_secrets
+    _vault_loaded = load_secrets()
+except Exception:
+    _vault_loaded = {}
+
 # ─── Trading Mode ─────────────────────────────────────────────────────────────
 PAPER_TRADING = True          # Set False to enable live trading (requires API keys)
 INITIAL_CAPITAL = 10_000.0    # Starting capital in USD (overridden by wallet balance)
