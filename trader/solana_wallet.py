@@ -1822,7 +1822,6 @@ class SolanaWallet:
                 logger.debug("get_all_token_balances error: %s", e)
                 return None
         return result  # may be empty dict {} if wallet has no tokens — that is valid
-            return {}
 
     def get_transaction_token_change(self, signature: str, base_mint: str) -> dict:
         """
