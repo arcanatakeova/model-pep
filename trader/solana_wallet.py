@@ -1109,26 +1109,36 @@ class SolanaWallet:
                             continue
                         if "pAMM" not in rkeys[inst.program_id_index]:
                             continue
-                        if len(inst.accounts) != 24:
-                            continue
-                        # Only clone from BUY instructions: sell layout has different
-                        # account positions (e.g. [19] and [22] differ), causing
-                        # 0xbbf/0xbc0 when we build a tx using sell-derived accounts.
-                        if bytes(inst.data)[:8] != _PUMPSWAP_BUY_DISC:
-                            continue
+                        disc = bytes(inst.data)[:8]
+                        n_accs = len(inst.accounts)
                         if not all(idx < len(rkeys) for idx in inst.accounts):
                             continue
-                        cloned = [rkeys[idx] for idx in inst.accounts]
-                        cloned[1]  = str(user)
-                        cloned[5]  = str(user_base_ata)
-                        cloned[6]  = str(user_wsol_ata)
-                        # [9] = protocol_fee_recipient — keep from ref tx (pool-agnostic valid entry)
-                        # [10] = fee_recipient_wsol_ata — keep from ref tx (derived from [9])
-                        cloned[20] = str(user_volume_acc)  # user_volume_accumulator (ours)
-                        ref_accs = cloned
-                        # Cache the global_volume_accumulator singleton (same address across all pools)
-                        _pumpswap_global_va = cloned[19]
-                        break
+                        if is_sell and disc == _PUMP_SELL_DISC and n_accs == 22:
+                            # For sell: directly clone a real sell instruction (22 accounts).
+                            # This avoids any buy→sell trim, using the exact layout pAMM expects.
+                            cloned = [rkeys[idx] for idx in inst.accounts]
+                            cloned[1]  = str(user)
+                            cloned[5]  = str(user_base_ata)
+                            cloned[6]  = str(user_wsol_ata)
+                            ref_accs = cloned
+                            logger.debug("PumpSwap: cloned 22-acct SELL ref [19]=%s",
+                                         cloned[19][:16])
+                            break
+                        elif not is_sell and disc == _PUMPSWAP_BUY_DISC and n_accs == 24:
+                            # For buy: clone a real buy instruction (24 accounts).
+                            # Only clone BUY instructions: sell layout has different account
+                            # positions (e.g. [19] and [22] differ), causing 0xbbf/0xbc0.
+                            cloned = [rkeys[idx] for idx in inst.accounts]
+                            cloned[1]  = str(user)
+                            cloned[5]  = str(user_base_ata)
+                            cloned[6]  = str(user_wsol_ata)
+                            # [9] = protocol_fee_recipient — keep from ref tx (pool-agnostic)
+                            # [10] = fee_recipient_wsol_ata — keep from ref tx
+                            cloned[20] = str(user_volume_acc)  # user_volume_accumulator (ours)
+                            ref_accs = cloned
+                            # Cache the global_volume_accumulator singleton
+                            _pumpswap_global_va = cloned[19]
+                            break
                     if ref_accs:
                         break
             except Exception as e:
@@ -1215,7 +1225,7 @@ class SolanaWallet:
                     logger.info("PumpSwap: no ref tx for pool %s — using bootstrapped global_va",
                                 pool_address[:16])
 
-                ref_accs = [
+                _common = [
                     pool_address,                        # [0]
                     str(user),                           # [1]
                     _GLOBAL_CONFIG,                      # [2]
@@ -1235,24 +1245,29 @@ class SolanaWallet:
                     str(PUMPSWAP),                       # [16]
                     str(creator_wsol_ata),               # [17] ATA(creator_wallet, WSOL)
                     str(creator_wallet),                 # [18] pAMM PDA(creator_vault, bc_creator)
-                    _gva,                                # [19] global_volume_accumulator (real addr)
-                    str(user_volume_acc),                # [20] user_volume_accumulator PDA
-                    _CONST_21,                           # [21] pfee state account
-                    _CONST_22,                           # [22] pfee program
-                    str(_coin_creator_vault_23),         # [23] pAMM PDA(creator_vault, bc_creator)
                 ]
+                if is_sell:
+                    # Sell fallback: 22 accounts — no volume accumulators
+                    ref_accs = _common + [
+                        _CONST_21,                       # [19] pfee state account
+                        _CONST_22,                       # [20] pfee program
+                        str(_coin_creator_vault_23),     # [21] coin_creator_vault
+                    ]
+                    logger.info("PumpSwap: sell fallback 22-acct [19]=%s", _CONST_21[:16])
+                else:
+                    # Buy fallback: 24 accounts — includes volume accumulators
+                    ref_accs = _common + [
+                        _gva,                            # [19] global_volume_accumulator
+                        str(user_volume_acc),            # [20] user_volume_accumulator PDA
+                        _CONST_21,                       # [21] pfee state account
+                        _CONST_22,                       # [22] pfee program
+                        str(_coin_creator_vault_23),     # [23] coin_creator_vault
+                    ]
 
-            # Sell uses 22 accounts — drop buy[19]=global_va and buy[20]=user_va.
-            # Confirmed from real on-chain sell txs: sell has no volume accumulators.
-            # buy[21]→sell[19], buy[22]→sell[20], buy[23]→sell[21].
+            logger.debug("PumpSwap %s: %d accounts, [19]=%s",
+                         "sell" if is_sell else "buy", len(ref_accs),
+                         ref_accs[19][:16] if len(ref_accs) > 19 else "N/A")
             if is_sell:
-                logger.info("PumpSwap sell: ref_accs len=%d [19]=%s [21]=%s",
-                            len(ref_accs),
-                            ref_accs[19][:16] if len(ref_accs) > 19 else "N/A",
-                            ref_accs[21][:16] if len(ref_accs) > 21 else "N/A")
-                ref_accs = ref_accs[:19] + ref_accs[21:]   # 24 → 22 accounts
-                logger.info("PumpSwap sell: trimmed to %d accounts, [19]=%s",
-                            len(ref_accs), ref_accs[19][:16])
                 _ACCT_FLAGS = [
                     (True,  False),  # [0]  pool         W
                     (True,  True),   # [1]  user         WS
