@@ -692,30 +692,27 @@ class AITrader:
                 if token.base_address in {p.get("address", "") for p in self._dex_positions.values()}:
                     continue
                 candidates.append(token)
-                if len(candidates) >= 40:
+                if len(candidates) >= 12:   # Cap at 12 — only trade 6 max anyway
                     break
 
             logger.info("DEX scan: %d total → %d candidates above score %.2f",
                         len(tokens), len(candidates), config.DEX_MIN_SCORE)
 
+            # ── Fast pre-filter: concentration + safety (in-memory, no I/O) ──
+            # Build (token, size_usd) pairs for candidates that clear these gates.
+            prefiltered = []
             for token in candidates:
-                if traded >= 6:
-                    break
-
-                # Concentration limits
                 allowed, reason = self.risk_mgr.check_dex_concentration(
                     self._dex_positions, token.dex_id)
                 if not allowed:
                     logger.info("Concentration: %s", reason)
                     continue
-
                 safety = getattr(token, "safety_report", None)
                 if safety and not safety.is_safe_to_trade:
                     logger.warning("SKIP %s: %s — %s", token.base_symbol,
                                    safety.risk_level,
                                    ", ".join(safety.risk_flags[:2]))
                     continue
-
                 safety_score = safety.safety_score if safety else 0.5
                 size_usd = self.risk_mgr.dex_position_size_usd(
                     token_score=token.score,
@@ -724,76 +721,92 @@ class AITrader:
                     price_change_h1=token.price_change_h1,
                     price_change_h6=token.price_change_h6,
                 )
-                size_usd = min(size_usd, config.DEX_MAX_POSITION_USD)  # dex_position_size_usd already handles equity/cash caps
+                size_usd = min(size_usd, config.DEX_MAX_POSITION_USD)
                 if size_usd < config.DEX_MIN_POSITION_USD:
-                    logger.warning("SKIP %s: size $%.2f below min $%.2f "
-                                   "(vol/safety too high for current equity)",
+                    logger.warning("SKIP %s: size $%.2f below min $%.2f",
                                    token.base_symbol, size_usd, config.DEX_MIN_POSITION_USD)
                     continue
+                prefiltered.append((token, size_usd, safety))
 
-                # Jupiter price confirmation — verify price is within 2% of DexScreener
-                # before committing real SOL (catches stale/spoofed DexScreener data)
-                if token.chain_id == "solana" and self.solana.is_connected:
-                    jup_price = self._get_jupiter_price(token.base_address)
-                    if jup_price and jup_price > 0 and token.price_usd > 0:
-                        drift = abs(jup_price - token.price_usd) / token.price_usd
-                        if drift > 0.05:   # >5% price discrepancy
+            # ── Parallel network validation: Jupiter price + Birdeye checks ──
+            # Run all I/O-bound checks concurrently across candidates.
+            def _validate(args):
+                """
+                Returns (token, size_usd, safety) if validation passes, else None.
+                All network calls happen here so they run in parallel.
+                """
+                tok, sz, sfty = args
+                # Jupiter price confirmation
+                if tok.chain_id == "solana" and self.solana.is_connected:
+                    jup_price = self._get_jupiter_price(tok.base_address)
+                    if jup_price and jup_price > 0 and tok.price_usd > 0:
+                        drift = abs(jup_price - tok.price_usd) / tok.price_usd
+                        if drift > 0.05:
                             logger.warning(
-                                "SKIP %s: Jupiter price $%.8f vs DexScreener $%.8f "
-                                "(%.1f%% drift — stale data)",
-                                token.base_symbol, jup_price, token.price_usd, drift * 100)
-                            continue
-                        # Use Jupiter price (more accurate at time of trade)
-                        token.price_usd = jup_price
+                                "SKIP %s: Jupiter $%.8f vs DexScreener $%.8f (%.1f%% drift)",
+                                tok.base_symbol, jup_price, tok.price_usd, drift * 100)
+                            return None
+                        tok.price_usd = jup_price
 
-                # ── Birdeye pre-trade deep validation ────────────────────────────
-                # Only called here (once per actual trade attempt) — not in bulk scan.
-                # 2 CU: get_token_overview + get_ohlcv for the specific token we're buying.
-                if token.chain_id == "solana" and config.BIRDEYE_API_KEY:
+                # Birdeye deep validation
+                if tok.chain_id == "solana" and config.BIRDEYE_API_KEY:
                     from dex_screener import _get_birdeye as _dex_be
                     _be = _dex_be()
                     if _be:
-                        # 1. Holder count — very few holders = concentrated rug
                         try:
-                            overview = _be.get_token_overview(token.base_address)
+                            overview = _be.get_token_overview(tok.base_address)
                             if overview:
                                 h_count = int(overview.get("holder", 0) or 0)
                                 uw_24h  = int(overview.get("uniqueWallet24h", 0) or 0)
-                                token.holder_count      = h_count
-                                token.unique_wallets_24h = uw_24h
+                                tok.holder_count       = h_count
+                                tok.unique_wallets_24h = uw_24h
                                 if 0 < h_count < 20:
-                                    logger.warning(
-                                        "SKIP %s: only %d unique holders (rug risk)",
-                                        token.base_symbol, h_count)
-                                    continue
+                                    logger.warning("SKIP %s: only %d holders (rug risk)",
+                                                   tok.base_symbol, h_count)
+                                    return None
                         except Exception as e:
-                            logger.debug("Token overview error %s: %s", token.base_symbol, e)
+                            logger.debug("Token overview error %s: %s", tok.base_symbol, e)
 
-                        # 2. OHLCV momentum confirmation: need a sustained move, not a wick
-                        # Fetch 6 × 5m candles and require ≥2/3 most recent are bullish.
-                        # Also skip if current price has already reversed >20% from session high.
                         try:
-                            candles = _be.get_ohlcv(token.base_address, interval="5m", limit=6)
+                            candles = _be.get_ohlcv(tok.base_address, interval="5m", limit=6)
                             if candles and len(candles) >= 3:
                                 recent = candles[-3:]
-                                # Last candle must be green (active buying right now)
                                 if recent[-1].close < recent[-1].open:
                                     bullish = sum(1 for c in recent if c.close >= c.open)
                                     if bullish < 1:
-                                        logger.info(
-                                            "SKIP %s: OHLCV no bullish candles",
-                                            token.base_symbol)
-                                        continue
+                                        logger.info("SKIP %s: OHLCV no bullish candles",
+                                                    tok.base_symbol)
+                                        return None
                                 session_high = max(c.high for c in recent if c.high > 0)
-                                if session_high > 0 and token.price_usd < session_high * 0.75:
-                                    logger.info(
-                                        "SKIP %s: price %.0f%% below recent high (reversal)",
-                                        token.base_symbol,
-                                        (1 - token.price_usd / session_high) * 100)
-                                    continue
+                                if session_high > 0 and tok.price_usd < session_high * 0.75:
+                                    logger.info("SKIP %s: price %.0f%% below recent high",
+                                                tok.base_symbol,
+                                                (1 - tok.price_usd / session_high) * 100)
+                                    return None
                         except Exception as e:
-                            logger.debug("OHLCV check error %s: %s", token.base_symbol, e)
+                            logger.debug("OHLCV check error %s: %s", tok.base_symbol, e)
 
+                return (tok, sz, sfty)
+
+            validated = []
+            if prefiltered:
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=min(len(prefiltered), 8),
+                        thread_name_prefix="dex-validate") as val_ex:
+                    futs = [val_ex.submit(_validate, args) for args in prefiltered]
+                    for f in concurrent.futures.as_completed(futs, timeout=15):
+                        try:
+                            result = f.result()
+                            if result is not None:
+                                validated.append(result)
+                        except Exception as e:
+                            logger.debug("Validate candidate error: %s", e)
+                # Preserve score-descending order after concurrent collection
+                validated.sort(key=lambda x: x[0].score, reverse=True)
+
+            for token, size_usd, safety in validated:
+                if traded >= 6:
+                    break
                 self._open_dex_position(token, size_usd, safety)
                 held_symbols.add(token.base_symbol.upper())
                 held_addrs.add(token.pair_address)
