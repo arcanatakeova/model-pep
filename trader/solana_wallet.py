@@ -916,6 +916,7 @@ class SolanaWallet:
         Buy args:  (base_amount_out: u64, max_quote_amount_in: u64)
         Sell args: (base_amount_in: u64,  min_quote_amount_out: u64)
         """
+        global _pumpswap_global_va  # singleton cache — must be declared before any use
         try:
             import struct
             from solders.pubkey import Pubkey
@@ -1119,7 +1120,6 @@ class SolanaWallet:
                         cloned[20] = str(user_volume_acc)  # user_volume_accumulator (ours)
                         ref_accs = cloned
                         # Cache the global_volume_accumulator singleton (same address across all pools)
-                        global _pumpswap_global_va
                         _pumpswap_global_va = cloned[19]
                         break
                     if ref_accs:
@@ -1160,7 +1160,6 @@ class SolanaWallet:
                 # ── Bootstrap global_volume_accumulator from any recent pAMM tx ──
                 # This is needed for brand-new pools that have no prior transactions.
                 # global_volume_accumulator is a singleton: same address for every pool.
-                global _pumpswap_global_va
                 if not _pumpswap_global_va:
                     try:
                         r_prog = _session.post(config.SOLANA_RPC_URL, json={
