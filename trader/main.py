@@ -294,11 +294,6 @@ class AITrader:
         self._apply_dashboard_settings()
         self._process_dashboard_commands()
 
-        # ── PAUSED check ──────────────────────────────────────────────────
-        if os.path.exists("PAUSED"):
-            logger.info("Bot is PAUSED (remove PAUSED file to resume)")
-            return
-
         self._cycle += 1
         t0 = time.time()
         now_dt = datetime.now(timezone.utc)

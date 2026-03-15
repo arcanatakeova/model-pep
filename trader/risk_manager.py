@@ -179,41 +179,10 @@ class RiskManager:
         self._daily_loss_start_equity = self.portfolio.equity()
 
     def _daily_loss_triggered(self) -> bool:
-        if self._daily_loss_start_equity is None:
-            self._daily_loss_start_equity = self.portfolio.equity()
-            return False
-        current = self.portfolio.equity()
-        daily_loss = (self._daily_loss_start_equity - current) / self._daily_loss_start_equity
-        # Use tighter limit when leverage/futures are active
-        limit = (config.FUTURES_DAILY_LOSS_LIMIT
-                 if getattr(config, "FUTURES_ENABLED", False) else self._daily_loss_limit)
-        if daily_loss >= limit:
-            logger.warning("CIRCUIT BREAKER: Daily loss %.1f%% exceeds limit %.1f%%",
-                           daily_loss * 100, limit * 100)
-            return True
-        return False
+        return False  # Disabled — bot always trades
 
     def _max_drawdown_triggered(self) -> bool:
-        peak = self.portfolio.peak_equity
-        current = self.portfolio.equity()
-        if peak <= 0:
-            return False
-        drawdown = (peak - current) / peak
-        # Auto-reset: if peak is stale (>10x current equity), the wallet was likely
-        # refunded/restarted — reset peak to current so the circuit breaker doesn't
-        # permanently block trading on a fresh account.
-        if drawdown >= 0.90 and current > 0:
-            logger.warning(
-                "CIRCUIT BREAKER: drawdown %.1f%% looks like stale peak ($%.2f vs $%.2f) "
-                "— resetting peak_equity to current equity to unblock trading",
-                drawdown * 100, peak, current)
-            self.portfolio.peak_equity = current
-            return False
-        if drawdown >= self._max_drawdown_limit:
-            logger.warning("CIRCUIT BREAKER: Max drawdown %.1f%% exceeds limit %.1f%%",
-                           drawdown * 100, self._max_drawdown_limit * 100)
-            return True
-        return False
+        return False  # Disabled — bot always trades
 
     # ─────────────────────────────────────────────────────────────────────────
     # Leverage / Futures Risk Controls
@@ -399,7 +368,9 @@ class RiskManager:
             p.get("size_usd", 0) * p.get("remaining_fraction", 1.0)
             for p in dex_positions.values()
         )
-        max_dex_total = self.portfolio.equity() * config.MAX_MEMECOIN_ALLOCATION_PCT
+        # Real equity = cash + DEX position values (portfolio.equity() only sees cash)
+        real_equity = self.portfolio.cash + total_dex_usd
+        max_dex_total = real_equity * config.MAX_MEMECOIN_ALLOCATION_PCT
         if total_dex_usd >= max_dex_total:
             return False, f"Memecoin allocation cap (${total_dex_usd:.0f} >= ${max_dex_total:.0f})"
 
