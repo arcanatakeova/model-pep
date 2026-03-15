@@ -357,7 +357,7 @@ class TradeExecutor:
     def _init_live_exchange(self):
         """Initialize ccxt exchange for live spot trading (Binance)."""
         if not config.BINANCE_API_KEY:
-            logger.warning("Live trading enabled but no BINANCE_API_KEY set — staying in paper mode")
+            logger.debug("Live trading enabled but no BINANCE_API_KEY set — staying in paper mode")
             return
         try:
             import ccxt
@@ -375,7 +375,7 @@ class TradeExecutor:
     def _init_futures_exchange(self):
         """Initialize Binance USDT-M Futures via ccxt for leveraged perpetuals."""
         if not config.BINANCE_API_KEY:
-            logger.warning("Futures enabled but no BINANCE_API_KEY — futures in paper mode")
+            logger.debug("Futures enabled but no BINANCE_API_KEY — futures in paper mode")
             return
         try:
             import ccxt
