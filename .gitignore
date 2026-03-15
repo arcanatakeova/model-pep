@@ -19,6 +19,11 @@ trader/trades.json
 trader/equity_curve.json
 trader/dex_positions.json
 trader/allocation_state.json
+trader/bot_state.json
+trader/settings.json
+trader/arb_state.json
+trader/grid_state.json
+trader/heartbeat.json
 trader/*.log
 trades.json
 equity_curve.json
