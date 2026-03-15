@@ -72,7 +72,8 @@ def _safe_float(val, default: float = 0.0) -> float:
 
 
 # Search terms — broad coverage across naming conventions
-_SEARCH_QUERIES = ["SOL", "USDC", "PUMP", "MEME", "AI", "DOG", "WIF"]
+_SEARCH_QUERIES = ["SOL", "USDC", "PUMP", "MEME", "AI", "DOG", "WIF",
+                   "CAT", "PEPE", "MOON", "COIN", "FUN", "GEM"]
 
 
 @dataclass
@@ -166,7 +167,7 @@ class DexScreener:
         self._cache_ttl = 25   # 25s — aggressive freshness for fast markets
         self._safety_checker = TokenSafetyChecker()
         self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=8, thread_name_prefix="dex-scanner")
+            max_workers=20, thread_name_prefix="dex-scanner")
 
     # ─── Public API ───────────────────────────────────────────────────────────
 
@@ -485,7 +486,13 @@ class DexScreener:
 
         # ── 24h context (5%) — sustained trend vs one-hour pump ───────────
         h24 = token.price_change_h24
-        if h24 > 100:
+        if h24 > 300:
+            score += 0.10   # Extreme multi-hundred-percent mover — highest tier
+            signals.append(f"EXTREME +{h24:.0f}% 24h")
+        elif h24 > 150:
+            score += 0.07
+            signals.append(f"Massive +{h24:.0f}% 24h")
+        elif h24 > 100:
             score += 0.05
             signals.append(f"+{h24:.0f}% 24h")
         elif h24 > 50:
@@ -494,6 +501,22 @@ class DexScreener:
             score += 0.02
         elif h24 < -30:
             score -= 0.05
+
+        # ── Market cap sweet spot (5%) — optimal memecoin size ────────────
+        # $100k-$5M mcap = early enough to 10x, large enough to have liquidity
+        mcap = token.market_cap
+        if 0 < mcap < 100_000:
+            score += 0.04   # Very early, ultra-high upside
+            signals.append(f"Micro mcap ${mcap/1000:.0f}k")
+        elif mcap < 500_000:
+            score += 0.06   # Sweet spot: $100k-$500k — best risk/reward
+            signals.append(f"Early mcap ${mcap/1000:.0f}k")
+        elif mcap < 2_000_000:
+            score += 0.05   # $500k-$2M — still strong upside
+        elif mcap < 10_000_000:
+            score += 0.03   # $2M-$10M — decent but smaller upside
+        elif mcap > 50_000_000:
+            score -= 0.05   # Too big for memecoin alpha
 
         # ── Volume acceleration (20%) — is buying pressure building? ──────
         if token.volume_h1 > 0 and token.volume_h24 > 0:
@@ -618,12 +641,28 @@ class DexScreener:
                 score += 0.04
                 signals.append(f"Good distribution ({token.holder_count} holders)")
 
-        # ── Unique wallets (trading breadth) ──────────────────────────────
-        # Many unique wallets trading in 24h = organic interest, not 1 whale pumping
-        if token.unique_wallets_24h > 500:
+        # ── Unique wallets + holder growth velocity ──────────────────────
+        # Many unique wallets = organic interest, not 1 whale pumping
+        # Rapid holder growth = accumulation phase (early)
+        if token.unique_wallets_24h > 2000:
+            score += 0.05
+            signals.append(f"Viral: {token.unique_wallets_24h} wallets/24h")
+        elif token.unique_wallets_24h > 500:
             score += 0.03
         elif token.unique_wallets_24h > 0 and token.unique_wallets_24h < 20:
             score -= 0.05   # Thin trading = manipulation risk
+
+        # Holder growth velocity: if holders growing fast → accumulation phase
+        if token.holder_count > 0 and token.age_hours and token.age_hours > 0:
+            holder_velocity = token.holder_count / token.age_hours  # holders/hour
+            if holder_velocity > 200:
+                score += 0.06
+                signals.append(f"Viral growth: {holder_velocity:.0f} holders/h")
+            elif holder_velocity > 50:
+                score += 0.04
+                signals.append(f"Growing: {holder_velocity:.0f} holders/h")
+            elif holder_velocity > 10:
+                score += 0.02
 
         # ── Source bonus ──────────────────────────────────────────────────
         if token.source == "pumpfun_new":
@@ -652,11 +691,14 @@ class DexScreener:
             if token.safety_report is not None:
                 safety = token.safety_report
                 if not safety.is_safe_to_trade:
-                    # High-conviction override: if score is strong enough, allow
-                    # MEDIUM-risk tokens through with a penalty instead of hard block
-                    if score >= 0.55 and safety.risk_level == "MEDIUM":
-                        score *= 0.65
-                        signals.append(f"OVERRIDE: {safety.risk_level} risk (high conviction)")
+                    # Conviction-based override: allow MEDIUM-risk tokens if score
+                    # is high enough (good momentum beats borderline safety flags)
+                    if score >= 0.50 and safety.risk_level == "MEDIUM":
+                        score *= 0.70   # 30% penalty for MEDIUM risk override
+                        signals.append(f"OVERRIDE: MEDIUM risk (conviction {score:.2f})")
+                    elif score >= 0.70 and safety.risk_level == "HIGH":
+                        score *= 0.45   # 55% penalty for HIGH risk — possible but costly
+                        signals.append(f"OVERRIDE: HIGH risk (strong signal)")
                     else:
                         token.score = 0.0
                         token.signals = [f"BLOCKED: {safety.risk_level} risk"] + safety.risk_flags[:2]
@@ -664,16 +706,19 @@ class DexScreener:
                 else:
                     w = config.SAFETY_SCORE_WEIGHT
                     score = score * (1 - w) + safety.safety_score * w
+                    # Bonus for verified safe tokens — confidence boost
+                    if safety.risk_level == "SAFE" and safety.safety_score >= 0.80:
+                        score += 0.04
                 if safety.risk_level in ("SAFE", "LOW"):
                     signals.append(f"Safe ({safety.safety_score:.2f})")
                 elif safety.risk_level == "MEDIUM":
                     flag = safety.risk_flags[0] if safety.risk_flags else "caution"
                     signals.append(f"MEDIUM risk: {flag}")
                 elif safety.risk_level == "HIGH":
-                    score *= 0.50   # Heavy penalty for HIGH risk (was 0.60)
+                    score *= 0.50   # Heavy penalty for HIGH risk
                     signals.append(f"HIGH risk ({safety.safety_score:.2f})")
             else:
-                score *= 0.85   # Mild penalty for unverified (was 0.80)
+                score *= 0.88   # Unverified — mild penalty only
 
         token.score = float(np.clip(score, 0.0, 1.0))
         token.signals = signals[:5]   # cap at 5 signal tags

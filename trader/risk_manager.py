@@ -293,30 +293,35 @@ class RiskManager:
         base_size = config.DEX_BASE_POSITION_USD
 
         # 1. Volatility adjustment — HIGH vol = big opportunity, size UP (not down)
-        # Clamp vol_proxy so we don't go crazy on 500% moves
         vol_proxy = (abs(price_change_h1) + abs(price_change_h6 / 6)) / 2
         vol_proxy = max(vol_proxy, 1.0)
-        vol_boost = min(1.0 + (vol_proxy - 1.0) * 0.15, 2.0)  # 1.0x–2.0x
+        vol_boost = min(1.0 + (vol_proxy - 1.0) * 0.18, 2.5)  # 1.0x–2.5x (was 2.0x)
         vol_adjusted = base_size * vol_boost
 
         # 2. Safety scaling: riskier tokens get smaller positions
-        safety_multiplier = max(0.4, safety_score)
+        # Floor raised to 0.5 — even risky tokens deserve half the base size
+        safety_multiplier = max(0.5, safety_score)
 
         # 3. Score scaling: higher score = closer to full size
-        score_multiplier = 0.4 + (token_score * 0.6)
+        # Raised floor from 0.4 to 0.5 — don't half-size the entry
+        score_multiplier = 0.5 + (token_score * 0.5)
 
         size = vol_adjusted * safety_multiplier * score_multiplier
 
-        # 4. Caps
+        # 4. Equity-scaled floor: ensure base position is meaningful relative to equity
+        # On small wallets, scale base_size proportionally so % exposure is consistent
+        equity_floor = equity * 0.04  # At least 4% of equity (up from ~2%)
+        size = max(size, equity_floor)
+
+        # 5. Caps
         size = min(size, config.DEX_MAX_POSITION_USD)
         # Equity cap: scale up for small wallets so DEX_MIN_POSITION_USD is always achievable.
-        # On a $51 wallet MAX_POSITION_PCT (10%) = $5.10 < $8 minimum → zero trades.
-        # Dynamic cap: at least 1.5× min position as percentage of equity, hard ceiling 25%.
-        _min_pct = (config.DEX_MIN_POSITION_USD / equity) * 1.5 if equity > 0 else 0.25
-        _equity_cap_pct = max(config.MAX_POSITION_PCT, min(_min_pct, 0.25))
+        _min_pct = (config.DEX_MIN_POSITION_USD / equity) * 1.5 if equity > 0 else 0.30
+        _equity_cap_pct = max(config.MAX_POSITION_PCT, min(_min_pct, 0.30))
         size = min(size, equity * _equity_cap_pct)
         size = min(size, liquidity_usd * config.MIN_LIQUIDITY_RATIO)
-        size = min(size, self.portfolio.cash * 0.25)
+        # Cash cap: allow up to 35% per trade (up from 25%) for high-conviction entries
+        size = min(size, self.portfolio.cash * 0.35)
 
         if size < config.DEX_MIN_POSITION_USD:
             return 0.0
@@ -427,6 +432,15 @@ class RiskManager:
         if age_hours >= config.DEX_STALE_EXIT_HOURS:
             pnl_pct = position.get("current_pnl_pct", 0)
             if pnl_pct < config.DEX_STALE_MIN_GAIN_PCT:
+                # Override stale exit if position already taking partial profits
+                # (means it DID reach a good level, now waiting for moonshot)
+                partials_taken = len(position.get("partial_profits_taken", []))
+                if partials_taken > 0:
+                    return False, "Hold (partial profits taken — moonshot runner)"
+                # Override stale exit if still showing 5m momentum
+                price_change_m5 = position.get("price_change_m5", 0)
+                if abs(price_change_m5) > 3:
+                    return False, "Hold (active 5m momentum)"
                 return True, f"Stale ({age_hours:.1f}h, only {pnl_pct:.1%} gain)"
 
         return False, "Hold"

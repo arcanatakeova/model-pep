@@ -791,7 +791,7 @@ class AITrader:
             validated = []
             if prefiltered:
                 with concurrent.futures.ThreadPoolExecutor(
-                        max_workers=min(len(prefiltered), 8),
+                        max_workers=min(len(prefiltered), 20),
                         thread_name_prefix="dex-validate") as val_ex:
                     futs = [val_ex.submit(_validate, args) for args in prefiltered]
                     for f in concurrent.futures.as_completed(futs, timeout=15):
@@ -805,7 +805,7 @@ class AITrader:
                 validated.sort(key=lambda x: x[0].score, reverse=True)
 
             for token, size_usd, safety in validated:
-                if traded >= 6:
+                if traded >= 8:   # Up from 6 — execute more per cycle
                     break
                 self._open_dex_position(token, size_usd, safety)
                 held_symbols.add(token.base_symbol.upper())
@@ -848,9 +848,11 @@ class AITrader:
                                self.portfolio.cash, size_usd)
                 return
 
-            # ── Live wallet: verify SOL balance before attempting swap ───────
+            # ── Live wallet: verify SOL balance using cached value (avoids RPC per trade)
             if token.chain_id == "solana" and self.solana.is_connected:
-                sol_bal_usd = self.solana.get_portfolio_value_usd()
+                _sol, _usdc, _sol_usd, _cache_ts = self._wallet_balance_cache
+                # Use cached value if fresh (<10s), else fall back to portfolio.cash
+                sol_bal_usd = _sol_usd if (time.time() - _cache_ts) < 10 else self.portfolio.cash
                 if sol_bal_usd < size_usd * 1.05:   # Need trade size + ~5% for fees
                     logger.warning("SOL balance $%.2f insufficient for $%.2f trade — skipping",
                                    sol_bal_usd, size_usd)
@@ -995,6 +997,9 @@ class AITrader:
 
                     prev = pos.get("fast_prev_price", entry)
                     pos["fast_prev_price"] = current
+                    # Track 5m price change for stale-exit momentum override
+                    if prev > 0:
+                        pos["price_change_m5"] = (current - prev) / prev * 100
 
                     # ── 1. Spike capture: only sell the spike if already well in profit
                     # Don't sell early runners — only take spikes when you've already
@@ -1220,8 +1225,17 @@ class AITrader:
 
                 # 4. FULL EXIT conditions
                 remaining = pos.get("remaining_fraction", 1.0)
-                # Raise target as partials are taken
+                # Raise target as partials are taken — the moonshot runner rides for more
                 adj_target = pos["target_pct"] * (1 + (1 - remaining) * 0.5)
+
+                # ── Momentum hold extension: if 5m momentum still strong
+                # AND we're already in profit, extend the target by 30% to
+                # avoid cutting a still-running token at its first target.
+                m5_chg = pos.get("price_change_m5", 0)
+                if pnl_pct > 0.15 and abs(m5_chg) > 5:
+                    adj_target *= 1.30
+                    logger.debug("%s momentum extension: target → %.1f%% (5m: %+.1f%%)",
+                                 pos.get("symbol", "?"), adj_target * 100, m5_chg)
 
                 # Trailing stop: adaptive to the position's own stop distance
                 # Only kicks in after we're in profit by at least 50% of the stop

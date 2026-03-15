@@ -9,13 +9,13 @@ PAPER_TRADING = False         # Live mode by default — real Solana DEX trades 
 INITIAL_CAPITAL = 100_000.0   # Starting capital in USD (overridden by wallet balance)
 
 # ─── Risk Management ──────────────────────────────────────────────────────────
-MAX_POSITION_PCT = 0.15       # Max 15% of portfolio per position
-MAX_OPEN_POSITIONS = 12       # Max concurrent positions (focused, not spread thin)
+MAX_POSITION_PCT = 0.18       # Max 18% of portfolio per position (up from 15%)
+MAX_OPEN_POSITIONS = 15       # Max concurrent positions (up from 12)
 STOP_LOSS_PCT = 0.03          # 3% stop loss (CEX only — DEX uses dynamic stops)
 TAKE_PROFIT_PCT = 0.06        # 6% take profit (CEX only — DEX uses dynamic targets)
-RISK_PER_TRADE_PCT = 0.04     # Risk 4% of portfolio per trade (aggressive Kelly)
+RISK_PER_TRADE_PCT = 0.05     # Risk 5% of portfolio per trade (aggressive Kelly, up from 4%)
 MIN_SIGNAL_STRENGTH = 0.22    # Min ensemble score (lowered: capture trades in neutral markets)
-TRAILING_STOP_PCT = 0.05      # 5% trailing stop (wider = lets winners run)
+TRAILING_STOP_PCT = 0.08      # 8% trailing stop (wider = lets winners run further)
 
 # ─── Disabled strategies (Solana DEX only) ────────────────────────────────────
 FUTURES_ENABLED      = False   # No Binance futures
@@ -142,43 +142,43 @@ TRADE_LOG_FILE = "trades.json"
 PORTFOLIO_SNAPSHOT_INTERVAL = 300   # Save portfolio snapshot every 5 minutes
 
 # ─── DEX / On-Chain Settings ──────────────────────────────────────────────────
-DEX_MIN_SCORE = 0.38               # Quality gate (lowered: was missing good setups at 0.45)
-DEX_MAX_POSITION_USD = 500.0       # Max per DEX token (volatile = small size)
+DEX_MIN_SCORE = 0.30               # Quality gate (lowered from 0.38: 3-5x more candidates)
+DEX_MAX_POSITION_USD = 750.0       # Max per DEX token (raised from $500)
 DEX_PREFERRED_CHAINS = ["solana"]  # Solana only
 DEX_SCAN_INTERVAL_SEC = 4          # Scan DEX every 4s — catch entries faster
 NEW_PAIR_MAX_AGE_HOURS = 24        # Only tokens < 24h old (memecoins die after day 1)
-NEW_PAIR_MIN_LIQUIDITY = 8_000     # $8k minimum liquidity (catch early pumps)
+NEW_PAIR_MIN_LIQUIDITY = 5_000     # $5k minimum liquidity (catch very early pumps)
 
 # ─── Token Safety / Rug Protection (Balanced Mode) ──────────────────────────
-MIN_SAFETY_SCORE = 0.35            # Min safety to trade (lowered: high-conviction overrides)
-SAFETY_SCORE_WEIGHT = 0.15         # Weight of safety in overall token score (was 0.20)
+MIN_SAFETY_SCORE = 0.28            # Lowered: high-conviction overrides, more trades
+SAFETY_SCORE_WEIGHT = 0.12         # Reduced weight (was 0.15): momentum > safety for memecoins
 ENABLE_SELL_SIMULATION = True      # Honeypot check via Jupiter round-trip quote
 SELL_SIM_AMOUNT_USD = 1.0          # Dollar amount for sell simulation
-MAX_ROUND_TRIP_TAX_PCT = 0.40      # Max acceptable round-trip tax (40%: memecoins have fees)
+MAX_ROUND_TRIP_TAX_PCT = 0.45      # Max acceptable round-trip tax (memecoins have high fees)
 RUGCHECK_CACHE_TTL = 300           # Cache safety results for 5 minutes
-SAFETY_CHECK_TIMEOUT = 12          # Seconds before safety check times out (was 8: too short for new tokens)
+SAFETY_CHECK_TIMEOUT = 10          # Seconds before safety check times out
 BLOCK_HONEYPOTS = True             # Hard block if sell simulation fails completely
-MAX_TOP10_HOLDER_PCT = 0.80        # Penalize if top 10 holders own > 80% (was 70%: too aggressive)
+MAX_TOP10_HOLDER_PCT = 0.85        # Penalize if top 10 holders own > 85% (loosened from 80%)
 
 # ─── Volatility-Adjusted Position Sizing ────────────────────────────────────
-DEX_BASE_POSITION_USD = 75.0       # Base position for memecoin trades (raised from 50)
+DEX_BASE_POSITION_USD = 100.0      # Base position for memecoin trades (raised from $75)
 DEX_MIN_POSITION_USD = 2.0         # Minimum position size (covers Solana fees ~$0.50)
 POSITION_VOL_SCALAR = 1.0          # Multiplier for vol-adjusted sizing
-MAX_MEMECOIN_ALLOCATION_PCT = 0.50 # Max 50% of equity in memecoins (was 40%: too conservative)
+MAX_MEMECOIN_ALLOCATION_PCT = 0.65 # Max 65% of equity in memecoins (raised from 50%)
 
 # ─── Time-Based Exit Rules ──────────────────────────────────────────────────
-DEX_MAX_HOLD_HOURS = 6             # Force exit after 6h (was 8: memecoins die faster)
-DEX_STALE_EXIT_HOURS = 1.5         # Exit if no momentum after 1.5h (was 2: cut losers faster)
-DEX_STALE_MIN_GAIN_PCT = 0.03      # Need +3% gain to justify holding (was 2%)
+DEX_MAX_HOLD_HOURS = 10            # Force exit after 10h (raised from 6h — let winners run)
+DEX_STALE_EXIT_HOURS = 2.5         # Exit if no momentum after 2.5h (raised from 1.5h)
+DEX_STALE_MIN_GAIN_PCT = 0.015     # Need +1.5% gain to justify holding (lowered from 3%)
 
 # ─── Partial Profit Taking ──────────────────────────────────────────────────
 PARTIAL_PROFIT_ENABLED = True
 PARTIAL_PROFIT_TIERS = [
-    (0.15, 0.20),   # At +15% gain, sell 20% — secure initial profit
-    (0.40, 0.20),   # At +40% gain, sell another 20%
-    (0.80, 0.20),   # At +80% gain, sell another 20%
-    (1.50, 0.20),   # At +150% gain, sell another 20%
-    # Remaining 20% rides with trailing stop — lets moonshots run
+    (0.25, 0.15),   # At +25% gain, sell 15% — secure initial profit (was 20%/20%)
+    (0.60, 0.15),   # At +60% gain, sell another 15%
+    (1.20, 0.15),   # At +120% gain, sell another 15% (2.2x)
+    (2.50, 0.15),   # At +250% gain, sell another 15% (3.5x)
+    # Remaining 40% rides with trailing stop — moonshot runner (up from 20%)
 ]
 
 # ─── MEV / Sandwich Protection ──────────────────────────────────────────────
@@ -187,9 +187,9 @@ MEV_MAX_SLIPPAGE_BPS = 100         # Tighter slippage (1%) for MEV protection
 MEV_PRIORITY_FEE_LAMPORTS = 50000  # Higher priority fee to front-run sandwich
 
 # ─── Concentration Limits ───────────────────────────────────────────────────
-MAX_DEX_POSITIONS = 10             # Max concurrent DEX/memecoin positions (was 8)
-MAX_SAME_DEX_POSITIONS = 8         # Max positions on same DEX
-MIN_LIQUIDITY_RATIO = 0.08         # Position must be < 8% of pool liquidity (tighter to avoid slippage)
+MAX_DEX_POSITIONS = 15             # Max concurrent DEX/memecoin positions (up from 10)
+MAX_SAME_DEX_POSITIONS = 10        # Max positions on same DEX
+MIN_LIQUIDITY_RATIO = 0.15         # Position must be < 15% of pool liquidity (up from 8%)
 
 # ─── Solana / Phantom Wallet ──────────────────────────────────────────────────
 PHANTOM_PRIVATE_KEY = os.getenv("PHANTOM_PRIVATE_KEY", "")
