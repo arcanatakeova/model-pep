@@ -780,22 +780,9 @@
 
 <script>
 // ══ Config ═══════════════════════════════════════════════════════════════════
-const REFRESH_MS  = 10_000;
-const TICKER_DATA = [
-  {sym:'BTC',  base:42000, vol:1.4},
-  {sym:'ETH',  base:2300,  vol:1.8},
-  {sym:'SOL',  base:89,    vol:2.2},
-  {sym:'BNB',  base:320,   vol:1.1},
-  {sym:'AVAX', base:38,    vol:2.5},
-  {sym:'LINK', base:18,    vol:2.0},
-  {sym:'ARB',  base:1.2,   vol:2.8},
-  {sym:'OP',   base:2.8,   vol:2.4},
-  {sym:'SPY',  base:480,   vol:0.6},
-  {sym:'QQQ',  base:395,   vol:0.8},
-  {sym:'NVDA', base:620,   vol:1.6},
-  {sym:'EUR/USD', base:1.085, vol:0.3},
-  {sym:'GBP/USD', base:1.265, vol:0.35},
-];
+// SSE pushes live data every 5s (equity, positions, ticker)
+// Slow poll refreshes stats that change less often every 15s
+const SLOW_REFRESH_MS = 15_000;
 
 // ══ State ═════════════════════════════════════════════════════════════════════
 let _prevEquity   = 0;
@@ -868,30 +855,36 @@ setInterval(tickClock, 1000);
 tickClock();
 
 // ══ Ticker ════════════════════════════════════════════════════════════════════
-function buildTicker(positions) {
-  // Mix live positions + watchlist
-  const liveSyms = new Set(positions.map(p => p.symbol.split('/')[0].split('-')[0]));
+// tickerData: [{sym, price, pct}] from SSE (real CoinCap prices)
+// positions: open positions, injected at front with live P&L %
+function buildTicker(tickerData, positions = []) {
   const items = [];
 
-  // Live positions first
+  // Active positions first (use position P&L % for their change)
+  const posSyms = new Set();
   positions.forEach(p => {
-    const pct = p.unrealized_pnl_pct || 0;
-    items.push({ sym: p.symbol, price: p.current_price, pct, live: true });
-  });
-
-  // Fill with simulated watchlist prices
-  TICKER_DATA.forEach(t => {
-    if(!liveSyms.has(t.sym)) {
-      const noise = (Math.random()-0.5)*2 * t.vol * 0.01;
-      const pct = noise * 100;
-      items.push({ sym: t.sym, price: t.base * (1+noise), pct, live: false });
+    const sym = p.symbol.split('/')[0].split('-')[0];
+    if(!posSyms.has(sym)) {
+      items.push({ sym: p.symbol, price: p.current_price, pct: p.unrealized_pnl_pct || 0, live: true });
+      posSyms.add(sym);
     }
   });
 
+  // Append real CoinCap data for the rest
+  tickerData.forEach(t => {
+    if(!posSyms.has(t.sym)) {
+      items.push({ sym: t.sym, price: t.price, pct: t.pct, live: false });
+    }
+  });
+
+  if(!items.length) return;   // nothing to show yet
+
+  // Duplicate for seamless scroll loop
   const html = [...items, ...items].map(it => {
     const up = it.pct >= 0;
+    const glow = it.live ? ' style="color:var(--green);text-shadow:0 0 6px var(--green)"' : '';
     return `<div class="ticker-item">
-      <span class="ticker-sym">${esc(it.sym)}</span>
+      <span class="ticker-sym"${glow}>${esc(it.sym)}</span>
       <span class="ticker-price">${fmtPrice(it.price)}</span>
       <span class="ticker-chg ${up?'up':'dn'}">${up?'▲':'▼'} ${Math.abs(it.pct).toFixed(2)}%</span>
     </div>`;
@@ -899,7 +892,6 @@ function buildTicker(positions) {
 
   const inner = $('ticker-inner');
   inner.innerHTML = html;
-  // Restart animation
   inner.style.animation = 'none';
   void inner.offsetWidth;
   inner.style.animation = 'scroll-ticker 60s linear infinite';
@@ -1111,16 +1103,10 @@ function updatePortfolio(p) {
 }
 
 // ══ Open Positions ═════════════════════════════════════════════════════════════
-function updatePositions(positions, portfolio) {
+function updatePositions(positions) {
   $('pos-badge').textContent = `${positions.length} / 12`;
 
-  // Update open P&L in hero
-  const openPnl = positions.reduce((s,p)=>s+(p.unrealized_pnl||0),0);
-  const opEl = $('sub-openpl');
-  opEl.textContent = (openPnl>=0?'+':'')+fmt$(openPnl);
-  opEl.style.color = openPnl>=0 ? 'var(--green)' : 'var(--red)';
-
-  buildTicker(positions);
+  // Ticker and open P&L are updated by the SSE handler (handleLiveEvent)
 
   if(!positions.length) {
     $('pos-list').innerHTML = '<div class="empty-cell">No open positions — scanning markets…</div>';
@@ -1253,20 +1239,85 @@ function clearLog() {
   $('log-terminal').innerHTML = '<div style="color:var(--text3)">Log cleared.</div>';
 }
 
-// ══ Fetch ══════════════════════════════════════════════════════════════════════
+// ══ Fetch helper ═════════════════════════════════════════════════════════════
 async function fetchJSON(path) {
   const r = await fetch(path);
   if(!r.ok) throw new Error(r.status);
   return r.json();
 }
 
-// ══ Main Refresh Loop ══════════════════════════════════════════════════════════
-async function refresh() {
-  const [status, portfolio, positions, trades, equity, growth, alloc, log] =
+// ══ SSE Live Handler ══════════════════════════════════════════════════════════
+// Called every 5s with real-time equity + positions + CoinCap ticker
+function handleLiveEvent(data) {
+  // ── Mode / cycle badge ─────────────────────────────────────────────────────
+  updateStatus({ mode: data.mode, cycle: data.cycle });
+
+  // ── Hero equity (animated) ─────────────────────────────────────────────────
+  const eq    = data.equity    || 0;
+  const ret   = data.return_pct || 0;
+  const pnl   = data.return_usd || 0;
+  const cash  = data.cash      || 0;
+  const openPl = data.open_pnl  || 0;
+  const heroEl = $('hero-equity');
+  const prev   = _prevEquity;
+
+  if(prev && Math.abs(eq - prev) > 0.001) {
+    animateVal(heroEl, prev, eq, 600,
+      v => '$' + Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}));
+    heroEl.classList.remove('flash-up','flash-down');
+    heroEl.classList.add(eq >= prev ? 'flash-up' : 'flash-down');
+    setTimeout(() => heroEl.classList.remove('flash-up','flash-down'), 1000);
+  } else {
+    heroEl.textContent = '$' + eq.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  }
+  _prevEquity = eq;
+
+  const retColor = ret >= 0 ? 'var(--green)' : 'var(--red)';
+  $('hero-ret-arrow').textContent = ret >= 0 ? '▲' : '▼';
+  $('hero-ret-arrow').style.color = retColor;
+  $('hero-ret-abs').textContent   = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  $('hero-ret-abs').style.color   = retColor;
+  $('hero-ret-pct').textContent   = '(' + (ret >= 0 ? '+' : '') + ret.toFixed(2) + '%)';
+  $('hero-ret-pct').style.color   = retColor;
+  $('sub-initial').textContent    = '$' + (data.initial || 0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  $('sub-cash').textContent       = '$' + cash.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const opEl = $('sub-openpl');
+  opEl.textContent = (openPl >= 0 ? '+' : '') + '$' + Math.abs(openPl).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  opEl.style.color = openPl >= 0 ? 'var(--green)' : 'var(--red)';
+
+  // ── Open positions (live prices) ───────────────────────────────────────────
+  updatePositions(data.positions || []);
+
+  // ── Live ticker (real CoinCap prices) ─────────────────────────────────────
+  buildTicker(data.ticker || [], data.positions || []);
+
+  // ── Command bar counts ─────────────────────────────────────────────────────
+  $('cmd-pos').textContent = (data.positions || []).length;
+}
+
+// ══ SSE connection ════════════════════════════════════════════════════════════
+function initSSE() {
+  const es = new EventSource('/events');
+
+  es.onmessage = e => {
+    try {
+      const data = JSON.parse(e.data);
+      if(data.type === 'live') handleLiveEvent(data);
+    } catch(err) { /* ignore malformed */ }
+  };
+
+  es.onerror = () => {
+    // EventSource reconnects automatically — just show offline badge briefly
+    $('mode-badge').innerHTML = '<span class="pulse-dot"></span>RECONNECTING';
+    $('mode-badge').className = 'mode-badge mode-offline';
+  };
+}
+
+// ══ Slow poll — stats that change infrequently (15s) ════════════════════════
+async function slowRefresh() {
+  const [portfolio, trades, equity, growth, alloc, log] =
     await Promise.allSettled([
-      fetchJSON('/api/status'),
       fetchJSON('/api/portfolio'),
-      fetchJSON('/api/positions'),
       fetchJSON('/api/trades'),
       fetchJSON('/api/equity?limit=500'),
       fetchJSON('/api/growth'),
@@ -1274,23 +1325,21 @@ async function refresh() {
       fetchJSON('/api/log'),
     ]);
 
-  if(status.status==='fulfilled')    updateStatus(status.value);
-  if(portfolio.status==='fulfilled') updatePortfolio(portfolio.value);
-  if(positions.status==='fulfilled') updatePositions(positions.value, portfolio.value);
-  if(trades.status==='fulfilled')    updateTrades(trades.value);
-  if(equity.status==='fulfilled')    updateEquityChart(equity.value);
-  if(growth.status==='fulfilled')    updateGrowth(growth.value);
-  if(alloc.status==='fulfilled')     updateAllocChart(alloc.value, portfolio.value?.equity||0);
-  if(log.status==='fulfilled')       updateLog(log.value);
+  if(portfolio.status === 'fulfilled') updatePortfolio(portfolio.value);
+  if(trades.status    === 'fulfilled') updateTrades(trades.value);
+  if(equity.status    === 'fulfilled') updateEquityChart(equity.value);
+  if(growth.status    === 'fulfilled') updateGrowth(growth.value);
+  if(alloc.status     === 'fulfilled') updateAllocChart(alloc.value, portfolio.value?.equity || 0);
+  if(log.status       === 'fulfilled') updateLog(log.value);
 }
 
 // ══ Init ════════════════════════════════════════════════════════════════════
 window.addEventListener('DOMContentLoaded', () => {
   initEquityChart();
   initAllocChart();
-  buildTicker([]);
-  refresh();
-  setInterval(refresh, REFRESH_MS);
+  initSSE();                             // live: equity + positions + ticker via SSE push
+  slowRefresh();                         // immediate first load of stats
+  setInterval(slowRefresh, SLOW_REFRESH_MS);  // keep stats fresh every 15s
 });
 </script>
 </body>
