@@ -66,11 +66,9 @@ class PositionMonitor:
                     time.sleep(interval)
                     continue
 
-                # Trailing stop update
+                # Trailing stop update — use atomic helper to avoid dict race
                 new_trail = self._ex.risk.update_trailing_stop(pos, price)
-                if self.asset_id in port.open_positions:
-                    port.open_positions[self.asset_id]["trailing_stop"] = new_trail
-                    port.update_position_price(self.asset_id, price)
+                port.set_trailing_stop(self.asset_id, new_trail, price)
 
                 # Exit check — use _close_lock to prevent double-close
                 should_close, reason = self._ex.risk.should_close_position(pos, price)
@@ -151,6 +149,16 @@ class TradeExecutor:
                 return None
 
         return None
+
+    def restart_monitors_for_loaded_positions(self):
+        """
+        Start PositionMonitor threads for positions that were loaded from disk.
+        Must be called after portfolio.load() to ensure existing open positions
+        are actively monitored for stop-loss / take-profit / trailing stop.
+        """
+        for asset_id in list(self.portfolio.open_positions.keys()):
+            PositionMonitor(asset_id, self)
+            logger.info("Restarted monitor for loaded position: %s", asset_id)
 
     def update_all_positions(self):
         """
@@ -279,6 +287,7 @@ class TradeExecutor:
         """
         If we're already in a position and a new signal arrives,
         consider closing if the signal has flipped direction.
+        Uses _close_lock to prevent races with PositionMonitor threads.
         """
         pos = self.portfolio.open_positions.get(asset_id)
         if not pos:
@@ -287,10 +296,16 @@ class TradeExecutor:
         side = pos["side"]
         # Flip: we're long but get a strong sell signal → close
         if side == "long" and signal.signal == "SELL" and signal.conviction > 0.65:
-            return self._execute_close(asset_id, current_price, "Signal flip to SELL")
+            with self._close_lock:
+                if asset_id in self.portfolio.open_positions:
+                    return self._execute_close(asset_id, current_price, "Signal flip to SELL")
+            return None
         # Flip: we're short but get a strong buy signal → close
         if side == "short" and signal.signal == "BUY" and signal.conviction > 0.65:
-            return self._execute_close(asset_id, current_price, "Signal flip to BUY")
+            with self._close_lock:
+                if asset_id in self.portfolio.open_positions:
+                    return self._execute_close(asset_id, current_price, "Signal flip to BUY")
+            return None
 
         return None
 

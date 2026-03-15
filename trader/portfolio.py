@@ -113,6 +113,36 @@ class Portfolio:
                 pos["unrealized_pnl"] = (entry - current_price) * qty
                 pos["unrealized_pnl_pct"] = (entry / current_price - 1) * 100 if current_price > 0 else 0
 
+    def set_trailing_stop(self, asset_id: str, trailing_stop: float, current_price: float):
+        """Atomically update trailing stop and current price under the portfolio lock."""
+        if current_price <= 0:
+            return
+        with self._lock:
+            if asset_id not in self.open_positions:
+                return
+            pos = self.open_positions[asset_id]
+            pos["trailing_stop"] = trailing_stop
+            pos["current_price"] = current_price
+            entry = pos["entry_price"]
+            qty   = pos["qty"]
+            if pos["side"] == "long":
+                pos["unrealized_pnl"]     = (current_price - entry) * qty
+                pos["unrealized_pnl_pct"] = (current_price / entry - 1) * 100
+            else:
+                pos["unrealized_pnl"]     = (entry - current_price) * qty
+                pos["unrealized_pnl_pct"] = (entry / current_price - 1) * 100 if current_price > 0 else 0
+
+    def add_to_position(self, asset_id: str, qty_add: float, cost_usd: float) -> bool:
+        """Atomically increase position quantity and deduct cost from cash."""
+        with self._lock:
+            if asset_id not in self.open_positions:
+                return False
+            if self.cash < cost_usd:
+                return False
+            self.open_positions[asset_id]["qty"] += qty_add
+            self.cash -= cost_usd
+            return True
+
     def close_position(self, asset_id: str, price: float, reason: str = "") -> dict:
         """Close an open position and record the trade."""
         if price <= 0:
@@ -162,22 +192,27 @@ class Portfolio:
                         emoji, side.upper(), asset_id, price,
                         pnl, pnl_pct, reason)
 
-            # Archive + prune if too many closed trades in memory
+            # Archive + prune: extract trades under lock, write to disk outside lock
+            trades_to_archive = None
             if len(self.closed_trades) > _MAX_CLOSED_TRADES_MEMORY:
-                self._archive_old_trades()
+                cutoff = _MAX_CLOSED_TRADES_MEMORY // 2
+                trades_to_archive = self.closed_trades[:cutoff]
+                self.closed_trades = self.closed_trades[cutoff:]
 
-            return trade
+        # File I/O is intentionally outside the lock — disk writes must not block
+        # other threads that are trying to open/close positions concurrently.
+        if trades_to_archive:
+            self._write_archive(trades_to_archive)
 
-    def _archive_old_trades(self):
-        """Move the oldest half of closed_trades to the JSONL archive file."""
-        cutoff = _MAX_CLOSED_TRADES_MEMORY // 2
-        to_archive = self.closed_trades[:cutoff]
-        self.closed_trades = self.closed_trades[cutoff:]
+        return trade
+
+    def _write_archive(self, trades: list):
+        """Write a list of trades to the JSONL archive file (called outside the lock)."""
         try:
             with open(self._archive_file, "a") as f:
-                for trade in to_archive:
+                for trade in trades:
                     f.write(json.dumps(trade) + "\n")
-            logger.info("Archived %d old trades to %s", len(to_archive), self._archive_file)
+            logger.info("Archived %d old trades to %s", len(trades), self._archive_file)
         except Exception as e:
             logger.warning("Failed to archive trades: %s", e)
 
@@ -186,9 +221,19 @@ class Portfolio:
     # ─────────────────────────────────────────────────────────────────────────
 
     def performance_summary(self) -> dict:
-        """Compute portfolio performance statistics."""
-        closed = self.closed_trades
-        eq     = self.equity()
+        """Compute portfolio performance statistics (consistent snapshot under lock)."""
+        with self._lock:
+            closed = list(self.closed_trades)
+            pos_value = 0.0
+            for p in self.open_positions.values():
+                if p["side"] == "long":
+                    pos_value += p["qty"] * p.get("current_price", p["entry_price"])
+                else:
+                    pos_value += p.get("margin_usd", 0.0) + p.get("unrealized_pnl", 0.0)
+            eq = self.cash + pos_value
+            if eq > self.peak_equity:
+                self.peak_equity = eq
+            n_open = len(self.open_positions)
 
         total_return = (eq - self.initial_capital) / self.initial_capital * 100
 
@@ -199,7 +244,7 @@ class Portfolio:
                 "initial_capital": self.initial_capital,
                 "total_return_pct": round(total_return, 2),
                 "total_trades": 0,
-                "open_positions": len(self.open_positions),
+                "open_positions": n_open,
                 "win_rate_pct": 0,
                 "profit_factor": 0,
                 "max_drawdown_pct": 0,
@@ -232,13 +277,13 @@ class Portfolio:
             "avg_loss_pct": round(avg_loss, 2),
             "profit_factor": round(profit_factor, 2),
             "max_drawdown_pct": round(max_dd, 2),
-            "open_positions": len(self.open_positions),
-            "markets": self._breakdown_by_market(),
+            "open_positions": n_open,
+            "markets": self._breakdown_by_market(closed),
         }
 
-    def _breakdown_by_market(self) -> dict:
+    def _breakdown_by_market(self, closed_trades: list = None) -> dict:
         result = {}
-        for t in self.closed_trades:
+        for t in (closed_trades if closed_trades is not None else self.closed_trades):
             m = t.get("market", "unknown")
             if m not in result:
                 result[m] = {"trades": 0, "pnl_usd": 0.0, "wins": 0}

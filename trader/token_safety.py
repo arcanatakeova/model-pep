@@ -17,7 +17,7 @@ Critical rules:
 - Top 10 holders > 70%           → -0.30 (extreme concentration for memecoins)
 - RugCheck DANGER rating         → -0.20
 
-Safety bypass fix: is_safe_to_trade = score >= MIN_SAFETY_SCORE (raised to 0.45).
+Safety gate: is_safe_to_trade = score >= MIN_SAFETY_SCORE (see config.MIN_SAFETY_SCORE).
 Any token that is a confirmed honeypot gets score=0 regardless of momentum.
 """
 from __future__ import annotations
@@ -27,6 +27,7 @@ import concurrent.futures
 import json
 import logging
 import struct
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -98,6 +99,7 @@ class TokenSafetyChecker:
         self._cache_ttl = config.RUGCHECK_CACHE_TTL
         self._verified_tokens: Optional[set] = None
         self._verified_loaded_at = 0.0
+        self._verified_tokens_lock = threading.Lock()
 
         # Lazy-import Birdeye client to avoid circular deps
         self._birdeye = None
@@ -426,20 +428,29 @@ class TokenSafetyChecker:
             return {"available": False}
 
     def _check_jupiter_verified(self, mint_address: str) -> bool:
-        """Check if token is on Jupiter's verified token list (cached 1h)."""
+        """Check if token is on Jupiter's verified token list (cached 1h, thread-safe)."""
         try:
             now = time.time()
-            if self._verified_tokens is None or now - self._verified_loaded_at > 3600:
+            with self._verified_tokens_lock:
+                needs_refresh = (self._verified_tokens is None
+                                 or now - self._verified_loaded_at > 3600)
+            if needs_refresh:
                 resp = self._session.get(JUPITER_TOKEN_LIST, timeout=15)
+                new_set: set
                 if resp.status_code == 200:
                     tokens = resp.json()
-                    self._verified_tokens = {
-                        t.get("address", "") for t in tokens if t.get("address")
-                    }
+                    new_set = {t.get("address", "") for t in tokens if t.get("address")}
                 else:
-                    self._verified_tokens = set()
-                self._verified_loaded_at = now
-            return mint_address in (self._verified_tokens or set())
+                    new_set = set()
+                with self._verified_tokens_lock:
+                    # Only update if still stale (another thread may have refreshed first)
+                    if (self._verified_tokens is None
+                            or now - self._verified_loaded_at > 3600):
+                        self._verified_tokens = new_set
+                        self._verified_loaded_at = now
+            with self._verified_tokens_lock:
+                verified = self._verified_tokens or set()
+            return mint_address in verified
         except Exception as e:
             logger.debug("Jupiter token list error: %s", e)
             return False
