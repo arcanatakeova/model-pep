@@ -304,11 +304,7 @@ class AITrader:
         now_dt = datetime.now(timezone.utc)
         now    = now_dt.strftime("%H:%M:%S UTC")
         # Real equity = cash (SOL in wallet) + open DEX position values
-        dex_value = sum(
-            pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
-            * (1 + pos.get("current_pnl_pct", 0))
-            for pos in self._dex_positions.values()
-        )
+        dex_value = self._dex_value_snapshot()
         equity = self.portfolio.cash + dex_value
         logger.info("━━━ Cycle #%d  %s  SOL wallet: $%.2f  DEX positions: $%.2f  Total: $%.2f ━━━",
                     self._cycle, now, self.portfolio.cash, dex_value, equity)
@@ -319,11 +315,7 @@ class AITrader:
             self._last_day = today
             self.risk_mgr.reset_daily_loss_tracker()
             # Reset daily P&L baseline with true equity (CEX + DEX)
-            dex_val = sum(
-                p.get("size_usd", 0) * p.get("remaining_fraction", 1.0)
-                * (1 + p.get("current_pnl_pct", 0))
-                for p in self._dex_positions.values()
-            )
+            dex_val = self._dex_value_snapshot()
             self._day_start_eq = self.portfolio.equity() + dex_val
             logger.info("Daily reset: new day %s, equity=$%.2f, loss tracker cleared",
                         today, self._day_start_eq)
@@ -564,20 +556,8 @@ class AITrader:
                 # is always current, regardless of trades.json save frequency.
                 "recent_trades": list(self.portfolio.closed_trades)[-50:],
                 "signal_table": signal_table,
-                # DEX positions detail for dashboard
-                "dex_position_details": [
-                    {
-                        "symbol":    pos.get("symbol", "?"),
-                        "address":   pos.get("address", ""),
-                        "size_usd":  round(pos.get("size_usd", 0), 2),
-                        "entry":     pos.get("entry_price", 0),
-                        "current":   pos.get("current_price", pos.get("entry_price", 0)),
-                        "pnl_pct":   round(pos.get("current_pnl_pct", 0) * 100, 2),
-                        "remaining": round(pos.get("remaining_fraction", 1.0) * 100, 1),
-                        "chain":     pos.get("chain", "solana"),
-                    }
-                    for pos in self._dex_positions.values()
-                ],
+                # DEX positions detail for dashboard (snapshot under lock)
+                "dex_position_details": self._snapshot_dex_positions(),
             }
             self._atomic_json("bot_state.json", state)
             # Write equity curve every cycle so chart stays live (not just every 5 min)
@@ -1077,9 +1057,11 @@ class AITrader:
                     sol_usd   = sol_raw * sol_price if sol_price > 0 else 0.0
                     if sol_usd > 0:
                         # Subtract estimated deployed DEX capital to get free cash
+                        with self._dex_lock:
+                            _positions = list(self._dex_positions.values())
                         dex_deployed = sum(
                             pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
-                            for pos in self._dex_positions.values()
+                            for pos in _positions
                             if pos.get("chain") == "solana"
                         )
                         available = sol_usd - dex_deployed
@@ -1137,11 +1119,7 @@ class AITrader:
                         logger.debug("Live token reconcile error: %s", e)
 
                 # ── 3. Compute live equity and append to curve ────────────────
-                dex_value = sum(
-                    pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
-                    * (1 + pos.get("current_pnl_pct", 0))
-                    for pos in self._dex_positions.values()
-                )
+                dex_value = self._dex_value_snapshot()
                 equity = self.portfolio.cash + dex_value
 
                 # Add equity curve point every 5s so the chart is fully live
@@ -1245,6 +1223,34 @@ class AITrader:
 
             except Exception as e:
                 logger.debug("DEX position update error: %s", e)
+
+    def _snapshot_dex_positions(self) -> list:
+        """Return a snapshot of DEX positions under lock (thread-safe)."""
+        with self._dex_lock:
+            positions = list(self._dex_positions.values())
+        return [
+            {
+                "symbol":    pos.get("symbol", "?"),
+                "address":   pos.get("address", ""),
+                "size_usd":  round(pos.get("size_usd", 0), 2),
+                "entry":     pos.get("entry_price", 0),
+                "current":   pos.get("current_price", pos.get("entry_price", 0)),
+                "pnl_pct":   round(pos.get("current_pnl_pct", 0) * 100, 2),
+                "remaining": round(pos.get("remaining_fraction", 1.0) * 100, 1),
+                "chain":     pos.get("chain", "solana"),
+            }
+            for pos in positions
+        ]
+
+    def _dex_value_snapshot(self) -> float:
+        """Compute total DEX position value under lock (thread-safe)."""
+        with self._dex_lock:
+            positions = list(self._dex_positions.values())
+        return sum(
+            pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
+            * (1 + pos.get("current_pnl_pct", 0))
+            for pos in positions
+        )
 
     def _try_close_dex_position(self, pair_addr: str, pos: dict,
                                 current_price: float, reason: str) -> bool:
