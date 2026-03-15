@@ -165,6 +165,7 @@ class AITrader:
         self._last_day       = datetime.now(timezone.utc).date()
         self._equity_curve   = self._load_equity_curve()  # Persist chart history across restarts
         self._dex_positions: dict = {}  # addr → {buy_price, qty, chain, symbol}
+        self._dex_lock = threading.Lock()  # Protects _dex_positions cross-thread (fast monitor + main)
         self._cex_signals_cache = []    # Shared between CEX scan + futures swing scan
         self._cex_cache_lock = threading.Lock()  # Protects _cex_signals_cache cross-thread
         self._market_snapshot: dict = {}  # Latest market overview (BTC dom, sentiment)
@@ -772,6 +773,12 @@ class AITrader:
     def _open_dex_position(self, token, size_usd: float, safety=None):
         """Open a DEX position with safety verification and MEV protection."""
         try:
+            # ── Require a valid pair address as position key ─────────────────
+            if not token.pair_address:
+                logger.warning("SKIP %s: missing pair_address — cannot track position",
+                               token.base_symbol)
+                return
+
             # ── Cash gate: ensure we can actually afford this ────────────────
             if size_usd > self.portfolio.cash * 0.99:
                 logger.warning("Insufficient cash $%.2f for DEX buy $%.2f — skipping",
@@ -942,21 +949,21 @@ class AITrader:
                             f"FastMonitor stop-loss {pnl_pct:.0%}"))
 
                 for pair_addr, pos, current, reason in to_close:
-                    if pair_addr in self._dex_positions:
-                        logger.info("FAST EXIT %s @ $%.8f | %s",
-                                    pos.get("symbol", "?"), current, reason)
-                        ok = self._close_dex_position(pair_addr, pos, current, reason)
-                        if ok is not False:
-                            self._dex_positions.pop(pair_addr, None)
+                    logger.info("FAST EXIT %s @ $%.8f | %s",
+                                pos.get("symbol", "?"), current, reason)
+                    self._try_close_dex_position(pair_addr, pos, current, reason)
 
             except Exception as e:
                 logger.debug("FastPriceMonitor error: %s", e)
 
     def _update_dex_positions(self):
         """Check open DEX positions for time exits, partial profits, and stop/TP."""
-        closed = []
         for pair_addr, pos in list(self._dex_positions.items()):
             try:
+                # Fast monitor may have already claimed this position — skip it
+                if pair_addr not in self._dex_positions:
+                    continue
+
                 token = self.dex_screener.get_token_info(pos["address"], pos["chain"])
                 if not token or token.price_usd <= 0:
                     continue
@@ -986,27 +993,21 @@ class AITrader:
                             f"Spike exit: +{cycle_surge:.0%} single-cycle surge "
                             f"(total PnL +{pnl_pct:.0%})"
                         )
-                        closed_ok = self._close_dex_position(
-                            pair_addr, pos, current, spike_reason)
-                        if closed_ok is not False:
-                            closed.append(pair_addr)
+                        self._try_close_dex_position(pair_addr, pos, current, spike_reason)
                         continue
                 pos["prev_price"] = current
 
                 # 1. TIME-BASED exits
                 should_exit, time_reason = self.risk_mgr.check_time_exit(pos)
                 if should_exit:
-                    closed_ok = self._close_dex_position(pair_addr, pos, current, time_reason)
-                    if closed_ok is not False:
-                        closed.append(pair_addr)
+                    self._try_close_dex_position(pair_addr, pos, current, time_reason)
                     continue
 
                 # 2. DUST CLEANUP — remaining fraction too small to trade meaningfully
                 remaining_now = pos.get("remaining_fraction", 1.0)
                 if remaining_now < 0.02:
-                    closed_ok = self._close_dex_position(pair_addr, pos, current, "Dust cleanup (<2% remaining)")
-                    if closed_ok is not False:
-                        closed.append(pair_addr)
+                    self._try_close_dex_position(
+                        pair_addr, pos, current, "Dust cleanup (<2% remaining)")
                     continue
 
                 # 3. PARTIAL PROFIT-TAKING
@@ -1033,15 +1034,23 @@ class AITrader:
                     reason = f"Trailing stop (peak=${peak:.8f}, trail={trail_pct:.0%})"
 
                 if reason:
-                    closed_ok = self._close_dex_position(pair_addr, pos, current, reason)
-                    if closed_ok is not False:
-                        closed.append(pair_addr)
+                    self._try_close_dex_position(pair_addr, pos, current, reason)
 
             except Exception as e:
                 logger.debug("DEX position update error: %s", e)
 
-        for addr in closed:
-            self._dex_positions.pop(addr, None)
+    def _try_close_dex_position(self, pair_addr: str, pos: dict,
+                                current_price: float, reason: str) -> bool:
+        """
+        Atomically claim (lock + pop) a position from _dex_positions then close it.
+        Returns False if the position was already claimed by another thread or if the
+        on-chain sell failed.  Safe to call from both the main loop and fast monitor.
+        """
+        with self._dex_lock:
+            if pair_addr not in self._dex_positions:
+                return False  # Already closed by the other thread — skip
+            self._dex_positions.pop(pair_addr)  # Claim ownership before releasing lock
+        return self._close_dex_position(pair_addr, pos, current_price, reason)
 
     def _close_dex_position(self, pair_addr: str, pos: dict, current_price: float, reason: str) -> bool:
         """Close a DEX position (remaining fraction only). Returns False if on-chain sell failed."""
@@ -1139,6 +1148,8 @@ class AITrader:
 
     def _run_polymarket_scan(self):
         """Scan Polymarket for prediction market edge plays."""
+        if not hasattr(self, "poly_trader"):
+            return
         try:
             # Hard 25s timeout — Polymarket API pagination can block for minutes
             # (each page: 10s timeout × 3 retries × N pages). Run in a thread so
