@@ -690,17 +690,20 @@ class AITrader:
             # ── Fast pre-filter: concentration + safety (in-memory, no I/O) ──
             # Build (token, size_usd) pairs for candidates that clear these gates.
             prefiltered = []
+            n_blocked_conc = n_blocked_safety = n_blocked_size = 0
             for token in candidates:
                 allowed, reason = self.risk_mgr.check_dex_concentration(
                     self._dex_positions, token.dex_id)
                 if not allowed:
-                    logger.info("Concentration: %s", reason)
+                    logger.info("Concentration block %s: %s", token.base_symbol, reason)
+                    n_blocked_conc += 1
                     continue
                 safety = getattr(token, "safety_report", None)
                 if safety and not safety.is_safe_to_trade:
                     logger.warning("SKIP %s: %s — %s", token.base_symbol,
                                    safety.risk_level,
                                    ", ".join(safety.risk_flags[:2]))
+                    n_blocked_safety += 1
                     continue
                 safety_score = safety.safety_score if safety else 0.5
                 size_usd = self.risk_mgr.dex_position_size_usd(
@@ -712,10 +715,18 @@ class AITrader:
                 )
                 size_usd = min(size_usd, config.DEX_MAX_POSITION_USD)
                 if size_usd < config.DEX_MIN_POSITION_USD:
-                    logger.warning("SKIP %s: size $%.2f below min $%.2f",
-                                   token.base_symbol, size_usd, config.DEX_MIN_POSITION_USD)
+                    logger.warning("SKIP %s: size $%.2f below min $%.2f (liq=$%.0f cash=$%.2f)",
+                                   token.base_symbol, size_usd, config.DEX_MIN_POSITION_USD,
+                                   token.liquidity_usd, self.portfolio.cash)
+                    n_blocked_size += 1
                     continue
+                logger.info("Prefilter OK %s: size=$%.2f score=%.2f safety=%.2f liq=$%.0f",
+                            token.base_symbol, size_usd, token.score, safety_score,
+                            token.liquidity_usd)
                 prefiltered.append((token, size_usd, safety))
+
+            logger.info("Prefilter: %d passed, %d conc-blocked, %d safety-blocked, %d size-blocked",
+                        len(prefiltered), n_blocked_conc, n_blocked_safety, n_blocked_size)
 
             # ── Parallel network validation: Jupiter price + Birdeye checks ──
             # Run all I/O-bound checks concurrently across candidates.
@@ -746,9 +757,12 @@ class AITrader:
                             if result is not None:
                                 validated.append(result)
                         except Exception as e:
-                            logger.debug("Validate candidate error: %s", e)
+                            logger.warning("Validate candidate error: %s", e)
                 # Preserve score-descending order after concurrent collection
                 validated.sort(key=lambda x: x[0].score, reverse=True)
+
+            logger.info("Validated: %d/%d passed, executing up to 8 buys",
+                        len(validated), len(prefiltered))
 
             for token, size_usd, safety in validated:
                 if traded >= 8:   # Up from 6 — execute more per cycle
@@ -789,7 +803,7 @@ class AITrader:
                 return
 
             # ── Cash gate: ensure we can actually afford this ────────────────
-            if size_usd > self.portfolio.cash * 0.99:
+            if size_usd > self.portfolio.cash:
                 logger.warning("Insufficient cash $%.2f for DEX buy $%.2f — skipping",
                                self.portfolio.cash, size_usd)
                 return
@@ -845,6 +859,13 @@ class AITrader:
                     safety_report=safety,
                     liquidity_usd=token.liquidity_usd,
                     pair_address=token.pair_address if token.dex_id == "pumpswap" else None)
+                if not tx:
+                    logger.warning("BUY skipped %s: safe_buy_token returned None "
+                                   "(check BUY FAILED / BLOCKED logs above)",
+                                   token.base_symbol)
+                elif tx.startswith("paper_"):
+                    logger.warning("BUY skipped %s: got paper tx in live mode — "
+                                   "solana.is_connected may have flipped", token.base_symbol)
                 if tx and not tx.startswith("paper_"):
                     pos_data["tx"] = tx
                     # Priority 1: parse on-chain transaction for exact fill price
@@ -1141,14 +1162,60 @@ class AITrader:
                 pnl_pct = (current - entry) / entry if entry > 0 else 0
                 pos["current_price"]  = current
                 pos["current_pnl_pct"] = pnl_pct
-                # Refresh liquidity for dynamic slippage calculations on exit
+                # Refresh live token signals for dynamic adjustment
                 if token.liquidity_usd > 0:
                     pos["liquidity_usd"] = token.liquidity_usd
+                pos["price_change_m5"]  = getattr(token, "price_change_m5",  0) or 0
+                pos["price_change_h1"]  = getattr(token, "price_change_h1",  0) or 0
+                pos["volume_24h"]       = getattr(token, "volume_24h",        0) or 0
+                pos["score"]            = getattr(token, "score", pos.get("score", 0))
 
                 # Update trailing high
                 pos["peak_price"] = max(pos.get("peak_price", entry), current)
                 peak = pos["peak_price"]
                 trail_pct = (peak - current) / peak if peak > 0 else 0
+
+                # ── DYNAMIC POSITION ADJUSTMENT based on live monitoring data ────
+                # 1. Pyramid add: position running well + strong 5m momentum
+                m5_now = getattr(token, "price_change_m5", 0) or 0
+                if (pnl_pct >= 0.20                          # 20%+ in profit
+                        and m5_now >= 3.0                    # 3%+ 5m momentum
+                        and pos.get("remaining_fraction", 1.0) >= 0.8   # haven't taken major partials
+                        and not pos.get("pyramided")         # only pyramid once per position
+                        and self.portfolio.cash > 2.0):      # have cash to add
+                    add_size = min(pos["size_usd"] * 0.30, self.portfolio.cash * 0.10,
+                                   config.DEX_MAX_POSITION_USD - pos["size_usd"])
+                    if add_size >= config.DEX_MIN_POSITION_USD:
+                        pos["size_usd"] += add_size
+                        self.portfolio.cash -= add_size
+                        pos["pyramided"] = True
+                        logger.info("PYRAMID %s +$%.2f (PnL=+%.0f%% 5m=+%.1f%%) → total $%.2f",
+                                    pos.get("symbol", "?"), add_size, pnl_pct * 100,
+                                    m5_now, pos["size_usd"])
+
+                # 2. Liquidity drain — exit early if pool liquidity dropped >40%
+                entry_liq = pos.get("entry_liquidity_usd", 0)
+                cur_liq   = token.liquidity_usd
+                if entry_liq <= 0:
+                    pos["entry_liquidity_usd"] = cur_liq  # record on first fetch
+                elif cur_liq > 0 and entry_liq > 0:
+                    liq_drop = (entry_liq - cur_liq) / entry_liq
+                    if liq_drop >= 0.40 and not pos.get("_liq_warned"):
+                        pos["_liq_warned"] = True
+                        logger.warning("TIGHTEN STOP %s: liquidity drained %.0f%% ($%.0f→$%.0f)",
+                                       pos.get("symbol", "?"), liq_drop * 100,
+                                       entry_liq, cur_liq)
+                        # Tighten stop by 40% (e.g. 30% stop → 18%)
+                        pos["stop_pct"] = pos.get("stop_pct", 0.20) * 0.60
+
+                # 3. Volume collapse — if 5m change is strongly negative while overall
+                # volume was previously strong, the momentum has flipped; tighten stop
+                if m5_now <= -5.0 and pnl_pct > 0 and not pos.get("_momentum_flip"):
+                    pos["_momentum_flip"] = True
+                    logger.info("MOMENTUM FLIP %s: 5m=%.1f%% PnL=+%.0f%% — tightening stop",
+                                pos.get("symbol", "?"), m5_now, pnl_pct * 100)
+                    pos["stop_pct"] = min(pos.get("stop_pct", 0.20),
+                                         max(0.08, pnl_pct * 0.30))  # protect 70% of gains
 
                 # 0. VOLATILITY SPIKE EXIT — sell at the top of a sudden pump
                 # If price surged ≥15% since the last cycle, we're likely at or near

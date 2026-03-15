@@ -28,8 +28,15 @@ import time
 from typing import Optional
 
 import requests
+from requests.adapters import HTTPAdapter
 
 import config
+
+# Shared session with larger pool to avoid "Connection pool is full" warnings
+# when multiple threads hit the same host (Helius RPC, Jupiter, Birdeye).
+_session = requests.Session()
+_session.mount("https://", HTTPAdapter(pool_connections=20, pool_maxsize=50))
+_session.mount("http://",  HTTPAdapter(pool_connections=20, pool_maxsize=50))
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +194,7 @@ class SolanaWallet:
         raydium_ok = False
 
         try:
-            resp = requests.get(
+            resp = _session.get(
                 "https://quote-api.jup.ag/v6/quote",
                 params={
                     "inputMint":  "So11111111111111111111111111111111111111112",
@@ -202,7 +209,7 @@ class SolanaWallet:
             pass
 
         try:
-            resp = requests.get(
+            resp = _session.get(
                 RAYDIUM_COMPUTE_URL,
                 params={
                     "inputMint":  "So11111111111111111111111111111111111111112",
@@ -621,7 +628,7 @@ class SolanaWallet:
             resp = None
             for swap_url in (JUPITER_SWAP_URL, JUPITER_SWAP_URL_ALT):
                 try:
-                    _r = requests.post(swap_url, json=swap_payload, timeout=15)
+                    _r = _session.post(swap_url, json=swap_payload, timeout=15)
                     if _r.ok:
                         resp = _r
                         break
@@ -643,7 +650,7 @@ class SolanaWallet:
         """Get Raydium quote and build swap tx. Returns (tx_b64, out_amount, price_impact) or (None, 0, 0)."""
         try:
             # Step 1: compute quote
-            resp = requests.get(RAYDIUM_COMPUTE_URL, params={
+            resp = _session.get(RAYDIUM_COMPUTE_URL, params={
                 "inputMint":  input_mint,
                 "outputMint": output_mint,
                 "amount":     str(amount),
@@ -662,7 +669,7 @@ class SolanaWallet:
             price_impact = float(swap_data.get("priceImpactPct", 0))
 
             # Step 2: build transaction
-            tx_resp = requests.post(RAYDIUM_TX_URL, json={
+            tx_resp = _session.post(RAYDIUM_TX_URL, json={
                 "computeUnitPriceMicroLamports": "auto",
                 "swapResponse": data,
                 "txVersion":    "V0",
@@ -741,7 +748,7 @@ class SolanaWallet:
 
             # ── Fetch on-chain accounts via Helius RPC ─────────────────────────
             def _get_account_data(address: str) -> Optional[bytes]:
-                r = requests.post(config.SOLANA_RPC_URL, json={
+                r = _session.post(config.SOLANA_RPC_URL, json={
                     "jsonrpc": "2.0", "id": 1,
                     "method": "getAccountInfo",
                     "params": [address, {"encoding": "base64", "commitment": "confirmed"}],
@@ -918,7 +925,7 @@ class SolanaWallet:
                     [bytes(owner), bytes(prog), bytes(mint_pk)], ATA_PROG)[0]
 
             def _get_data(addr):
-                r = requests.post(config.SOLANA_RPC_URL, json={
+                r = _session.post(config.SOLANA_RPC_URL, json={
                     "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
                     "params": [str(addr), {"encoding": "base64", "commitment": "confirmed"}],
                 }, timeout=10)
@@ -931,7 +938,7 @@ class SolanaWallet:
             # pool_address may already be known (e.g. from DexScreener scanner);
             # only query DexScreener if not provided.
             if not pool_address:
-                ds = requests.get(
+                ds = _session.get(
                     f"https://api.dexscreener.com/latest/dex/tokens/{pump_mint}",
                     timeout=8)
                 if ds.ok:
@@ -990,7 +997,7 @@ class SolanaWallet:
             # its account owner field (determines correct ATA derivation + create ix)
             _TOKEN22_PROG_STR = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
             try:
-                _mint_info_r = requests.post(config.SOLANA_RPC_URL, json={
+                _mint_info_r = _session.post(config.SOLANA_RPC_URL, json={
                     "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
                     "params": [pump_mint, {"encoding": "base64", "commitment": "confirmed"}],
                 }, timeout=8)
@@ -1046,12 +1053,12 @@ class SolanaWallet:
 
             ref_accs = None
             try:
-                r_sigs = requests.post(config.SOLANA_RPC_URL, json={
+                r_sigs = _session.post(config.SOLANA_RPC_URL, json={
                     "jsonrpc": "2.0", "id": 1, "method": "getSignaturesForAddress",
                     "params": [pool_address, {"limit": 20}],
                 }, timeout=10)
                 for sig_info in r_sigs.json().get("result", []):
-                    r2 = requests.post(config.SOLANA_RPC_URL, json={
+                    r2 = _session.post(config.SOLANA_RPC_URL, json={
                         "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
                         "params": [sig_info["signature"],
                                    {"encoding": "base64", "maxSupportedTransactionVersion": 0}],
@@ -1312,7 +1319,7 @@ class SolanaWallet:
                     "priorityFee":      0.0001,
                     "pool":             pool,
                 }
-            resp = requests.post(
+            resp = _session.post(
                 PUMPFUN_TRADE_URL,
                 headers={"Content-Type": "application/json", "User-Agent": _BROWSER_UA},
                 json=payload,
@@ -1350,7 +1357,7 @@ class SolanaWallet:
             # Try primary endpoint first; fall back to lite.jup.ag on DNS failure
             for url in (JUPITER_QUOTE_URL, JUPITER_QUOTE_URL_ALT):
                 try:
-                    resp = requests.get(url, params=params, timeout=5)
+                    resp = _session.get(url, params=params, timeout=5)
                     if resp.ok:
                         data = resp.json()
                         if data.get("error"):
@@ -1400,7 +1407,7 @@ class SolanaWallet:
                 "method": "sendBundle",
                 "params": [[tip_tx_b64, signed_b64]],
             }
-            resp = requests.post(
+            resp = _session.post(
                 JITO_BUNDLE_URL, json=bundle_payload, timeout=15,
                 headers={"Content-Type": "application/json"},
             )
@@ -1540,7 +1547,7 @@ class SolanaWallet:
                     "options": {"priorityLevel": "High"},
                 }],
             }
-            resp = requests.post(rpc_url, json=payload, timeout=5)
+            resp = _session.post(rpc_url, json=payload, timeout=5)
             if resp.ok:
                 fee = resp.json().get("result", {}).get("priorityFeeEstimate", 0)
                 if fee and fee > 0:
@@ -1589,7 +1596,7 @@ class SolanaWallet:
         if not self.is_connected:
             return 0, 6
         try:
-            resp = requests.post(config.SOLANA_RPC_URL, json={
+            resp = _session.post(config.SOLANA_RPC_URL, json={
                 "jsonrpc": "2.0", "id": 1,
                 "method": "getTokenAccountsByOwner",
                 "params": [
@@ -1643,7 +1650,7 @@ class SolanaWallet:
         # 1. Birdeye (real-time, most accurate when key available)
         if config.BIRDEYE_API_KEY:
             try:
-                resp = requests.get(
+                resp = _session.get(
                     "https://public-api.birdeye.so/defi/price",
                     params={"address": SOL_MINT},
                     headers={"X-API-KEY": config.BIRDEYE_API_KEY, "x-chain": "solana"},
@@ -1659,7 +1666,7 @@ class SolanaWallet:
 
         # 2. Jupiter Price API v2 (no key, real DEX price)
         try:
-            resp = requests.get(
+            resp = _session.get(
                 "https://api.jup.ag/price/v2",
                 params={"ids": SOL_MINT},
                 timeout=4,
@@ -1675,7 +1682,7 @@ class SolanaWallet:
 
         # 3. CoinGecko (free, slightly delayed)
         try:
-            resp = requests.get(
+            resp = _session.get(
                 "https://api.coingecko.com/api/v3/simple/price",
                 params={"ids": "solana", "vs_currencies": "usd"},
                 timeout=4,
@@ -1706,7 +1713,7 @@ class SolanaWallet:
         if not self.is_connected:
             return {}
         try:
-            resp = requests.post(config.SOLANA_RPC_URL, json={
+            resp = _session.post(config.SOLANA_RPC_URL, json={
                 "jsonrpc": "2.0", "id": 1,
                 "method": "getTokenAccountsByOwner",
                 "params": [
@@ -1755,7 +1762,7 @@ class SolanaWallet:
         if not self.is_connected or not signature or signature.startswith("paper"):
             return {}
         try:
-            resp = requests.post(config.SOLANA_RPC_URL, json={
+            resp = _session.post(config.SOLANA_RPC_URL, json={
                 "jsonrpc": "2.0", "id": 1,
                 "method": "getTransaction",
                 "params": [
