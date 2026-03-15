@@ -54,6 +54,8 @@ _RENT_SYSVAR  = "SysvarRent111111111111111111111111111111111"
 import hashlib as _hashlib
 _PUMP_BUY_DISC = _hashlib.sha256(b"global:buy").digest()[:8]
 
+_PUMP_SELL_DISC = _hashlib.sha256(b"global:sell").digest()[:8]
+
 # Raydium swap API — used as fallback when Jupiter is geo-blocked
 RAYDIUM_COMPUTE_URL  = "https://transaction-v1.raydium.io/compute/swap-base-in"
 RAYDIUM_TX_URL       = "https://transaction-v1.raydium.io/transaction/swap-base-in"
@@ -432,18 +434,19 @@ class SolanaWallet:
             logger.info("Jupiter unavailable — trying Raydium")
             tx_b64, out_amount, price_impact = self._quote_and_build_raydium(
                 input_mint, output_mint, raw_input_amount, slippage_bps)
-        if tx_b64 is None and output_mint.endswith("pump"):
+        _is_pump = output_mint.endswith("pump") or input_mint.endswith("pump")
+        if tx_b64 is None and _is_pump:
             logger.info("Raydium unavailable — trying Pump.fun bonding curve (PumpPortal)")
             tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
-                output_mint, raw_input_amount, slippage_bps, pool="pump")
+                input_mint, output_mint, raw_input_amount, slippage_bps, pool="pump")
             if tx_b64 is None:
                 logger.info("Pump.fun bonding curve unavailable — trying PumpSwap AMM (PumpPortal)")
                 tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
-                    output_mint, raw_input_amount, slippage_bps, pool="pumpswap")
+                    input_mint, output_mint, raw_input_amount, slippage_bps, pool="pumpswap")
             if tx_b64 is None:
                 logger.info("PumpPortal unavailable — building Pump.fun tx directly on-chain")
                 tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun_direct(
-                    output_mint, raw_input_amount, slippage_bps)
+                    input_mint, output_mint, raw_input_amount, slippage_bps)
         elif tx_b64 is None:
             logger.info("Raydium unavailable — token is not a Pump.fun token, no further fallbacks")
         if tx_b64 is None:
@@ -601,16 +604,25 @@ class SolanaWallet:
             logger.warning("Raydium quote/build exception: %s", e)
             return None, 0, 0.0
 
-    def _quote_and_build_pumpfun_direct(self, output_mint: str, amount_lamports: int,
-                                        slippage_bps: int,
+    def _quote_and_build_pumpfun_direct(self, input_mint: str, output_mint: str,
+                                        amount_raw: int, slippage_bps: int,
                                         ) -> tuple[Optional[str], int, float]:
-        """Build a Pump.fun bonding-curve buy tx directly using on-chain data.
+        """Build a Pump.fun bonding-curve buy OR sell tx directly using on-chain data.
 
-        Does NOT depend on PumpPortal or any third-party API — only Helius RPC.
-        Uses the Pump.fun program's constant-product AMM formula:
-            tokens_out = virtualTokenReserves * sol_in / (virtualSolReserves + sol_in)
-        Returns (tx_b64, token_amount, 0.0) or (None, 0, 0.0) on failure.
+        Handles both directions:
+          BUY:  input=SOL,   output=*pump token  →  amount_raw = SOL lamports
+          SELL: input=*pump, output=SOL           →  amount_raw = token raw units
+
+        Does NOT depend on PumpPortal — only uses the working Helius RPC.
+        AMM formulas (constant product):
+          buy:  tokens_out = vtr * sol_in  / (vsr + sol_in)
+          sell: sol_out    = vsr * tok_in  / (vtr + tok_in)   (then apply 1% fee)
+        Returns (tx_b64, out_amount, 0.0) or (None, 0, 0.0) on failure.
         """
+        SOL_MINT = "So11111111111111111111111111111111111111112"
+        is_buy = output_mint.endswith("pump")
+        pump_mint_str = output_mint if is_buy else input_mint
+
         try:
             import struct
             from solders.pubkey import Pubkey
@@ -624,7 +636,7 @@ class SolanaWallet:
             RENT_SYS   = Pubkey.from_string(_RENT_SYSVAR)
             ATA_PROG   = Pubkey.from_string(_ATA_PROG)
 
-            mint = Pubkey.from_string(output_mint)
+            mint = Pubkey.from_string(pump_mint_str)
             user = self._keypair.pubkey()
 
             # ── Derive PDAs ────────────────────────────────────────────────────
@@ -656,123 +668,169 @@ class SolanaWallet:
                 return base64.b64decode(val["data"][0])
 
             # Read fee_recipient from global state (offset 41, 32 bytes)
+            # and feeBasisPoints (offset 105, u64) for sell fee calculation
             gdata = _get_account_data(str(global_pda))
-            if not gdata or len(gdata) < 73:
+            if not gdata or len(gdata) < 113:
                 logger.warning("Pump.fun direct: global account fetch failed")
                 return None, 0, 0.0
             fee_recipient = Pubkey.from_bytes(gdata[41:73])
+            fee_bps, = struct.unpack_from("<Q", gdata, 105)   # typically 100 (1%)
 
             # Read bonding curve reserves
             bcdata = _get_account_data(str(bc_pda))
             if not bcdata or len(bcdata) < 49:
                 logger.warning("Pump.fun direct: bonding curve not found for %s",
-                               output_mint[:12])
+                               pump_mint_str[:12])
                 return None, 0, 0.0
-            vtr, vsr = struct.unpack_from("<QQ", bcdata, 8)   # virtualTokenReserves, virtualSolReserves
+            vtr, vsr = struct.unpack_from("<QQ", bcdata, 8)
             complete = bcdata[48] != 0
             if complete:
                 logger.info("Pump.fun direct: %s bonding curve complete (graduated)",
-                            output_mint[:12])
+                            pump_mint_str[:12])
                 return None, 0, 0.0
-            if vsr == 0:
+            if vsr == 0 or vtr == 0:
                 return None, 0, 0.0
 
-            # ── AMM formula: tokens out ────────────────────────────────────────
-            token_amount = (vtr * amount_lamports) // (vsr + amount_lamports)
-            if token_amount <= 0:
-                logger.warning("Pump.fun direct: zero token calc for %s", output_mint[:12])
-                return None, 0, 0.0
-            max_sol_cost = int(amount_lamports * (1 + slippage_bps / 10000))
+            # ── Build instruction for BUY or SELL ─────────────────────────────
+            if is_buy:
+                # AMM: tokens_out = vtr * sol_in / (vsr + sol_in)
+                token_amount = (vtr * amount_raw) // (vsr + amount_raw)
+                if token_amount <= 0:
+                    logger.warning("Pump.fun direct: zero token calc for %s", pump_mint_str[:12])
+                    return None, 0, 0.0
+                max_sol_cost = int(amount_raw * (1 + slippage_bps / 10000))
 
-            # ── Instructions ───────────────────────────────────────────────────
-            # 1. Create user ATA idempotently (no-op if already exists)
-            create_ata_ix = Instruction(
-                program_id=ATA_PROG,
-                accounts=[
-                    AccountMeta(pubkey=user,     is_signer=True,  is_writable=True),
-                    AccountMeta(pubkey=user_ata, is_signer=False, is_writable=True),
-                    AccountMeta(pubkey=user,     is_signer=False, is_writable=False),
-                    AccountMeta(pubkey=mint,     is_signer=False, is_writable=False),
-                    AccountMeta(pubkey=SYS_PROG, is_signer=False, is_writable=False),
-                    AccountMeta(pubkey=TOKEN_PROG, is_signer=False, is_writable=False),
-                ],
-                data=bytes([1]),   # discriminator 1 = CreateIdempotent
-            )
+                # Create user ATA idempotently, then buy
+                create_ata_ix = Instruction(
+                    program_id=ATA_PROG,
+                    accounts=[
+                        AccountMeta(pubkey=user,       is_signer=True,  is_writable=True),
+                        AccountMeta(pubkey=user_ata,   is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=user,       is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=mint,       is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=SYS_PROG,   is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=TOKEN_PROG, is_signer=False, is_writable=False),
+                    ],
+                    data=bytes([1]),   # 1 = CreateIdempotent
+                )
+                main_data = _PUMP_BUY_DISC + struct.pack("<QQ", token_amount, max_sol_cost)
+                main_ix = Instruction(
+                    program_id=PUMP_PROG,
+                    accounts=[
+                        AccountMeta(pubkey=global_pda,   is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=fee_recipient, is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=mint,          is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=bc_pda,        is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=bc_ata,        is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=user_ata,      is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=user,          is_signer=True,  is_writable=True),
+                        AccountMeta(pubkey=SYS_PROG,      is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=TOKEN_PROG,    is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=RENT_SYS,      is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=ev_auth,       is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=PUMP_PROG,     is_signer=False, is_writable=False),
+                    ],
+                    data=main_data,
+                )
+                instructions = [create_ata_ix, main_ix]
+                out_amount = token_amount
+                logger.info("Pump.fun direct BUY: %.6f SOL → %d tokens (%s)",
+                            amount_raw / 1e9, token_amount, pump_mint_str[:12])
 
-            # 2. Pump.fun buy instruction
-            buy_data = _PUMP_BUY_DISC + struct.pack("<QQ", token_amount, max_sol_cost)
-            buy_ix = Instruction(
-                program_id=PUMP_PROG,
-                accounts=[
-                    AccountMeta(pubkey=global_pda,   is_signer=False, is_writable=False),
-                    AccountMeta(pubkey=fee_recipient, is_signer=False, is_writable=True),
-                    AccountMeta(pubkey=mint,          is_signer=False, is_writable=False),
-                    AccountMeta(pubkey=bc_pda,        is_signer=False, is_writable=True),
-                    AccountMeta(pubkey=bc_ata,        is_signer=False, is_writable=True),
-                    AccountMeta(pubkey=user_ata,      is_signer=False, is_writable=True),
-                    AccountMeta(pubkey=user,          is_signer=True,  is_writable=True),
-                    AccountMeta(pubkey=SYS_PROG,      is_signer=False, is_writable=False),
-                    AccountMeta(pubkey=TOKEN_PROG,    is_signer=False, is_writable=False),
-                    AccountMeta(pubkey=RENT_SYS,      is_signer=False, is_writable=False),
-                    AccountMeta(pubkey=ev_auth,       is_signer=False, is_writable=False),
-                    AccountMeta(pubkey=PUMP_PROG,     is_signer=False, is_writable=False),
-                ],
-                data=buy_data,
-            )
+            else:
+                # SELL: AMM: sol_out_gross = vsr * tokens / (vtr + tokens), then apply fee
+                sol_out_gross = (vsr * amount_raw) // (vtr + amount_raw)
+                sol_out_net   = sol_out_gross * (10000 - fee_bps) // 10000
+                min_sol_out   = int(sol_out_net * (1 - slippage_bps / 10000))
+                if sol_out_net <= 0:
+                    logger.warning("Pump.fun direct: zero SOL calc for sell of %s",
+                                   pump_mint_str[:12])
+                    return None, 0, 0.0
+
+                main_data = _PUMP_SELL_DISC + struct.pack("<QQ", amount_raw, min_sol_out)
+                main_ix = Instruction(
+                    program_id=PUMP_PROG,
+                    accounts=[
+                        AccountMeta(pubkey=global_pda,   is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=fee_recipient, is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=mint,          is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=bc_pda,        is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=bc_ata,        is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=user_ata,      is_signer=False, is_writable=True),
+                        AccountMeta(pubkey=user,          is_signer=True,  is_writable=True),
+                        AccountMeta(pubkey=SYS_PROG,      is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=ATA_PROG,      is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=TOKEN_PROG,    is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=ev_auth,       is_signer=False, is_writable=False),
+                        AccountMeta(pubkey=PUMP_PROG,     is_signer=False, is_writable=False),
+                    ],
+                    data=main_data,
+                )
+                instructions = [main_ix]
+                out_amount = sol_out_net
+                logger.info("Pump.fun direct SELL: %d tokens → %.6f SOL (%s)",
+                            amount_raw, sol_out_net / 1e9, pump_mint_str[:12])
 
             # ── Build + sign VersionedTransaction ─────────────────────────────
             bh = self._client.get_latest_blockhash().value.blockhash
             msg = MessageV0.try_compile(
                 payer=user,
-                instructions=[create_ata_ix, buy_ix],
+                instructions=instructions,
                 address_lookup_table_accounts=[],
                 recent_blockhash=bh,
             )
             tx = VersionedTransaction(msg, [self._keypair])
             tx_b64 = base64.b64encode(bytes(tx)).decode()
-            logger.info("Pump.fun direct tx built: %.6f SOL → %d tokens (%s)",
-                        amount_lamports / 1e9, token_amount, output_mint[:12])
-            return tx_b64, token_amount, 0.0
+            return tx_b64, out_amount, 0.0
 
         except Exception as e:
             logger.warning("Pump.fun direct exception: %s", e)
             return None, 0, 0.0
 
-    def _quote_and_build_pumpfun(self, output_mint: str, amount_lamports: int,
-                                 slippage_bps: int,
+    def _quote_and_build_pumpfun(self, input_mint: str, output_mint: str,
+                                 amount_raw: int, slippage_bps: int,
                                  pool: str = "pump",
                                  ) -> tuple[Optional[str], int, float]:
-        """Build a buy tx via PumpPortal.
+        """Build a buy or sell tx via PumpPortal.
+
+        Detects direction from input/output mints:
+          BUY:  output ends with "pump" → amount_raw = SOL lamports
+          SELL: input  ends with "pump" → amount_raw = token raw units
 
         pool="pump"     → Pump.fun bonding curve (pre-graduation)
         pool="pumpswap" → Pump.fun AMM (post-graduation, March 2025+)
-
-        PumpPortal returns raw VersionedTransaction bytes (not JSON). We base64-encode
-        them so the existing _sign_and_send_* code handles them identically to
-        Jupiter/Raydium transactions. Output amount is not exposed by the API
-        (returns 0); the caller must accept out_amount=0 as "unknown".
         """
+        SOL_MINT = "So11111111111111111111111111111111111111112"
+        is_buy = output_mint.endswith("pump")
+        pump_mint = output_mint if is_buy else input_mint
         try:
-            amount_sol = amount_lamports / 1e9
-            # PumpPortal expects slippage as integer percentage (e.g. 10 = 10%)
-            # Use minimum 10% — memecoins need wide slippage
             slippage_pct = max(10, slippage_bps // 100)
-            resp = requests.post(
-                PUMPFUN_TRADE_URL,
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": _BROWSER_UA,
-                },
-                json={
+            if is_buy:
+                payload = {
                     "publicKey":        self._pubkey,
                     "action":           "buy",
-                    "mint":             output_mint,
+                    "mint":             pump_mint,
                     "denominatedInSol": "true",
-                    "amount":           round(amount_sol, 6),
+                    "amount":           round(amount_raw / 1e9, 6),
                     "slippage":         slippage_pct,
                     "priorityFee":      0.0001,
                     "pool":             pool,
-                },
+                }
+            else:
+                payload = {
+                    "publicKey":        self._pubkey,
+                    "action":           "sell",
+                    "mint":             pump_mint,
+                    "denominatedInSol": "false",
+                    "amount":           amount_raw,
+                    "slippage":         slippage_pct,
+                    "priorityFee":      0.0001,
+                    "pool":             pool,
+                }
+            resp = requests.post(
+                PUMPFUN_TRADE_URL,
+                headers={"Content-Type": "application/json", "User-Agent": _BROWSER_UA},
+                json=payload,
                 timeout=10,
             )
             if not resp.ok:
@@ -783,8 +841,9 @@ class SolanaWallet:
             if not tx_bytes:
                 return None, 0, 0.0
             tx_b64 = base64.b64encode(tx_bytes).decode()
-            logger.debug("PumpPortal [pool=%s] tx built: %.6f SOL → %s", pool, amount_sol, output_mint[:12])
-            return tx_b64, 0, 0.0  # out_amount unknown until tx lands
+            logger.debug("PumpPortal [pool=%s] %s tx built: %s",
+                         pool, "buy" if is_buy else "sell", pump_mint[:12])
+            return tx_b64, 0, 0.0
         except Exception as e:
             logger.warning("PumpPortal exception: %s", e)
             return None, 0, 0.0
