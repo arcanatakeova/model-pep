@@ -1058,7 +1058,8 @@ class AITrader:
         liq_usd = pos.get("liquidity_usd", 0.0)
         if pos["chain"] == "solana" and self.solana.is_connected and "paper" not in pos.get("tx", ""):
             sell_result = self.solana.sell_token(pos["address"], proceeds,
-                                                liquidity_usd=liq_usd)
+                                                liquidity_usd=liq_usd,
+                                                pair_address=pair_addr if pos.get("dex_id") == "pumpswap" else None)
             if sell_result:
                 _sig, actual_usd = sell_result
                 self.portfolio.cash += actual_usd
@@ -1117,7 +1118,8 @@ class AITrader:
             if (pos["chain"] == "solana" and self.solana.is_connected
                     and "paper" not in pos.get("tx", "")):
                 sell_result = self.solana.sell_token_partial(pos["address"], fraction,
-                                                             liquidity_usd=liq_usd)
+                                                             liquidity_usd=liq_usd,
+                                                             pair_address=pair_addr if pos.get("dex_id") == "pumpswap" else None)
                 if not sell_result:
                     return
                 _sig, actual_usd = sell_result

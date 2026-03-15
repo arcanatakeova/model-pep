@@ -316,7 +316,8 @@ class SolanaWallet:
 
     def sell_token(self, token_mint: str, est_value_usd: float,
                    liquidity_usd: float = 0.0,
-                   slippage_bps: int = None) -> Optional[tuple]:
+                   slippage_bps: int = None,
+                   pair_address: Optional[str] = None) -> Optional[tuple]:
         """
         Sell entire on-chain token balance back to SOL.
         Returns (tx_signature, actual_usd_received) or None on failure.
@@ -348,6 +349,7 @@ class SolanaWallet:
             output_mint=SOL_MINT,
             raw_input_amount=raw_amount,
             slippage_bps=slippage_bps,
+            pair_address=pair_address,
         )
         if result.success:
             out_sol = result.out_amount / 1e9
@@ -363,7 +365,8 @@ class SolanaWallet:
 
     def sell_token_partial(self, token_mint: str, fraction: float,
                            liquidity_usd: float = 0.0,
-                           slippage_bps: int = None) -> Optional[tuple]:
+                           slippage_bps: int = None,
+                           pair_address: Optional[str] = None) -> Optional[tuple]:
         """
         Sell a fraction (0.0-1.0) of the on-chain token balance.
         Returns (tx_signature, actual_usd_received) or None on failure.
@@ -395,6 +398,7 @@ class SolanaWallet:
             output_mint=SOL_MINT,
             raw_input_amount=sell_raw,
             slippage_bps=slippage_bps,
+            pair_address=pair_address,
         )
         if result.success:
             out_sol = result.out_amount / 1e9
