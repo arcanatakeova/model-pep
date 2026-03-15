@@ -403,6 +403,9 @@ class SolanaWallet:
         if result.success:
             out_sol = result.out_amount / 1e9
             sol_price = self._get_sol_price()
+            if sol_price <= 0:
+                # Retry SOL price once — don't lose track of actual proceeds
+                sol_price = self._get_sol_price()
             actual_usd = out_sol * sol_price if sol_price > 0 else 0.0
             logger.info("PARTIAL SELL %s %.0f%% → %.4f SOL ($%.2f) | tx=%s",
                         token_mint[:12], fraction * 100, out_sol, actual_usd,
