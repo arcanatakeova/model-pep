@@ -72,8 +72,7 @@ def _safe_float(val, default: float = 0.0) -> float:
 
 
 # Search terms — broad coverage across naming conventions
-_SEARCH_QUERIES = ["SOL", "USDC", "PUMP", "MEME", "AI", "DOG", "WIF",
-                   "CAT", "PEPE", "MOON", "COIN", "FUN", "GEM"]
+_SEARCH_QUERIES = ["PUMP", "MEME", "AI", "DOG", "WIF", "PEPE"]
 
 
 @dataclass

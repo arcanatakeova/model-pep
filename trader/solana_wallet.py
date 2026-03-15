@@ -477,13 +477,24 @@ class SolanaWallet:
                 tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
                     input_mint, output_mint, raw_input_amount, slippage_bps, pool="pumpswap")
         else:
-            # Standard path: Jupiter → Raydium → (pump-specific fallbacks)
-            tx_b64, out_amount, price_impact = self._quote_and_build_jupiter(
-                input_mint, output_mint, raw_input_amount, slippage_bps)
-            if tx_b64 is None:
-                logger.info("Jupiter unavailable — trying Raydium")
-                tx_b64, out_amount, price_impact = self._quote_and_build_raydium(
-                    input_mint, output_mint, raw_input_amount, slippage_bps)
+            # Race Jupiter and Raydium in parallel — use whichever responds first.
+            # Jupiter has better routes but can be slow; Raydium is fast but fewer pools.
+            import concurrent.futures as _cf
+            tx_b64 = out_amount = None
+            price_impact = 0.0
+            with _cf.ThreadPoolExecutor(max_workers=2) as _rex:
+                _fj = _rex.submit(self._quote_and_build_jupiter,
+                                  input_mint, output_mint, raw_input_amount, slippage_bps)
+                _fr = _rex.submit(self._quote_and_build_raydium,
+                                  input_mint, output_mint, raw_input_amount, slippage_bps)
+                for _f in _cf.as_completed([_fj, _fr], timeout=12):
+                    try:
+                        _tb, _oa, _pi = _f.result()
+                        if _tb is not None:
+                            tx_b64, out_amount, price_impact = _tb, _oa, _pi
+                            break
+                    except Exception:
+                        pass
             if tx_b64 is None and _is_pump:
                 logger.info("Raydium unavailable — trying Pump.fun bonding curve (PumpPortal)")
                 tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
@@ -1332,7 +1343,7 @@ class SolanaWallet:
             # Try primary endpoint first; fall back to lite.jup.ag on DNS failure
             for url in (JUPITER_QUOTE_URL, JUPITER_QUOTE_URL_ALT):
                 try:
-                    resp = requests.get(url, params=params, timeout=10)
+                    resp = requests.get(url, params=params, timeout=5)
                     if resp.ok:
                         data = resp.json()
                         if data.get("error"):
@@ -1346,7 +1357,7 @@ class SolanaWallet:
             else:
                 # both URLs failed
                 if attempt < 2:
-                    time.sleep(2 ** attempt)
+                    time.sleep(1)
                 else:
                     logger.warning("Jupiter quote exception: %s", last_exc)
         return None

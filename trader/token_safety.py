@@ -314,11 +314,16 @@ class TokenSafetyChecker:
     def _check_rugcheck(self, mint_address: str) -> dict:
         """Query RugCheck API for token risk assessment."""
         try:
-            resp = self._session.get(
-                f"{RUGCHECK_BASE}/tokens/{mint_address}/report/summary",
-                timeout=config.SAFETY_CHECK_TIMEOUT,
-            )
-            if resp.status_code != 200:
+            resp = None
+            for _rc_attempt in range(3):
+                resp = self._session.get(
+                    f"{RUGCHECK_BASE}/tokens/{mint_address}/report/summary",
+                    timeout=config.SAFETY_CHECK_TIMEOUT,
+                )
+                if resp.status_code != 429:
+                    break
+                time.sleep(2 ** _rc_attempt)
+            if resp is None or resp.status_code != 200:
                 return {"available": False}
 
             data = resp.json()

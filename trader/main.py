@@ -726,55 +726,12 @@ class AITrader:
                 All network calls happen here so they run in parallel.
                 """
                 tok, sz, sfty = args
-                # Jupiter price confirmation
-                if tok.chain_id == "solana" and self.solana.is_connected:
-                    jup_price = self._get_jupiter_price(tok.base_address)
-                    if jup_price and jup_price > 0 and tok.price_usd > 0:
-                        drift = abs(jup_price - tok.price_usd) / tok.price_usd
-                        if drift > 0.05:
-                            logger.warning(
-                                "SKIP %s: Jupiter $%.8f vs DexScreener $%.8f (%.1f%% drift)",
-                                tok.base_symbol, jup_price, tok.price_usd, drift * 100)
-                            return None
-                        tok.price_usd = jup_price
 
-                # Birdeye deep validation
-                if tok.chain_id == "solana" and config.BIRDEYE_API_KEY:
-                    from dex_screener import _get_birdeye as _dex_be
-                    _be = _dex_be()
-                    if _be:
-                        try:
-                            overview = _be.get_token_overview(tok.base_address)
-                            if overview:
-                                h_count = int(overview.get("holder", 0) or 0)
-                                uw_24h  = int(overview.get("uniqueWallet24h", 0) or 0)
-                                tok.holder_count       = h_count
-                                tok.unique_wallets_24h = uw_24h
-                                if 0 < h_count < 20:
-                                    logger.warning("SKIP %s: only %d holders (rug risk)",
-                                                   tok.base_symbol, h_count)
-                                    return None
-                        except Exception as e:
-                            logger.debug("Token overview error %s: %s", tok.base_symbol, e)
-
-                        try:
-                            candles = _be.get_ohlcv(tok.base_address, interval="5m", limit=6)
-                            if candles and len(candles) >= 3:
-                                recent = candles[-3:]
-                                if recent[-1].close < recent[-1].open:
-                                    bullish = sum(1 for c in recent if c.close >= c.open)
-                                    if bullish < 1:
-                                        logger.info("SKIP %s: OHLCV no bullish candles",
-                                                    tok.base_symbol)
-                                        return None
-                                session_high = max(c.high for c in recent if c.high > 0)
-                                if session_high > 0 and tok.price_usd < session_high * 0.75:
-                                    logger.info("SKIP %s: price %.0f%% below recent high",
-                                                tok.base_symbol,
-                                                (1 - tok.price_usd / session_high) * 100)
-                                    return None
-                        except Exception as e:
-                            logger.debug("OHLCV check error %s: %s", tok.base_symbol, e)
+                # Holder count hard block — use data already fetched by safety checker
+                if sfty and sfty.holder_count and 0 < sfty.holder_count < 20:
+                    logger.warning("SKIP %s: only %d holders (rug risk)",
+                                   tok.base_symbol, sfty.holder_count)
+                    return None
 
                 return (tok, sz, sfty)
 
