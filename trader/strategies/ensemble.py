@@ -12,6 +12,7 @@ from typing import Optional
 
 import config
 import indicators as ind
+from strategies.market_structure import market_structure_signal, analyze as ms_analyze
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +84,13 @@ class EnsembleSignal:
 
         # ── 1. Compute individual signals ──────────────────────────────────
         components = {
-            "rsi":       ind.rsi_signal(close),
-            "macd":      ind.macd_signal(close),
-            "bollinger": ind.bollinger_signal(close),
-            "ema_cross": ind.ema_cross_signal(close),
-            "momentum":  ind.momentum_signal(close),
-            "volume":    ind.volume_signal(close, volume) if not volume.empty and volume.sum() > 0 else 0.0,
+            "rsi":              ind.rsi_signal(close),
+            "macd":             ind.macd_signal(close),
+            "bollinger":        ind.bollinger_signal(close),
+            "ema_cross":        ind.ema_cross_signal(close),
+            "momentum":         ind.momentum_signal(close),
+            "volume":           ind.volume_signal(close, volume) if not volume.empty and volume.sum() > 0 else 0.0,
+            "market_structure": market_structure_signal(df),
         }
 
         # ── 2. Regime detection ────────────────────────────────────────────
@@ -124,7 +126,7 @@ class EnsembleSignal:
         stop_loss, take_profit = self._compute_levels(close, high, low, signal, current_price)
 
         # ── 9. Build reasons ──────────────────────────────────────────────
-        reasons = self._build_reasons(components, regime, trend_dir, score)
+        reasons = self._build_reasons(components, regime, trend_dir, score, df)
 
         return TradeSignal(
             asset_id=asset_id,
@@ -193,18 +195,21 @@ class EnsembleSignal:
         """
         w = dict(base)
         if regime == "trending":
-            w["ema_cross"] = w.get("ema_cross", 0) * 1.5
-            w["momentum"]  = w.get("momentum", 0) * 1.4
-            w["bollinger"] = w.get("bollinger", 0) * 0.6
-            w["rsi"]       = w.get("rsi", 0) * 0.7
+            w["ema_cross"]        = w.get("ema_cross", 0) * 1.5
+            w["momentum"]         = w.get("momentum", 0) * 1.4
+            w["bollinger"]        = w.get("bollinger", 0) * 0.6
+            w["rsi"]              = w.get("rsi", 0) * 0.7
+            w["market_structure"] = w.get("market_structure", 0) * 1.6   # CHoCH/BOS most reliable in trends
         elif regime == "ranging":
-            w["rsi"]       = w.get("rsi", 0) * 1.5
-            w["bollinger"] = w.get("bollinger", 0) * 1.5
-            w["ema_cross"] = w.get("ema_cross", 0) * 0.6
-            w["momentum"]  = w.get("momentum", 0) * 0.6
+            w["rsi"]              = w.get("rsi", 0) * 1.5
+            w["bollinger"]        = w.get("bollinger", 0) * 1.5
+            w["ema_cross"]        = w.get("ema_cross", 0) * 0.6
+            w["momentum"]         = w.get("momentum", 0) * 0.6
+            w["market_structure"] = w.get("market_structure", 0) * 0.7   # fewer clean swings in ranges
         elif regime == "volatile":
-            w["volume"]    = w.get("volume", 0) * 2.0
-            w["macd"]      = w.get("macd", 0) * 1.3
+            w["volume"]           = w.get("volume", 0) * 2.0
+            w["macd"]             = w.get("macd", 0) * 1.3
+            w["market_structure"] = w.get("market_structure", 0) * 1.4   # sweeps/IDMs appear in volatile moves
             for k in ["rsi", "bollinger", "ema_cross", "momentum"]:
                 w[k] = w.get(k, 0) * 0.7
         return w
@@ -251,10 +256,23 @@ class EnsembleSignal:
         return round(stop, 8), round(target, 8)
 
     def _build_reasons(self, components: dict, regime: str,
-                       trend_dir: str, score: float) -> list[str]:
+                       trend_dir: str, score: float,
+                       df: pd.DataFrame = None) -> list[str]:
         reasons = [f"Regime: {regime}, Trend: {trend_dir}, Score: {score:.2f}"]
         for name, val in components.items():
+            if name == "market_structure":
+                continue   # detailed reasons added separately below
             if abs(val) >= 0.3:
                 direction = "bullish" if val > 0 else "bearish"
                 reasons.append(f"{name.upper()} {direction} ({val:.2f})")
+        # Add rich market-structure event descriptions when available
+        if df is not None:
+            try:
+                ms = ms_analyze(df)
+                reasons.extend(ms.reasons)
+            except Exception:
+                pass
+        elif abs(components.get("market_structure", 0)) >= 0.3:
+            val = components["market_structure"]
+            reasons.append(f"MARKET_STRUCTURE {'bullish' if val > 0 else 'bearish'} ({val:.2f})")
         return reasons

@@ -73,12 +73,13 @@ STOCK_WATCHLIST = ["SPY", "QQQ", "NVDA", "TSLA", "META", "COIN", "MSTR", "MARA"]
 
 # ─── Strategy Weights ─────────────────────────────────────────────────────────
 STRATEGY_WEIGHTS = {
-    "rsi":         0.12,   # RSI — noisy on small caps, reduced
-    "macd":        0.18,   # MACD crossover — good for trends
-    "bollinger":   0.10,   # Bollinger — mean reversion, less relevant for memecoins
-    "ema_cross":   0.15,   # EMA 9/21 crossover
-    "momentum":    0.20,   # Price momentum — key for memecoins
-    "volume":      0.25,   # Volume — strongest alpha signal for DEX tokens
+    "rsi":              0.10,   # RSI — noisy on small caps, reduced
+    "macd":             0.14,   # MACD crossover — good for trends
+    "bollinger":        0.08,   # Bollinger — mean reversion
+    "ema_cross":        0.12,   # EMA 9/21 crossover
+    "momentum":         0.16,   # Price momentum — key for memecoins
+    "volume":           0.20,   # Volume — strongest alpha signal for DEX tokens
+    "market_structure": 0.20,   # LuxAlgo CHoCH/BOS/IDM/Sweep — structural bias
 }
 
 # ─── Technical Indicator Parameters ───────────────────────────────────────────
