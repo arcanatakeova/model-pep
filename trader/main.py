@@ -927,6 +927,12 @@ class AITrader:
                             pass  # Keep pre-trade estimate on failure
                     self._dex_positions[token.pair_address] = pos_data
                     self.portfolio.cash -= size_usd
+                    # Immediately deduct from wallet cache so the next buy in this
+                    # same cycle sees the correct post-buy balance and doesn't overspend.
+                    # (The fast monitor refreshes the cache every ~3s, but a buy tx takes
+                    # ~10s to confirm so the cache may still show the pre-buy balance.)
+                    _sv, _uv, _susdv, _ctv = self._wallet_balance_cache
+                    self._wallet_balance_cache = (_sv, _uv, max(0.0, _susdv - size_usd), _ctv)
                     risk_str = safety.risk_level if safety else "?"
                     logger.info("DEX BUY %s $%.2f @ $%.8f score=%.2f safety=%s | tx=%s",
                                 token.base_symbol, size_usd, pos_data["entry_price"],
