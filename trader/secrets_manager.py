@@ -119,6 +119,10 @@ def load_secrets() -> bool:
                 if not _VALID_ENV_NAME.match(name):
                     logger.warning("Skipping invalid env var name from Vault: %r", name[:40])
                     continue
+                # .env values take precedence over vault — don't overwrite
+                # a non-empty value the user has explicitly set locally.
+                if os.environ.get(name, "").strip():
+                    continue
                 # Restore real newlines in PEM keys stored with escaped \n
                 os.environ[name] = secret.replace("\\n", "\n")
                 loaded += 1
