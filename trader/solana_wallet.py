@@ -1082,6 +1082,21 @@ class SolanaWallet:
                 logger.warning("PumpSwap: zero reserves pool=%s", pool_address[:16])
                 return None, 0, 0.0
 
+            # ── Early overflow guard ───────────────────────────────────────────
+            # PumpSwap AMM computes k = base_reserve * quote_reserve as u64.
+            # For high-supply tokens this overflows → on-chain error 0x1787.
+            # Detect it here (via logarithms to avoid Python bigint issues) and
+            # bail before wasting RPC calls on a transaction that will always fail.
+            import math as _math
+            _LOG_U64_MAX = 43.668  # ln(2^63) — use 63 bits for safety margin
+            if (_math.log(float(base_reserve)) + _math.log(float(quote_reserve))
+                    > _LOG_U64_MAX):
+                logger.warning(
+                    "PumpSwap: k-overflow detected for pool %s "
+                    "(base=%d quote=%d) — token untradeable via direct path",
+                    pool_address[:16], base_reserve, quote_reserve)
+                return None, 0, 0.0
+
             # ── Step 4: AMM calculation (~1% total fees) ──────────────────────
             if not is_sell:
                 # BUY: sol_in → tokens_out
