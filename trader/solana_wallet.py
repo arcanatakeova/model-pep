@@ -477,6 +477,32 @@ class SolanaWallet:
             slippage_bps=slippage_bps,
             pair_address=pair_address,
         )
+        # Token-2022 transfer-fee tokens: the buy charges a fee so the wallet receives
+        # fewer tokens than the quote's out_amount. Our cache (pre-warmed at buy time)
+        # holds the gross pre-fee amount, making the sell tx fail with 0x1 insufficient
+        # funds on TransferChecked. Detect this, invalidate the stale cache, fetch the
+        # real balance, and retry once with the correct amount.
+        if not result.success and result.error == "SELL_INSUF":
+            self._token_balance_cache.pop(token_mint, None)
+            logger.info("SELL_INSUF: invalidating cache for %s — fetching real balance",
+                        token_mint[:12])
+            raw_amount = 0
+            for _r in range(4):
+                raw_amount, decimals = self._get_token_raw_balance(token_mint, _ttl=0.0)
+                if raw_amount > 0:
+                    break
+                time.sleep(1.0)
+            if raw_amount > 0:
+                result = self._execute_swap_raw(
+                    input_mint=token_mint,
+                    output_mint=SOL_MINT,
+                    raw_input_amount=raw_amount,
+                    slippage_bps=slippage_bps,
+                    pair_address=pair_address,
+                )
+            else:
+                logger.warning("SELL_INSUF: real balance still unreadable for %s", token_mint[:12])
+
         if result.success:
             # Invalidate cache — tokens are gone; next read will fetch real balance
             self._token_balance_cache.pop(token_mint, None)
@@ -705,6 +731,8 @@ class SolanaWallet:
             if not sig:
                 sig = self._sign_and_send_rpc(tx_b64)
 
+        if sig == "SELL_INSUF":
+            return SwapResult(success=False, error="SELL_INSUF")
         if not sig or sig in ("GRADUATED", "PUMPSWAP_OVERFLOW"):
             return SwapResult(success=False, error="Transaction send failed")
 
@@ -1800,6 +1828,14 @@ class SolanaWallet:
             if "0x1787" in err_str or "Custom(6023)" in err_str:
                 logger.warning("PumpSwap AMM math overflow (0x1787) — will retry via Jupiter")
                 return "PUMPSWAP_OVERFLOW"
+            # Token-2022 TransferChecked insufficient funds — our cached sell amount
+            # exceeds the actual on-chain balance (e.g. transfer fee was charged on buy).
+            # Return a sentinel so sell_token can invalidate the cache and retry with
+            # the real balance instead of giving up entirely.
+            if "TransferChecked" in err_str and "insufficient funds" in err_str:
+                logger.warning("Token sell: on-chain insufficient funds (0x1) — "
+                               "cached amount likely exceeds actual balance (transfer fee?)")
+                return "SELL_INSUF"
             logger.error("RPC send error: %s", e)
             return None
 
