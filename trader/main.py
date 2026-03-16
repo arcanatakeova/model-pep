@@ -819,26 +819,22 @@ class AITrader:
                                token.base_symbol)
                 return
 
-            # ── Cash gate: ensure we can actually afford this ────────────────
-            if size_usd > self.portfolio.cash:
-                logger.warning("Insufficient cash $%.2f for DEX buy $%.2f — skipping",
-                               self.portfolio.cash, size_usd)
-                return
-
-            # ── Live wallet: verify SOL balance using cached value (avoids RPC per trade)
+            # ── Cash gate: verify we can afford this using wallet cache as ground truth
             if token.chain_id == "solana" and self.solana.is_connected:
                 _sol, _usdc, _sol_usd, _cache_ts = self._wallet_balance_cache
-                # Use cached value if fresh (<10s), else fall back to portfolio.cash.
-                # Take max() to guard against the cache returning $0 during a 429 burst
-                # while portfolio.cash still holds the last good balance.
-                sol_bal_usd = max(
-                    _sol_usd if (time.time() - _cache_ts) < 10 else 0.0,
-                    self.portfolio.cash,
+                # Prefer fresh wallet cache (<10s); fall back to portfolio.cash floored at 0.
+                sol_bal_usd = (
+                    _sol_usd if (time.time() - _cache_ts) < 10 and _sol_usd > 0
+                    else max(0.0, self.portfolio.cash)
                 )
                 if sol_bal_usd < size_usd + 0.15:   # Need trade size + ~$0.15 for Solana tx fees
                     logger.warning("SOL balance $%.2f insufficient for $%.2f trade — skipping",
                                    sol_bal_usd, size_usd)
                     return
+            elif size_usd > max(0.0, self.portfolio.cash):
+                logger.warning("Insufficient cash $%.2f for DEX buy $%.2f — skipping",
+                               self.portfolio.cash, size_usd)
+                return
 
             safety_score = safety.safety_score if safety else 0.5
             # AI-computed stop and target per trade based on token's own volatility
@@ -1124,19 +1120,14 @@ class AITrader:
                     sol_price = self.solana._get_sol_price()
                     sol_usd   = sol_raw * sol_price if sol_price > 0 else 0.0
                     if sol_usd > 0:
-                        # Subtract estimated deployed DEX capital to get free cash
-                        with self._dex_lock:
-                            _positions = list(self._dex_positions.values())
-                        dex_deployed = sum(
-                            pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
-                            for pos in _positions
-                            if pos.get("chain") == "solana"
-                        )
-                        available = sol_usd - dex_deployed
-                        if available > 0:
-                            cash_diff = available - self.portfolio.cash
-                            if cash_diff > 2.0 or cash_diff < -10.0:
-                                self.portfolio.cash = available
+                        # portfolio.cash = actual SOL wallet value (ground truth).
+                        # Previously we subtracted "dex_deployed" but that estimate
+                        # becomes inflated when sells fail — making available negative
+                        # and the `if available > 0` gate permanently blocking the sync.
+                        # DEX positions are tracked separately in _dex_positions; the
+                        # SOL wallet already reflects what was actually spent on buys.
+                        if abs(sol_usd - self.portfolio.cash) > 0.50:
+                            self.portfolio.cash = sol_usd
                         # Update wallet cache for dashboard display
                         try:
                             _usdc = self.solana.get_usdc_balance()

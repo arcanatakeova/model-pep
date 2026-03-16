@@ -285,8 +285,10 @@ class RiskManager:
         # 5. Caps
         size = min(size, config.DEX_MAX_POSITION_USD)
         size = min(size, liquidity_usd * config.MIN_LIQUIDITY_RATIO)
-        # Cash cap: use up to 90% of available cash — leave room for tx fees
-        size = min(size, self.portfolio.cash * 0.90)
+        # Cash cap: use up to 90% of available cash — leave room for tx fees.
+        # Floor at 0: negative portfolio.cash means accounting drift, not truly broke;
+        # the live wallet sync will correct it within 5s.
+        size = min(size, max(0.0, self.portfolio.cash) * 0.90)
 
         if size < config.DEX_MIN_POSITION_USD:
             return 0.0

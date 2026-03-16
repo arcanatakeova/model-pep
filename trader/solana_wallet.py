@@ -441,10 +441,18 @@ class SolanaWallet:
             logger.error("Insufficient SOL for fees — skipping sell of %s", token_mint[:12])
             return None
 
-        # Force fresh balance read (TTL=0) but keep stale cache as 429 fallback.
-        # pop() was previously used here but cleared the only fallback — during 429
-        # storms the pop caused raw_amount=0 and the sell was permanently skipped.
-        raw_amount, decimals = self._get_token_raw_balance(token_mint, _ttl=0.0)
+        # Force fresh balance read (TTL=0) with retry.
+        # For new positions the cache may be empty: if the RPC is rate-limited (429)
+        # the very first read returns (0,6) and the sell is skipped forever.
+        # Retry up to 3 times with short pauses — 429s usually clear within 1-2s.
+        raw_amount = 0
+        decimals   = 6
+        for _bal_attempt in range(3):
+            raw_amount, decimals = self._get_token_raw_balance(token_mint, _ttl=0.0)
+            if raw_amount > 0:
+                break
+            if _bal_attempt < 2:
+                time.sleep(0.8)
         if raw_amount <= 0:
             logger.warning("No on-chain balance for %s — skipping sell", token_mint[:12])
             return None
@@ -497,7 +505,14 @@ class SolanaWallet:
         if not self._check_lamport_balance(is_sell=True):
             return None
 
-        raw_amount, decimals = self._get_token_raw_balance(token_mint, _ttl=0.0)
+        raw_amount = 0
+        decimals   = 6
+        for _bal_attempt in range(3):
+            raw_amount, decimals = self._get_token_raw_balance(token_mint, _ttl=0.0)
+            if raw_amount > 0:
+                break
+            if _bal_attempt < 2:
+                time.sleep(0.8)
         if raw_amount <= 0:
             logger.warning("No on-chain balance for partial sell of %s", token_mint[:12])
             return None
