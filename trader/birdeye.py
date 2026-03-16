@@ -421,6 +421,8 @@ class BirdeyeClient:
             return None
         url = f"{BIRDEYE_BASE}{path}"
         for attempt in range(3):
+            if not self.enabled:   # re-check each iteration — another thread may have disabled
+                return None
             try:
                 resp = self._session.get(url, params=params, timeout=timeout)
                 if resp.status_code == 429:
