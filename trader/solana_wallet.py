@@ -141,6 +141,7 @@ class SolanaWallet:
         self._client    = None
         self._sol_price_cache: tuple[float, float] = (0.0, 0.0)  # (price, ts)
         self._cached_lamports: int = 0  # last known-good lamport balance (fallback on RPC 429)
+        self._token_balance_cache: dict = {}  # mint → (raw, decimals, ts); 10s TTL to avoid RPC spam
 
         if private_key_b58:
             self._init_wallet()
@@ -440,6 +441,8 @@ class SolanaWallet:
             logger.error("Insufficient SOL for fees — skipping sell of %s", token_mint[:12])
             return None
 
+        # Always fetch fresh balance for sells — bypass the 10s cache
+        self._token_balance_cache.pop(token_mint, None)
         raw_amount, decimals = self._get_token_raw_balance(token_mint)
         if raw_amount <= 0:
             logger.warning("No on-chain balance for %s — skipping sell", token_mint[:12])
@@ -491,6 +494,7 @@ class SolanaWallet:
         if not self._check_lamport_balance(is_sell=True):
             return None
 
+        self._token_balance_cache.pop(token_mint, None)
         raw_amount, decimals = self._get_token_raw_balance(token_mint)
         if raw_amount <= 0:
             logger.warning("No on-chain balance for partial sell of %s", token_mint[:12])
@@ -1883,13 +1887,21 @@ class SolanaWallet:
             return False
         return True
 
-    def _get_token_raw_balance(self, mint_address: str) -> tuple[int, int]:
+    def _get_token_raw_balance(self, mint_address: str,
+                               _ttl: float = 10.0) -> tuple[int, int]:
         """
         Returns (raw_amount_in_smallest_units, decimals) for a token.
-        Uses direct RPC with jsonParsed encoding to avoid solana-py API quirks.
+        Results are cached for _ttl seconds (default 10s) to avoid RPC spam.
+        On RPC 429 the last-known cached value is returned without blocking.
         """
         if not self.is_connected:
             return 0, 6
+
+        # Return cached value if still fresh
+        cached = self._token_balance_cache.get(mint_address)
+        if cached and (time.time() - cached[2]) < _ttl:
+            return cached[0], cached[1]
+
         try:
             resp = _session.post(config.SOLANA_RPC_URL, json={
                 "jsonrpc": "2.0", "id": 1,
@@ -1902,22 +1914,10 @@ class SolanaWallet:
             }, timeout=10)
             if not resp.ok:
                 if resp.status_code == 429:
-                    logger.warning("Token balance: RPC 429 for %s — retrying in 2s",
+                    logger.warning("Token balance: RPC 429 for %s — using cached value",
                                    mint_address[:12])
-                    import time as _time; _time.sleep(2)
-                    resp = _session.post(config.SOLANA_RPC_URL, json={
-                        "jsonrpc": "2.0", "id": 1,
-                        "method": "getTokenAccountsByOwner",
-                        "params": [
-                            self._pubkey,
-                            {"mint": mint_address},
-                            {"encoding": "jsonParsed", "commitment": "confirmed"},
-                        ],
-                    }, timeout=10)
-                    if not resp.ok:
-                        return 0, 6
-                else:
-                    return 0, 6
+                    return (cached[0], cached[1]) if cached else (0, 6)
+                return (cached[0], cached[1]) if cached else (0, 6)
             for acc in resp.json().get("result", {}).get("value", []):
                 ta = (acc.get("account", {})
                         .get("data", {})
@@ -1927,11 +1927,14 @@ class SolanaWallet:
                 raw = int(ta.get("amount", 0))
                 dec = int(ta.get("decimals", 6))
                 if raw > 0:
+                    self._token_balance_cache[mint_address] = (raw, dec, time.time())
                     return raw, dec
+            # Zero balance — cache the zero so we don't re-poll immediately
+            self._token_balance_cache[mint_address] = (0, 6, time.time())
             return 0, 6
         except Exception as e:
             logger.debug("Token raw balance error: %s", e)
-            return 0, 6
+            return (cached[0], cached[1]) if cached else (0, 6)
 
     # ─── USD conversion ────────────────────────────────────────────────────────
 
