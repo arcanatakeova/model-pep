@@ -107,6 +107,7 @@ class BirdeyeClient:
         self._security_cache: dict[str, tuple[BirdeyeSecurity, float]] = {}
         self._ohlcv_cache:    dict[str, tuple[list[BirdeyeOHLCV], float]] = {}
         self._trending_cache: tuple[list[dict], float] = ([], 0.0)
+        self._last_request_ts: float = 0.0  # for 1 req/s rate limiting (free tier)
 
     @property
     def enabled(self) -> bool:
@@ -378,12 +379,21 @@ class BirdeyeClient:
 
     # ─── HTTP ──────────────────────────────────────────────────────────────────
 
+    def _rate_limit(self):
+        """Enforce 1 request per second for free-tier Birdeye API."""
+        now = time.time()
+        elapsed = now - self._last_request_ts
+        if elapsed < 1.0:
+            time.sleep(1.0 - elapsed)
+        self._last_request_ts = time.time()
+
     def _get(self, path: str, params: dict = None,
              timeout: int = 8) -> Optional[dict]:
         """Make a GET request to the Birdeye API."""
         if not self.enabled:
             return None
         url = f"{BIRDEYE_BASE}{path}"
+        self._rate_limit()
         for attempt in range(3):
             try:
                 resp = self._session.get(url, params=params, timeout=timeout)
