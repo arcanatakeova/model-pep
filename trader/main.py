@@ -92,7 +92,7 @@ from strategies.scalper import ScalpingScanner
 from strategies.funding_arb import FundingArbScanner
 from strategies.grid_trader import GridTrader
 from dex_screener import DexScreener
-from polymarket import PolymarketTrader
+from polymarket import PolymarketEngine
 from solana_wallet import SolanaWallet, SOL_MINT, USDC_MINT, USDT_MINT
 from token_safety import TokenSafetyChecker
 import data_fetcher as df_mod
@@ -152,7 +152,7 @@ class AITrader:
         self.dex_screener = DexScreener()                            # on-chain tokens
         # Polymarket — enabled when POLYMARKET_PRIVATE_KEY is set
         if config.POLYMARKET_PRIVATE_KEY:
-            self.poly_trader = PolymarketTrader(private_key=config.POLYMARKET_PRIVATE_KEY)
+            self.poly_engine = PolymarketEngine(private_key=config.POLYMARKET_PRIVATE_KEY)
         self.solana       = SolanaWallet(
             private_key_b58=config.PHANTOM_PRIVATE_KEY)              # Phantom wallet
 
@@ -253,6 +253,8 @@ class AITrader:
             logger.info("Phantom wallet: %s", self.solana.pubkey)
         if config.POLYMARKET_PRIVATE_KEY:
             logger.info("Polymarket: connected (Polygon)")
+            if hasattr(self, "poly_engine") and config.POLYMARKET_WS_ENABLED:
+                self.poly_engine.start()
         logger.info("=" * 68)
 
         signal.signal(signal.SIGINT,  self._shutdown)
@@ -1366,32 +1368,19 @@ class AITrader:
 
     def _run_polymarket_scan(self):
         """Scan Polymarket for prediction market edge plays."""
-        if not hasattr(self, "poly_trader"):
+        if not hasattr(self, "poly_engine"):
             return
         try:
-            # Hard 25s timeout — Polymarket API pagination can block for minutes
-            # (each page: 10s timeout × 3 retries × N pages). Run in a thread so
-            # the main cycle is never held hostage by a slow external API.
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                fut = ex.submit(self.poly_trader.find_edges,
-                                config.POLYMARKET_MIN_EDGE, config.POLYMARKET_MIN_VOLUME)
+                fut = ex.submit(self.poly_engine.scan_and_trade,
+                                self.portfolio, self.risk_mgr, self.compounder)
                 try:
-                    signals = fut.result(timeout=25)
+                    results = fut.result(timeout=45)
                 except concurrent.futures.TimeoutError:
-                    logger.warning("Polymarket scan timed out (>25s) — skipping this cycle")
+                    logger.warning("Polymarket scan timed out (>45s) — skipping this cycle")
                     return
-            logger.info("Polymarket: %d edge signals found", len(signals))
-
-            budget = self.compounder.max_position_for_market("polymarket")
-            for sig in signals[:3]:   # Top 3 Polymarket plays per cycle
-                size = min(config.POLYMARKET_MAX_POSITION_USD, budget * 0.15,
-                           self.portfolio.cash * 0.02)
-                if size >= 5:
-                    result = self.poly_trader.place_order(sig, size)
-                    if result:
-                        logger.info("POLY %s '%s' $%.0f edge=%.1f%%",
-                                    sig.side, sig.market.question[:50],
-                                    size, sig.edge_pct * 100)
+            if results:
+                logger.info("Polymarket: %d trades executed this cycle", len(results))
         except Exception as e:
             logger.warning("Polymarket scan error: %s", e)
 
@@ -1428,6 +1417,8 @@ class AITrader:
         self.compounder.save_state()
         self._save_dex_positions()
         self._save_equity_curve()
+        if hasattr(self, "poly_engine"):
+            self.poly_engine.stop()
         self._print_report()
         logger.info("Trader stopped cleanly.")
 

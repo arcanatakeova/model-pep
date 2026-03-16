@@ -215,6 +215,24 @@ POLYMARKET_MIN_EDGE = 0.04         # Minimum 4% edge to trade
 POLYMARKET_MIN_VOLUME = 5_000      # Minimum $5k/24h market volume
 POLYMARKET_MAX_POSITION_USD = 200  # Max per prediction market position
 POLYMARKET_SCAN_INTERVAL_SEC = 300 # Scan Polymarket every 5 minutes (was 2 min — too frequent)
+# Enhanced Polymarket settings
+POLYMARKET_SCAN_LIMIT = 100            # Markets to scan per cycle
+POLYMARKET_MAX_TRADES_PER_CYCLE = 5    # Max new positions per scan
+POLYMARKET_MIN_ORDER_SIZE = 5.0        # Min $5 per order
+POLYMARKET_MAX_TOTAL_EXPOSURE = 1000   # Max total $ in Polymarket positions
+POLYMARKET_STOP_LOSS_PCT = 0.15        # 15% stop loss on poly positions
+POLYMARKET_TAKE_PROFIT_MULT = 2.5      # Exit at 2.5x edge
+POLYMARKET_MAX_HOLD_HOURS = 168        # 7 day max hold
+POLYMARKET_WS_ENABLED = True           # Enable WebSocket feed
+POLYMARKET_MM_ENABLED = False          # Market making off by default
+POLYMARKET_MM_MAX_MARKETS = 5          # Max markets to make
+POLYMARKET_MM_BASE_SPREAD = 0.02       # 2 cent base spread
+POLYMARKET_LLM_PROVIDER = "anthropic"  # "anthropic" or "openai"
+POLYMARKET_LLM_MAX_CALLS_PER_CYCLE = 20
+POLYMARKET_NEWS_ENABLED = True
+POLYMARKET_CROSS_PLATFORM_ENABLED = True
+POLYMARKET_SMART_MONEY_ENABLED = True
+POLYMARKET_SMART_MONEY_MIN_RANK = 20   # Track top 20 traders
 
 # ─── Compounding ──────────────────────────────────────────────────────────────
 COMPOUND_ALL_PROFITS = True        # Always reinvest — never withdraw

@@ -24,6 +24,11 @@ solders>=0.18.1             # Rust-based Solana types (Keypair, Pubkey, etc.)
 # pip3 install py-clob-client  (Linux only — not on PyPI for macOS/arm64)
 # py-clob-client>=0.12.0
 
+# ── Polymarket Enhanced (LLM probability, news, cross-platform) ─────────────
+anthropic>=0.39.0           # Claude API for LLM probability estimation
+openai>=1.50.0              # OpenAI fallback for probability estimation
+feedparser>=6.0.0           # Google News RSS parsing for news sentiment
+
 # ── CEX Live Trading (optional) ───────────────────────────────────────────────
 # Uncomment to enable live trading on Binance, Coinbase, etc.
 # ccxt>=4.0.0               # Unified crypto exchange API (Binance spot + futures)
