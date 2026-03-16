@@ -116,6 +116,7 @@ class BirdeyeClient:
         self._security_cache: dict[str, tuple[BirdeyeSecurity, float]] = {}
         self._ohlcv_cache:    dict[str, tuple[list[BirdeyeOHLCV], float]] = {}
         self._trending_cache: tuple[list[dict], float] = ([], 0.0)
+        self._auth_failed_at: float = 0.0
 
     @property
     def enabled(self) -> bool:
@@ -465,6 +466,7 @@ class BirdeyeClient:
                         logger.error(
                             "Birdeye: invalid API key — disabling Birdeye for this session")
                         self._api_key = ""  # flip enabled=False, stops all further calls
+                        self._auth_failed_at = time.time()
                     return None
                 if not resp.ok:
                     logger.debug("Birdeye %s → %d: %s",

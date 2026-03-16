@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from typing import Optional
 import threading
 import time
 from datetime import datetime, timezone
@@ -255,3 +256,27 @@ def upsert_secret(key: str, value: str, description: str = "") -> bool:
 def is_connected() -> bool:
     """Return True if Supabase client is initialised and reachable."""
     return _get_client() is not None and _connected
+
+
+def fetch_secret(name: str) -> Optional[str]:
+    """
+    Fetch a single named secret directly from Supabase Vault, bypassing the
+    env-override check in load_secrets().
+
+    Use this to force-refresh a specific key that may be stale in os.environ
+    (e.g. BIRDEYE_API_KEY set incorrectly in .env but correct in the vault).
+    Returns the decrypted value, or None if not found / vault unreachable.
+    Requires service_role key.
+    """
+    client = _get_client(require_service_role=True)
+    if not client:
+        return None
+    try:
+        resp = client.rpc("get_vault_secrets").execute()
+        for row in (resp.data or []):
+            if isinstance(row, dict) and row.get("name") == name:
+                val = str(row.get("decrypted_secret", "")).strip()
+                return val if val else None
+    except Exception as e:
+        logger.debug("fetch_secret(%s) error: %s", name, e)
+    return None

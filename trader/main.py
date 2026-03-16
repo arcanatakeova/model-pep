@@ -82,6 +82,22 @@ except Exception:
     pass
 
 import config
+
+# Force-pull Birdeye key from Supabase Vault so it takes precedence over any
+# stale/wrong value in .env (load_secrets() above skips vault if env is set).
+try:
+    from secrets_manager import fetch_secret as _fetch_secret
+    _be_key = _fetch_secret("BIRDEYE_API_KEY")
+    if _be_key:
+        if _be_key != config.BIRDEYE_API_KEY:
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                "Birdeye API key refreshed from Supabase Vault")
+        config.BIRDEYE_API_KEY = _be_key
+        os.environ["BIRDEYE_API_KEY"] = _be_key
+except Exception:
+    pass
+
 from portfolio import Portfolio
 from risk_manager import RiskManager
 from executor import TradeExecutor

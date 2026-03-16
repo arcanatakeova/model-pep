@@ -38,6 +38,13 @@ _birdeye_client = None
 
 def _get_birdeye():
     global _birdeye_client
+    # If client is disabled due to auth failure, retry after 5 minutes
+    # using the current config key (may have been refreshed from Vault)
+    if _birdeye_client is not None and not _birdeye_client.enabled:
+        failed_at = getattr(_birdeye_client, "_auth_failed_at", 0)
+        if config.BIRDEYE_API_KEY and time.time() - failed_at > 300:
+            logger.info("Birdeye: retrying with refreshed API key")
+            _birdeye_client = None
     if _birdeye_client is None and config.BIRDEYE_API_KEY:
         try:
             from birdeye import BirdeyeClient
