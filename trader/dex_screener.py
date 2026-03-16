@@ -403,8 +403,8 @@ class DexScreener:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             f_trend = ex.submit(self.get_trending_tokens, config.DEX_MIN_SCORE)
             f_new   = ex.submit(self.get_new_pairs, config.NEW_PAIR_MAX_AGE_HOURS, config.DEX_MIN_SCORE)
-            trending  = f_trend.result(timeout=60)
-            new_pairs = f_new.result(timeout=60)
+            trending  = f_trend.result(timeout=120)
+            new_pairs = f_new.result(timeout=120)
 
         all_tokens = trending + new_pairs
         seen = set()
@@ -931,7 +931,7 @@ class DexScreener:
 
         futures = [self._executor.submit(_check, t) for t in sol_tokens]
         # Wait with a generous timeout — safety checks can be slow
-        for f in concurrent.futures.as_completed(futures, timeout=20):
+        for f in concurrent.futures.as_completed(futures, timeout=90):
             try:
                 f.result()
             except Exception:
