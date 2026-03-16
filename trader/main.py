@@ -1933,6 +1933,20 @@ def main():
     parser = argparse.ArgumentParser(
         description="AI Autonomous Trader — Compound wealth 24/7",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+New architecture (recommended):
+  python orchestrator.py                  # Run both Solana + Polymarket
+  python orchestrator.py --solana-only    # Only Solana DEX
+  python orchestrator.py --polymarket-only # Only Polymarket
+  python solana_trader.py                 # Solana standalone
+  python -m polymarket.trader             # Polymarket standalone
+
+Legacy (this file — runs monolithic AITrader):
+  python main.py                          # Start trading bot
+  python main.py --paper                  # Paper trading mode
+  python main.py --scan                   # One-shot scan, exit
+  python main.py --status                 # Portfolio status, exit
+""",
     )
     parser.add_argument("--paper",   action="store_true", help="Force paper trading mode (default: LIVE if wallet key set)")
     parser.add_argument("--live",    action="store_true", help="[deprecated] Redundant — live is now the default")
@@ -1941,6 +1955,12 @@ def main():
     parser.add_argument("--report",  action="store_true", help="Full JSON report and exit")
     parser.add_argument("--growth",  action="store_true", help="Show compound growth projection table")
     parser.add_argument("--interval", type=int, default=None, help="Override scan interval (seconds)")
+    parser.add_argument("--new", action="store_true",
+                        help="Use the new orchestrator architecture (recommended)")
+    parser.add_argument("--solana-only", action="store_true",
+                        help="(with --new) Only run Solana DEX trader")
+    parser.add_argument("--polymarket-only", action="store_true",
+                        help="(with --new) Only run Polymarket trader")
     args = parser.parse_args()
 
     if args.interval:
@@ -1954,9 +1974,26 @@ def main():
         cmd_report()
     elif args.growth:
         cmd_growth()
+    elif args.new:
+        # Delegate to the new orchestrator architecture
+        from orchestrator import Orchestrator
+        from core.logging_setup import setup_logging
+        setup_logging(config.LOG_FILE, config.LOG_LEVEL)
+
+        run_live = not args.paper
+        if run_live and not any([config.PHANTOM_PRIVATE_KEY,
+                                  config.POLYMARKET_PRIVATE_KEY]):
+            print("WARNING: No API keys found — running in PAPER mode.")
+            run_live = False
+
+        orch = Orchestrator(
+            live=run_live,
+            enable_solana=not args.polymarket_only,
+            enable_polymarket=not args.solana_only,
+        )
+        orch.start()
     else:
-        # Live is the default when a wallet key is configured.
-        # Pass --paper explicitly to force paper-only simulation.
+        # Legacy monolithic mode (backward compatible)
         run_live = not args.paper
         if run_live and not any([config.BINANCE_API_KEY, config.PHANTOM_PRIVATE_KEY,
                                   config.POLYMARKET_PRIVATE_KEY, config.COINBASE_API_KEY]):

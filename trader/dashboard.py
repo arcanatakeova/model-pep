@@ -381,10 +381,27 @@ def render():
           <div style="color:{TV['text2']};font-size:14px">Waiting for bot to start...</div>
           <code style="background:{TV['bg2']};color:{TV['blue']};padding:10px 20px;
                        border-radius:6px;font-size:13px;border:1px solid {TV['border']}">
-            cd ~/model-pep/trader &amp;&amp; python3 main.py
+            cd ~/model-pep/trader &amp;&amp; python3 orchestrator.py
           </code>
         </div>""", unsafe_allow_html=True)
         time.sleep(5); st.rerun()
+
+    # ── Normalize orchestrator format → flat state (backward compat) ────────
+    # The new orchestrator nests per-trader data under state["traders"],
+    # while the old main.py writes everything flat.  Merge both.
+    traders_map = state.get("traders", {})
+    solana_state = traders_map.get("solana", {})
+    poly_state   = traders_map.get("polymarket", {})
+
+    # If orchestrator format: pull wallet/DEX info from trader substates
+    if solana_state:
+        for k in ("wallet_connected", "wallet_address", "wallet_sol",
+                  "wallet_usdc", "wallet_sol_usd"):
+            state.setdefault(k, solana_state.get(k, state.get(k)))
+        # DEX position details from Solana trader
+        if "dex_position_details" in solana_state:
+            state.setdefault("dex_position_details", solana_state["dex_position_details"])
+        state.setdefault("dex_positions", solana_state.get("positions", 0))
 
     # ── Core values ───────────────────────────────────────────────────────────
     equity      = state.get("equity",          portfolio.get("cash", 10000))
@@ -613,6 +630,25 @@ def render():
                 f'+${arb_state.get("total_funding_collected_usd",0):.2f}',
                 TV["green"])
 
+        # Add per-trader status rows when orchestrator format is used
+        if traders_map:
+            status_html += (
+                f'<div style="border-top:1px solid {TV["border"]};margin:6px 0 4px 0;'
+                f'padding-top:6px;font-size:9.5px;color:{TV["text2"]};'
+                f'text-transform:uppercase;letter-spacing:1px;font-weight:600;">Subsystems</div>'
+            )
+            for tname, tstate in traders_map.items():
+                t_running = tstate.get("running", False)
+                t_cycle = tstate.get("cycle", 0)
+                t_pos = tstate.get("positions", 0)
+                t_icon = "●" if t_running else "○"
+                t_color = TV["green"] if t_running else TV["red"]
+                t_detail = f"#{t_cycle} · {t_pos} pos"
+                status_html += srow(
+                    f'<span style="color:{t_color}">{t_icon}</span> {tname.title()}',
+                    t_detail,
+                    t_color)
+
         st.markdown(
             f'<div style="background:{TV["bg2"]};border:1px solid {TV["border"]};'
             f'border-radius:8px;padding:8px 12px;">{status_html}</div>',
@@ -632,6 +668,7 @@ def render():
                     "SCALP", "GRID", "ARB", "PARTIAL", "PYRAMID",
                     "CIRCUIT", "Stop loss", "Take profit", "MILESTONE",
                     "Mode switched", "PAPER ACCOUNT RESET",
+                    "[solana]", "[polymarket]", "OPEN", "FAST EXIT",
                 ]
                 filtered = [l.rstrip() for l in lines if any(k in l for k in keywords)][-40:]
                 def fc(line):
@@ -731,6 +768,26 @@ def render():
                 stop_pct=pos.get("stop_pct", 0.25), tp_pct=pos.get("target_pct", 0.50),
                 opened=pos.get("opened_at",""), leverage=1,
                 size_usd=size_usd, sort_key=pnl_pct,
+            ))
+        # Polymarket positions from orchestrator
+        poly_positions = poly_state.get("position_details", [])
+        for pp in poly_positions:
+            entry_p = pp.get("entry_price", 0)
+            cur_p   = pp.get("current_price", entry_p)
+            pp_pnl  = pp.get("pnl_pct", 0)
+            pp_size = pp.get("size_usdc", 0)
+            all_positions.append(dict(
+                id=pp.get("condition_id", pp.get("id", "")),
+                symbol=pp.get("question", pp.get("symbol", "?"))[:20],
+                market="🔮 POLY",
+                mkt_key="polymarket",
+                side=pp.get("side", "YES").lower(),
+                pnl_pct=pp_pnl * 100 if abs(pp_pnl) < 5 else pp_pnl,
+                pnl_usd=pp_size * pp_pnl,
+                entry=entry_p, current=cur_p,
+                stop_pct=0.15, tp_pct=0.25,
+                opened=pp.get("opened_at", ""), leverage=1,
+                size_usd=pp_size, sort_key=pp_pnl,
             ))
 
         if all_positions:
