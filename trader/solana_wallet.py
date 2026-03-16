@@ -441,9 +441,10 @@ class SolanaWallet:
             logger.error("Insufficient SOL for fees — skipping sell of %s", token_mint[:12])
             return None
 
-        # Always fetch fresh balance for sells — bypass the 10s cache
-        self._token_balance_cache.pop(token_mint, None)
-        raw_amount, decimals = self._get_token_raw_balance(token_mint)
+        # Force fresh balance read (TTL=0) but keep stale cache as 429 fallback.
+        # pop() was previously used here but cleared the only fallback — during 429
+        # storms the pop caused raw_amount=0 and the sell was permanently skipped.
+        raw_amount, decimals = self._get_token_raw_balance(token_mint, _ttl=0.0)
         if raw_amount <= 0:
             logger.warning("No on-chain balance for %s — skipping sell", token_mint[:12])
             return None
@@ -463,6 +464,8 @@ class SolanaWallet:
             pair_address=pair_address,
         )
         if result.success:
+            # Invalidate cache — tokens are gone; next read will fetch real balance
+            self._token_balance_cache.pop(token_mint, None)
             out_sol = result.out_amount / 1e9
             sol_price = self._get_sol_price()
             # out_amount is 0 when the route (PumpPortal/direct) doesn't expose it
@@ -494,8 +497,7 @@ class SolanaWallet:
         if not self._check_lamport_balance(is_sell=True):
             return None
 
-        self._token_balance_cache.pop(token_mint, None)
-        raw_amount, decimals = self._get_token_raw_balance(token_mint)
+        raw_amount, decimals = self._get_token_raw_balance(token_mint, _ttl=0.0)
         if raw_amount <= 0:
             logger.warning("No on-chain balance for partial sell of %s", token_mint[:12])
             return None
@@ -518,6 +520,8 @@ class SolanaWallet:
             pair_address=pair_address,
         )
         if result.success:
+            # Invalidate cache — balance has changed; next sell reads fresh amount
+            self._token_balance_cache.pop(token_mint, None)
             out_sol = result.out_amount / 1e9
             sol_price = self._get_sol_price()
             if sol_price <= 0:
