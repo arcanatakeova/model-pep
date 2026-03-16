@@ -566,6 +566,29 @@ class SolanaWallet:
             slippage_bps=slippage_bps,
             pair_address=pair_address,
         )
+        # Token-2022 transfer-fee tokens: same insufficient-funds guard as sell_token.
+        if not result.success and result.error == "SELL_INSUF":
+            self._token_balance_cache.pop(token_mint, None)
+            logger.info("PARTIAL SELL_INSUF: invalidating cache for %s — fetching real balance",
+                        token_mint[:12])
+            raw_amount = 0
+            for _r in range(4):
+                raw_amount, decimals = self._get_token_raw_balance(token_mint, _ttl=0.0)
+                if raw_amount > 0:
+                    break
+                time.sleep(1.0)
+            if raw_amount > 0:
+                sell_raw = max(1, int(raw_amount * fraction))
+                result = self._execute_swap_raw(
+                    input_mint=token_mint,
+                    output_mint=SOL_MINT,
+                    raw_input_amount=sell_raw,
+                    slippage_bps=slippage_bps,
+                    pair_address=pair_address,
+                )
+            else:
+                logger.warning("PARTIAL SELL_INSUF: real balance unreadable for %s", token_mint[:12])
+
         if result.success:
             # Invalidate cache — balance has changed; next sell reads fresh amount
             self._token_balance_cache.pop(token_mint, None)
