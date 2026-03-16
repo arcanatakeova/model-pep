@@ -1944,7 +1944,17 @@ class SolanaWallet:
             sol_price = self._get_sol_price()
             if sol_price <= 0:
                 return 0
-            return int((usd_amount / sol_price) * 1e9)
+            raw = int((usd_amount / sol_price) * 1e9)
+            # Jupiter and PumpSwap both transfer amount*(1+slippage) from the wallet
+            # upfront (slippage reserve that is partially returned after swap).
+            # With a 15% overhead headroom, ensure that transfer can't overdraft the wallet.
+            #   max_raw * 1.15 ≤ wallet_lamports - MIN_SOL_RESERVE_LAMPORTS
+            wallet_lam = self.get_sol_balance_lamports()
+            max_raw = max(0, int((wallet_lam - MIN_SOL_RESERVE_LAMPORTS) / 1.15))
+            if raw > max_raw:
+                logger.debug("sol_in capped: %d → %d (wallet=%d, reserve=%d)",
+                             raw, max_raw, wallet_lam, MIN_SOL_RESERVE_LAMPORTS)
+            return min(raw, max_raw)
         elif mint in (USDC_MINT, USDT_MINT):
             return int(usd_amount * 1e6)
         else:

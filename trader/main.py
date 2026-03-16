@@ -949,6 +949,37 @@ class AITrader:
                     continue
                 be = _get_birdeye()
                 if not be or not be.enabled:
+                    # Birdeye unavailable — still run stop/trail checks using prices
+                    # cached by the main cycle (updated each scan, typically every 5-30s).
+                    # Not as fresh as Birdeye, but far better than doing nothing for 30s.
+                    _to_close_fallback = []
+                    for _pair_addr, _pos in list(self._dex_positions.items()):
+                        _entry   = _pos.get("entry_price", 0)
+                        _current = _pos.get("current_price", _entry)
+                        if _entry <= 0 or _current <= 0:
+                            continue
+                        _pnl     = (_current - _entry) / _entry
+                        _peak    = _pos.get("peak_price", _entry)
+                        _stop    = _pos.get("stop_pct", 0.20)
+                        _scalp   = _pos.get("scalp_mode", False)
+                        # Hard stop-loss
+                        if _pnl <= -_stop:
+                            _to_close_fallback.append((_pair_addr, _pos, _current,
+                                f"Stop-loss {_pnl:.0%} [no Birdeye]"))
+                            continue
+                        # Trailing / reversal from peak
+                        if _peak > _entry and _pnl > 0:
+                            _reversal = (_peak - _current) / _peak
+                            _rev_thr = (config.SCALP_REVERSAL_PCT if _scalp
+                                        else min(0.07 + _pnl * 0.06, 0.20))
+                            if _reversal >= _rev_thr and _pnl > 0.04:
+                                _to_close_fallback.append((_pair_addr, _pos, _current,
+                                    f"Trailing -{_reversal:.0%} from peak "
+                                    f"(PnL +{_pnl:.0%}) [no Birdeye]"))
+                    for _pa, _p, _cp, _rsn in _to_close_fallback:
+                        logger.info("FAST EXIT (no Birdeye) %s @ $%.8f | %s",
+                                    _p.get("symbol", "?"), _cp, _rsn)
+                        self._try_close_dex_position(_pa, _p, _cp, _rsn)
                     continue
 
                 # Batch-fetch all held Solana token prices in one API call
@@ -1299,11 +1330,15 @@ class AITrader:
                     logger.debug("%s momentum extension: target → %.1f%% (5m: %+.1f%%)",
                                  pos.get("symbol", "?"), adj_target * 100, m5_chg)
 
-                # Trailing stop: adaptive to the position's own stop distance
-                # Only kicks in after we're in profit by at least 50% of the stop
-                pos_stop  = pos.get("stop_pct", 0.20)
-                trail_thr = pos_stop * 0.80   # e.g. 24% trail for a 30% stop
-                profit_thr = pos_stop * 0.50  # must be in profit before trailing
+                # Trailing stop: scalp positions use tight SCALP_REVERSAL_PCT,
+                # swing positions use stop-adaptive distance.
+                pos_stop = pos.get("stop_pct", 0.20)
+                if scalp:
+                    trail_thr  = config.SCALP_REVERSAL_PCT           # e.g. 5%
+                    profit_thr = config.SCALP_TARGET_PCT * 0.25      # e.g. 4.5% (any profit)
+                else:
+                    trail_thr  = pos_stop * 0.80   # e.g. 16% trail for 20% stop
+                    profit_thr = pos_stop * 0.50   # must be in profit first
                 reason = None
                 if pnl_pct >= adj_target:
                     reason = f"Take profit +{pnl_pct:.0%}"
