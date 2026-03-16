@@ -1082,18 +1082,18 @@ class SolanaWallet:
                 logger.warning("PumpSwap: zero reserves pool=%s", pool_address[:16])
                 return None, 0, 0.0
 
-            # ── Early overflow guard ───────────────────────────────────────────
-            # PumpSwap AMM computes k = base_reserve * quote_reserve as u64.
-            # For high-supply tokens this overflows → on-chain error 0x1787.
-            # Detect it here (via logarithms to avoid Python bigint issues) and
-            # bail before wasting RPC calls on a transaction that will always fail.
+            # ── Overflow guard ────────────────────────────────────────────────
+            # PumpSwap's on-chain program uses u128 for k = base * quote, so the
+            # real limit is ln(2^127) ≈ 88.02.  The old u64 threshold (43.67) was
+            # a false-positive that blocked every high-supply token post-graduation.
+            # We still check vs u128 to catch genuinely broken pools.
             import math as _math
-            _LOG_U64_MAX = 43.668  # ln(2^63) — use 63 bits for safety margin
+            _LOG_U128_MAX = 87.0   # ln(2^127) ≈ 88.02; use 87 for safety margin
             if (_math.log(float(base_reserve)) + _math.log(float(quote_reserve))
-                    > _LOG_U64_MAX):
+                    > _LOG_U128_MAX):
                 logger.warning(
-                    "PumpSwap: k-overflow detected for pool %s "
-                    "(base=%d quote=%d) — token untradeable via direct path",
+                    "PumpSwap: u128 k-overflow for pool %s "
+                    "(base=%d quote=%d) — truly untradeable, skipping",
                     pool_address[:16], base_reserve, quote_reserve)
                 return None, 0, 0.0
 
@@ -1630,9 +1630,13 @@ class SolanaWallet:
                     if resp.ok:
                         data = resp.json()
                         if data.get("error"):
-                            logger.debug("Jupiter quote error: %s", data["error"])
+                            logger.warning("Jupiter quote error for %s→%s: %s",
+                                           input_mint[:8], output_mint[:8], data["error"])
                             return None
                         return data
+                    logger.debug("Jupiter HTTP %d for %s→%s: %s",
+                                 resp.status_code, input_mint[:8], output_mint[:8],
+                                 resp.text[:120])
                     break  # got a real HTTP response — no need to try alt URL
                 except Exception as e:
                     last_exc = e
