@@ -1083,14 +1083,14 @@ class SolanaWallet:
                 return None, 0, 0.0
 
             # ── Early overflow guard ───────────────────────────────────────────
-            # PumpSwap AMM computes k = base_reserve * quote_reserve as u64.
-            # For high-supply tokens this overflows → on-chain error 0x1787.
-            # Detect it here (via logarithms to avoid Python bigint issues) and
-            # bail before wasting RPC calls on a transaction that will always fail.
+            # PumpSwap AMM uses u128 for k = base_reserve * quote_reserve.
+            # Only bail if k exceeds u128 (ln(2^127) ≈ 88.03).
+            # Previous u64 threshold (43.668) was too aggressive and blocked
+            # all graduated Pump.fun tokens with normal reserves.
             import math as _math
-            _LOG_U64_MAX = 43.668  # ln(2^63) — use 63 bits for safety margin
+            _LOG_U128_MAX = 88.03  # ln(2^127) — u128 safety margin
             if (_math.log(float(base_reserve)) + _math.log(float(quote_reserve))
-                    > _LOG_U64_MAX):
+                    > _LOG_U128_MAX):
                 logger.warning(
                     "PumpSwap: k-overflow detected for pool %s "
                     "(base=%d quote=%d) — token untradeable via direct path",
