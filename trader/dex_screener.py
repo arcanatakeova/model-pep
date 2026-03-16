@@ -56,7 +56,7 @@ JUPITER_PRICE    = "https://api.jup.ag/price/v2"
 GMGN_BASE        = "https://gmgn.ai/defi/quotation/v1"
 
 # ── Hard filters (applied before scoring) ──────────────────────────────────────
-MIN_LIQUIDITY_USD  = 5_000       # $5k — catch early pumps (was 8k: missed entries)
+MIN_LIQUIDITY_USD  = 15_000      # $15k — require meaningful liquidity for safer exits
 MIN_VOLUME_H24_USD = 10_000      # $10k/24h (was 15k: too restrictive for new tokens)
 MIN_MARKET_CAP     = 15_000      # $15k mcap (was 30k: pump.fun starts small)
 MAX_MARKET_CAP     = 500_000_000 # $500M ceiling
@@ -703,45 +703,28 @@ class DexScreener:
         elif liq > 50_000:
             score += 0.02
 
-        # ── Age bonus (10%) — early mover advantage (boosted) ────────────
+        # ── Age penalty — extremely new tokens are most dangerous ──────
         age = token.age_hours
         if age is not None:
-            if age < 0.25:
-                score += 0.15   # <15min — maximum alpha window
-                signals.append("FRESH (<15min)")
-            elif age < 0.5:
-                score += 0.12   # Brand new (<30min)
-                signals.append("Brand new (<30min)")
+            if age < 0.5:
+                score -= 0.20   # <30min — highest rug risk window
+                signals.append(f"DANGER: extremely new ({age*60:.0f}min old)")
             elif age < 1:
-                score += 0.09
+                score -= 0.10
                 signals.append(f"Very new ({age*60:.0f}min old)")
-            elif age < 3:
-                score += 0.06
-                signals.append(f"New ({age*60:.0f}min old)")
-            elif age < 6:
-                score += 0.04
-            elif age < 12:
-                score += 0.02
             elif age > 18:
                 score -= 0.05   # Stale — momentum probably dead
 
         # ── Holder concentration guard (Birdeye token_overview data) ─────
         if token.holder_count > 0:
-            if token.holder_count < 20:
-                # <20 holders = almost certainly a rug (hard block)
+            if token.holder_count < 100:
+                # <100 holders = almost certainly a rug (hard block)
                 token.score = 0.0
                 token.signals = [f"BLOCKED: only {token.holder_count} holders"]
                 return 0.0
-            elif token.holder_count < 50:
-                # 20-50: risky but allow if token is very new (< 1h old)
-                if age is not None and age < 1:
-                    score -= 0.05   # Mild penalty — new tokens always start small
-                    signals.append(f"New token, {token.holder_count} holders")
-                else:
-                    score -= 0.15   # Older token with few holders = red flag
-                    signals.append(f"Few holders ({token.holder_count})")
-            elif token.holder_count < 200:
-                score -= 0.06
+            elif token.holder_count < 500:
+                score -= 0.15
+                signals.append(f"Few holders ({token.holder_count})")
             elif token.holder_count > 2000:
                 score += 0.04
                 signals.append(f"Good distribution ({token.holder_count} holders)")
@@ -867,12 +850,10 @@ class DexScreener:
                 if not safety.is_safe_to_trade:
                     # Conviction-based override: allow MEDIUM-risk tokens if score
                     # is high enough (good momentum beats borderline safety flags)
-                    if score >= 0.50 and safety.risk_level == "MEDIUM":
-                        score *= 0.70   # 30% penalty for MEDIUM risk override
-                        signals.append(f"OVERRIDE: MEDIUM risk (conviction {score:.2f})")
-                    elif score >= 0.70 and safety.risk_level == "HIGH":
-                        score *= 0.45   # 55% penalty for HIGH risk — possible but costly
-                        signals.append(f"OVERRIDE: HIGH risk (strong signal)")
+                    if safety.risk_level == "HIGH":
+                        score = 0.0  # Hard block HIGH risk tokens
+                    elif safety.risk_level == "MEDIUM":
+                        score *= 0.50  # Severe penalty
                     else:
                         token.score = 0.0
                         token.signals = [f"BLOCKED: {safety.risk_level} risk"] + safety.risk_flags[:2]
@@ -889,10 +870,10 @@ class DexScreener:
                     flag = safety.risk_flags[0] if safety.risk_flags else "caution"
                     signals.append(f"MEDIUM risk: {flag}")
                 elif safety.risk_level == "HIGH":
-                    score *= 0.50   # Heavy penalty for HIGH risk
-                    signals.append(f"HIGH risk ({safety.safety_score:.2f})")
+                    score = 0.0   # Hard block HIGH risk tokens
+                    signals.append(f"BLOCKED: HIGH risk ({safety.safety_score:.2f})")
             else:
-                score *= 0.88   # Unverified — mild penalty only
+                score *= 0.60   # Unverified — heavy penalty (no safety data = assume risky)
 
         # ── Market intelligence context ───────────────────────────────────
         # Apply market-wide knowledge: narrative heat + macro sentiment.

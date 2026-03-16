@@ -714,7 +714,7 @@ class AITrader:
                                    ", ".join(safety.risk_flags[:2]))
                     n_blocked_safety += 1
                     continue
-                safety_score = safety.safety_score if safety else 0.5
+                safety_score = safety.safety_score if safety else 0.0  # Unknown = don't trade
                 size_usd = self.risk_mgr.dex_position_size_usd(
                     token_score=token.score,
                     safety_score=safety_score,
@@ -747,7 +747,7 @@ class AITrader:
                 tok, sz, sfty = args
 
                 # Holder count hard block — use data already fetched by safety checker
-                if sfty and getattr(sfty, "holder_count", None) and 0 < sfty.holder_count < 20:
+                if sfty and getattr(sfty, "holder_count", None) and 0 < sfty.holder_count < 100:
                     logger.warning("SKIP %s: only %d holders (rug risk)",
                                    tok.base_symbol, sfty.holder_count)
                     return None
@@ -832,7 +832,7 @@ class AITrader:
                                    sol_bal_usd, size_usd)
                     return
 
-            safety_score = safety.safety_score if safety else 0.5
+            safety_score = safety.safety_score if safety else 0.0  # Unknown = don't trade
             # AI-computed stop and target per trade based on token's own volatility
             stop_pct   = self.risk_mgr.dynamic_dex_stop_pct(
                 price_change_h1  = getattr(token, "price_change_h1",  0) or 0,

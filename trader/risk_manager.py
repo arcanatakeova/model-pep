@@ -261,15 +261,15 @@ class RiskManager:
 
         base_size = config.DEX_BASE_POSITION_USD
 
-        # 1. Volatility adjustment — HIGH vol = big opportunity, size UP (not down)
+        # 1. Volatility adjustment — HIGH vol = REDUCE size (not increase)
         vol_proxy = (abs(price_change_h1) + abs(price_change_h6 / 6)) / 2
         vol_proxy = max(vol_proxy, 1.0)
-        vol_boost = min(1.0 + (vol_proxy - 1.0) * 0.18, 2.5)  # 1.0x–2.5x (was 2.0x)
-        vol_adjusted = base_size * vol_boost
+        vol_boost = min(1.0 + (vol_proxy - 1.0) * 0.18, 2.5)
+        vol_mult = max(0.3, 1.0 / vol_boost)  # Invert: high vol = smaller positions
+        vol_adjusted = base_size * vol_mult
 
-        # 2. Safety scaling: riskier tokens get smaller positions
-        # Floor raised to 0.5 — even risky tokens deserve half the base size
-        safety_multiplier = max(0.5, safety_score)
+        # 2. Safety scaling: riskier tokens get smaller positions (no floor)
+        safety_multiplier = safety_score
 
         # 3. Score scaling: higher score = closer to full size
         # Raised floor from 0.4 to 0.5 — don't half-size the entry
@@ -277,12 +277,14 @@ class RiskManager:
 
         size = vol_adjusted * safety_multiplier * score_multiplier
 
-        # 4. Equity-scaled floor: ensure base position is meaningful relative to equity
-        # On small wallets, scale base_size proportionally so % exposure is consistent
-        equity_floor = equity * 0.04  # At least 4% of equity (up from ~2%)
+        # 4. Liquidity cap: never more than 2% of pool liquidity
+        size = min(size, liquidity_usd * 0.02)
+
+        # 5. Equity-scaled floor: minimal (1% of equity)
+        equity_floor = equity * 0.01
         size = max(size, equity_floor)
 
-        # 5. Caps
+        # 6. Caps
         size = min(size, config.DEX_MAX_POSITION_USD)
         size = min(size, liquidity_usd * config.MIN_LIQUIDITY_RATIO)
         # Cash cap: use up to 90% of available cash — leave room for tx fees
@@ -329,19 +331,18 @@ class RiskManager:
         h24_vol = abs(price_change_h24 or 0) / 100
 
         # Use the largest observed timeframe as the volatility anchor
-        # Tightened: 2.0× (was 2.5×) and 15% floor (was 20%) to cut losses faster
-        base = max(h1_vol * 2.0, h6_vol * 0.5, h24_vol * 0.20, 0.15)
-        base = min(base, 0.40)  # Hard cap 40% (was 45%)
+        base = max(h1_vol * 2.0, h6_vol * 0.5, h24_vol * 0.20, 0.10)
+        base = min(base, 0.40)
 
-        # Safety-adjusted multiplier: less trusted = more volatile = wider stop needed
+        # Safety-adjusted multiplier: risky tokens get TIGHTER stops (not wider)
         if safety_score >= 0.80:
-            mult = 0.85    # well-audited token, slightly tighter
+            mult = 1.0     # well-audited token, full stop width
         elif safety_score >= 0.60:
-            mult = 1.00    # average
+            mult = 0.80    # moderate risk — tighter
         else:
-            mult = 1.30    # unknown/risky — expect big swings
+            mult = 0.60    # unknown/risky — tightest stops, cut losses fast
 
-        stop = round(min(base * mult, 0.50), 3)
+        stop = round(min(base * mult, 0.25), 3)
         logger.debug("Dynamic stop: h1=%.1f%% h6=%.1f%% h24=%.1f%% safety=%.2f → stop=%.1f%%",
                      h1_vol*100, h6_vol*100, h24_vol*100, safety_score, stop*100)
         return stop
@@ -381,7 +382,10 @@ class RiskManager:
             p.get("size_usd", 0) * p.get("remaining_fraction", 1.0)
             for p in dex_positions.values()
         )
-        # No memecoin allocation cap — 100% of capital can be deployed in DEX positions
+        # Enforce memecoin allocation cap
+        equity = self.portfolio.equity()
+        if equity > 0 and total_dex_usd >= equity * config.MAX_MEMECOIN_ALLOCATION_PCT:
+            return False, f"Memecoin allocation cap ({config.MAX_MEMECOIN_ALLOCATION_PCT:.0%} of equity)"
 
         if token_dex_id:
             same_dex = sum(1 for p in dex_positions.values()

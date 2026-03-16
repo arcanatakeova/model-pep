@@ -205,14 +205,14 @@ class TokenSafetyChecker:
 
         # Mint authority
         if mint_disabled is False:
-            score -= 0.25
+            score -= 0.40
             flags.append("Mint authority active — can inflate supply")
         elif mint_disabled is True and freeze_disabled is True:
             score += 0.08  # Both disabled = clean
 
         # Freeze authority
         if freeze_disabled is False:
-            score -= 0.20
+            score -= 0.35
             flags.append("Freeze authority active — can freeze wallets")
 
         # ─── Creator concentration (Birdeye) ──────────────────────────────────
@@ -262,6 +262,12 @@ class TokenSafetyChecker:
             score -= 0.08
             flags.append("RugCheck: WARNING rating")
 
+        # ─── Holder count penalty ─────────────────────────────────────────────
+        holder_count = getattr(birdeye_sec, "holder_count", None) if birdeye_sec else None
+        if holder_count is not None and holder_count < 100:
+            score -= 0.25
+            flags.append(f"Very few holders ({holder_count}) — rug risk")
+
         # ─── Data unavailability penalties ────────────────────────────────────
         if not birdeye_sec and not rc.get("available", False):
             score -= 0.08  # No data from either source
@@ -275,7 +281,7 @@ class TokenSafetyChecker:
         # ─── Round-trip tax penalty ────────────────────────────────────────────
         if round_trip_tax is not None:
             if round_trip_tax > config.MAX_ROUND_TRIP_TAX_PCT:
-                score -= 0.20   # Was -0.30: too harsh for memecoins with built-in fees
+                score -= 0.50   # Hard block effectively — high-tax tokens destroy capital
                 flags.append(f"High tax: {round_trip_tax:.0%} round-trip loss")
             elif round_trip_tax > 0.15:
                 score -= 0.08
