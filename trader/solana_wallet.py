@@ -42,9 +42,9 @@ logger = logging.getLogger(__name__)
 
 # ─── API endpoints ─────────────────────────────────────────────────────────────
 JUPITER_QUOTE_URL    = "https://quote-api.jup.ag/v6/quote"
-JUPITER_QUOTE_URL_ALT = "https://lite.jup.ag/v6/quote"   # alt endpoint if primary DNS fails
+JUPITER_QUOTE_URL_ALT = "https://api.jup.ag/swap/v1/quote"  # alt endpoint (lite.jup.ag deprecated)
 JUPITER_SWAP_URL     = "https://quote-api.jup.ag/v6/swap"
-JUPITER_SWAP_URL_ALT  = "https://lite.jup.ag/v6/swap"
+JUPITER_SWAP_URL_ALT  = "https://api.jup.ag/swap/v1/swap"
 
 # Browser-like UA avoids Cloudflare bot-detection (returns 400/403 for python-requests/2.x)
 _BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -1531,7 +1531,7 @@ class SolanaWallet:
             "asLegacyTransaction": "false",
         }
         for attempt in range(3):
-            # Try primary endpoint first; fall back to lite.jup.ag on DNS failure
+            # Try primary endpoint first; fall back to api.jup.ag on DNS failure
             for url in (JUPITER_QUOTE_URL, JUPITER_QUOTE_URL_ALT):
                 try:
                     resp = _session.get(url, params=params, timeout=5)

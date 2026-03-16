@@ -819,7 +819,7 @@ class AITrader:
                     _sol_usd if (time.time() - _cache_ts) < 10 else 0.0,
                     self.portfolio.cash,
                 )
-                if sol_bal_usd < size_usd + 1.0:   # Need trade size + $1 flat for Solana fees
+                if sol_bal_usd < size_usd + 0.15:   # Need trade size + ~$0.15 for Solana tx fees
                     logger.warning("SOL balance $%.2f insufficient for $%.2f trade — skipping",
                                    sol_bal_usd, size_usd)
                     return

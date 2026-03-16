@@ -106,8 +106,8 @@ class TokenSafetyChecker:
 
         # Lazy-import Birdeye client to avoid circular deps
         self._birdeye = None
-        self._session.mount("https://", _HTTPAdapter(pool_connections=5, pool_maxsize=20))
-        self._session.mount("http://",  _HTTPAdapter(pool_connections=5, pool_maxsize=20))
+        self._session.mount("https://", _HTTPAdapter(pool_connections=20, pool_maxsize=100))
+        self._session.mount("http://",  _HTTPAdapter(pool_connections=20, pool_maxsize=100))
 
     def _get_birdeye(self):
         """Lazy-load Birdeye client."""
