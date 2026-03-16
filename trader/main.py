@@ -176,7 +176,7 @@ class AITrader:
         self._equity_curve   = self._load_equity_curve()  # Persist chart history across restarts
         self._dex_positions: dict = {}  # addr → {buy_price, qty, chain, symbol}
         self._dex_lock = threading.Lock()  # Protects _dex_positions cross-thread (fast monitor + main)
-        self._dex_closed_count = 0         # Counts DEX closes; triggers audit every 25
+        self._dex_closed_count = 0         # Counts DEX closes; drives audit cadence
         self._cex_signals_cache = []    # Shared between CEX scan + futures swing scan
         self._cex_cache_lock = threading.Lock()  # Protects _cex_signals_cache cross-thread
         self._market_snapshot: dict = {}  # Latest market overview (BTC dom, sentiment)
@@ -1434,13 +1434,12 @@ class AITrader:
         if len(self.portfolio.closed_trades) > _MAX_CLOSED_TRADES_MEMORY:
             self.portfolio._archive_old_trades()
 
-        # ── Trigger strategy audit every 25 DEX closes ────────────────────
+        # ── Trigger per-trade review + periodic repivot on every close ────
         self._dex_closed_count += 1
-        if self._dex_closed_count % 25 == 0:
-            try:
-                self.auditor.run_audit()
-            except Exception as _ae:
-                logger.debug("Auditor error: %s", _ae)
+        try:
+            self.auditor.on_trade_closed(trade_record)
+        except Exception as _ae:
+            logger.debug("Auditor error: %s", _ae)
 
         return True
 

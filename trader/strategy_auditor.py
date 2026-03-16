@@ -1,17 +1,19 @@
 """
-strategy_auditor.py — Performance auditor and strategy repivot engine.
+strategy_auditor.py — Continuous trade review and strategy repivot engine.
 
-Runs every N cycles, analyses recent closed trades, then adjusts live config
-parameters to maximise edge:
-  • Signal threshold (MIN_SIGNAL_STRENGTH)
-  • Per-market thresholds (SCALP_MIN_SCORE, FOREX_MIN_SCORE, DEX_MIN_SCORE)
-  • Futures conviction gate (MIN_FUTURES_CONVICTION)
-  • Stop / TP distances (STOP_LOSS_PCT, TAKE_PROFIT_PCT)
-  • DEX position size (DEX_BASE_POSITION_USD)
-  • Indicator weights (STRATEGY_WEIGHTS) based on detected regime
+Two modes run on every DEX close:
 
-All changes are bounded so a single bad run cannot push the bot into an extreme
-configuration. Changes are logged so the user can audit what happened.
+1. post_trade_review(trade)  — Instant post-mortem after every single close.
+   Compares the just-closed trade against ALL historical trades for context:
+   how did exit timing, PnL, and score compare to similar past trades?
+
+2. run_audit()               — Full parameter repivot every 10 DEX closes.
+   Uses three time windows: last-10 (recent), last-50 (medium), all-time.
+   Adjusts DEX_MIN_SCORE, DEX_BASE_POSITION_USD, stale-exit timer, etc.
+   All changes are bounded so no single bad run creates extreme config.
+
+Both methods use the full closed_trades history — not a truncated window —
+so pattern recognition improves continuously as more trades accumulate.
 """
 
 from __future__ import annotations
@@ -27,20 +29,21 @@ _BOUNDS: dict[str, tuple[float, float]] = {
     "MIN_SIGNAL_STRENGTH":     (0.15, 0.50),
     "SCALP_MIN_SCORE":         (0.18, 0.55),
     "FOREX_MIN_SCORE":         (0.25, 0.60),
-    "DEX_MIN_SCORE":           (0.25, 0.52),   # tighter: never go below 0.25 or above 0.52
+    "DEX_MIN_SCORE":           (0.25, 0.52),
     "MIN_FUTURES_CONVICTION":  (0.30, 0.70),
     "STOP_LOSS_PCT":           (0.015, 0.09),
     "TAKE_PROFIT_PCT":         (0.03,  0.18),
     "DEX_BASE_POSITION_USD":   (10.0, 200.0),
+    "DEX_STALE_EXIT_HOURS":    (1.0,  4.0),
 }
 
-# ─── DEX-specific signal labels that the auditor tracks ──────────────────────
+# ─── Signal keywords tracked for per-signal win-rate analysis ────────────────
 _DEX_SIGNAL_KEYS = {
     "burst":    "BURST MODE",
-    "momentum": "5m",          # any "5m" mention = 5m momentum signal
-    "volume":   "Vol",         # volume surge/explosion signals
-    "new":      "FRESH",       # very fresh pairs (<15min)
-    "viral":    "Viral",       # viral growth signal
+    "momentum": "5m",
+    "volume":   "Vol",
+    "fresh":    "FRESH",
+    "viral":    "Viral",
 }
 
 _INDICATOR_BOUNDS: dict[str, tuple[float, float]] = {
@@ -55,80 +58,230 @@ _INDICATOR_BOUNDS: dict[str, tuple[float, float]] = {
 
 class StrategyAuditor:
     """
-    Audits recent trade performance and repivots live strategy parameters.
-
-    Parameters are modified directly on the imported config module so every
-    subsequent cycle picks them up without a restart.
+    Runs after every DEX trade close. post_trade_review() gives instant
+    feedback on the just-closed trade against all history. run_audit()
+    adjusts live config every 10 closes.
     """
 
-    LOOKBACK        = 75   # Recent closed trades to analyse (raised: more DEX data = better signal)
-    MIN_TRADES      = 10   # Don't repivot until at least this many trades
-    MIN_PER_MARKET  = 6    # Min trades per market for per-market adjustments
-    DEX_MIN_FOR_DEEP = 15  # Minimum DEX trades for signal-level analysis
+    REPIVOT_EVERY   = 10   # Full parameter repivot every N DEX closes
+    MIN_TRADES      = 10   # Skip repivot below this total trade count
+    MIN_PER_MARKET  = 6    # Min trades in a market for per-market repivot
+    DEX_MIN_DEEP    = 15   # Min DEX trades for signal/hold-time analysis
 
     def __init__(self, portfolio, cfg_module):
         self.portfolio    = portfolio
         self.cfg          = cfg_module
         self._audit_count = 0
+        self._close_count = 0   # counts every DEX close (drives repivot cadence)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Public entry point
+    # Public entry points
     # ─────────────────────────────────────────────────────────────────────────
 
-    def run_audit(self) -> dict:
+    def on_trade_closed(self, trade: dict) -> None:
         """
-        Analyse recent trades and apply parameter adjustments.
-        Returns a summary dict (logged by caller).
+        Call after every DEX position close. Runs an instant post-mortem on
+        the just-closed trade, then fires a full repivot every REPIVOT_EVERY closes.
         """
-        trades = list(self.portfolio.closed_trades)[-self.LOOKBACK:]
-        if len(trades) < self.MIN_TRADES:
-            logger.info("Auditor: only %d trades — skipping repivot (need %d)",
-                        len(trades), self.MIN_TRADES)
+        self._close_count += 1
+        all_trades = list(self.portfolio.closed_trades)  # full history
+
+        # Always: per-trade post-mortem with historical context
+        self._post_trade_review(trade, all_trades)
+
+        # Periodically: full repivot using all available data
+        if self._close_count % self.REPIVOT_EVERY == 0:
+            self.run_audit(all_trades)
+
+    def run_audit(self, all_trades: Optional[list] = None) -> dict:
+        """
+        Full parameter repivot. Uses three windows:
+          recent  — last 10 trades  (current conditions)
+          medium  — last 50 trades  (trend)
+          alltime — everything       (base rate)
+        """
+        if all_trades is None:
+            all_trades = list(self.portfolio.closed_trades)
+
+        if len(all_trades) < self.MIN_TRADES:
+            logger.info("Auditor: only %d trades total — skipping repivot (need %d)",
+                        len(all_trades), self.MIN_TRADES)
             return {}
 
         self._audit_count += 1
+        recent  = all_trades[-10:]
+        medium  = all_trades[-50:]
+        alltime = all_trades
+
         adjustments: list[str] = []
 
-        market_stats = self._market_stats(trades)
-        score_stats  = self._score_bucket_stats(trades)
-        exit_stats   = self._exit_stats(trades)
-        regime       = self._detect_regime(trades)
+        # ── Performance trend snapshot ────────────────────────────────────────
+        def _wr(ts): return sum(1 for t in ts if t.get("pnl_usd", 0) > 0) / len(ts) if ts else 0
+        def _avg(ts): return sum(t.get("pnl_pct", 0) for t in ts) / len(ts) if ts else 0
 
-        logger.info("━━━ Audit #%d  (%d trades, regime=%s) ━━━",
-                    self._audit_count, len(trades), regime)
+        logger.info(
+            "━━━ Audit #%d  total=%d  recent-10 win=%.0f%% avg=%+.1f%%  "
+            "last-50 win=%.0f%% avg=%+.1f%%  all-time win=%.0f%% avg=%+.1f%% ━━━",
+            self._audit_count, len(alltime),
+            _wr(recent) * 100, _avg(recent),
+            _wr(medium) * 100, _avg(medium),
+            _wr(alltime) * 100, _avg(alltime))
 
-        # Log market summary
+        # ── Trend direction (is the bot improving or degrading?) ──────────────
+        if len(alltime) >= 20:
+            old_half_wr = _wr(alltime[: len(alltime) // 2])
+            new_half_wr = _wr(alltime[len(alltime) // 2 :])
+            trend = "improving" if new_half_wr > old_half_wr + 0.05 else \
+                    "degrading"  if new_half_wr < old_half_wr - 0.05 else "stable"
+            logger.info("  Performance trend: %s  (first-half win=%.0f%%  second-half win=%.0f%%)",
+                        trend, old_half_wr * 100, new_half_wr * 100)
+
+        # ── Per-market stats (use medium window for repivot decisions) ─────────
+        market_stats = self._market_stats(medium)
         for mkt, s in market_stats.items():
             logger.info("  %-8s  n=%-3d  win=%.0f%%  avgPnL=%+.1f%%  total=$%+.0f",
-                        mkt, s["n"], s["win_rate"] * 100,
-                        s["avg_pnl_pct"], s["total_pnl"])
+                        mkt, s["n"], s["win_rate"] * 100, s["avg_pnl_pct"], s["total_pnl"])
 
-        # Apply repivots
+        # ── Repivots (use medium window for stability) ────────────────────────
+        score_stats = self._score_bucket_stats(medium)
+        exit_stats  = self._exit_stats(medium)
+        regime      = self._detect_regime(medium)
+
         adjustments += self._repivot_signal_threshold(score_stats)
         adjustments += self._repivot_per_market(market_stats)
         adjustments += self._repivot_risk_reward(exit_stats)
         adjustments += self._repivot_indicator_weights(regime)
 
-        # DEX-specific deep analysis
-        dex_trades = [t for t in trades if t.get("market") == "dex"]
-        if len(dex_trades) >= self.DEX_MIN_FOR_DEEP:
-            adjustments += self._repivot_dex_signals(dex_trades)
-            adjustments += self._repivot_dex_hold_time(dex_trades)
+        # ── DEX deep analysis (uses ALL history for maximum sample size) ──────
+        dex_all    = [t for t in alltime if t.get("market") == "dex"]
+        dex_recent = [t for t in recent  if t.get("market") == "dex"]
+        if len(dex_all) >= self.DEX_MIN_DEEP:
+            adjustments += self._repivot_dex_signals(dex_all, dex_recent)
+            adjustments += self._repivot_dex_hold_time(dex_all)
 
         if adjustments:
-            logger.info("Audit adjustments applied:")
+            logger.info("Audit adjustments:")
             for a in adjustments:
                 logger.info("  → %s", a)
         else:
             logger.info("Audit: no adjustments needed")
 
         return {
-            "audit_count": self._audit_count,
-            "trades_analysed": len(trades),
-            "regime": regime,
-            "market_stats": market_stats,
-            "adjustments": adjustments,
+            "audit_count":   self._audit_count,
+            "total_trades":  len(alltime),
+            "regime":        regime,
+            "adjustments":   adjustments,
         }
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Per-trade instant post-mortem
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _post_trade_review(self, trade: dict, all_trades: list) -> None:
+        """
+        Instant analysis of one trade against full history.
+        Answers: Was this a typical outcome? Did we exit well? What can we learn?
+        """
+        symbol      = trade.get("symbol", "?")
+        pnl_pct     = trade.get("pnl_pct", 0)
+        max_gain    = trade.get("max_gain_pct", 0)
+        hold_secs   = trade.get("hold_seconds", 0)
+        score       = trade.get("signal_score", 0)
+        source      = trade.get("dex_source", "?")
+        close_why   = trade.get("close_reason", "?")
+        is_win      = trade.get("pnl_usd", 0) > 0
+        is_burst    = trade.get("is_burst", False)
+
+        # All DEX trades for peer comparison
+        peers = [t for t in all_trades if t.get("market") == "dex"
+                 and t.get("asset_id") != trade.get("asset_id")]  # exclude self
+
+        if not peers:
+            logger.info("TRADE REVIEW %s | PnL %+.1f%% | first trade — no history yet",
+                        symbol, pnl_pct)
+            return
+
+        # ── Running win rates ─────────────────────────────────────────────────
+        total_n   = len(peers) + 1  # include this trade
+        wins_n    = sum(1 for t in peers if t.get("pnl_usd", 0) > 0) + (1 if is_win else 0)
+        recent10  = peers[-9:] + [trade]   # last 10 including this
+        recent5   = peers[-4:] + [trade]   # last 5 including this
+        wr_all    = wins_n / total_n
+        wr_10     = sum(1 for t in recent10 if t.get("pnl_usd", 0) > 0) / len(recent10)
+        wr_5      = sum(1 for t in recent5  if t.get("pnl_usd", 0) > 0) / len(recent5)
+
+        # ── Peer-group comparison (same source) ───────────────────────────────
+        src_peers = [t for t in peers if t.get("dex_source") == source]
+        src_avg   = (sum(t.get("pnl_pct", 0) for t in src_peers) / len(src_peers)
+                     if src_peers else None)
+        src_wr    = (sum(1 for t in src_peers if t.get("pnl_usd", 0) > 0) / len(src_peers)
+                     if src_peers else None)
+
+        # ── Score-bracket peers ───────────────────────────────────────────────
+        score_lo   = (score // 0.05) * 0.05          # floor to nearest 0.05
+        score_hi   = score_lo + 0.05
+        score_peers = [t for t in peers
+                       if score_lo <= t.get("signal_score", 0) < score_hi]
+        score_avg  = (sum(t.get("pnl_pct", 0) for t in score_peers) / len(score_peers)
+                      if score_peers else None)
+
+        # ── Exit quality: did we capture the available gain? ──────────────────
+        capture_pct = (pnl_pct / max_gain * 100) if max_gain > 1 else None
+        left_on_table = max_gain - pnl_pct if max_gain > pnl_pct + 1 else 0
+
+        # ── Build verdict ─────────────────────────────────────────────────────
+        flags: list[str] = []
+
+        if is_win:
+            if capture_pct is not None and capture_pct < 40:
+                flags.append(f"exited too early (captured {capture_pct:.0f}% of {max_gain:.1f}% peak)")
+            if capture_pct is not None and capture_pct > 85:
+                flags.append(f"near-perfect exit (captured {capture_pct:.0f}% of peak)")
+            if left_on_table > 30:
+                flags.append(f"${left_on_table:.1f}% left on table vs peak")
+        else:
+            # Loss — was the stop appropriate?
+            stop_set  = trade.get("stop_pct", 0) * 100
+            if stop_set > 0 and abs(pnl_pct) > stop_set * 1.5:
+                flags.append(f"stop overrun (set {stop_set:.0f}%, lost {abs(pnl_pct):.1f}%)")
+            if score_avg is not None and score_avg > 0 and pnl_pct < score_avg - 10:
+                flags.append(f"underperformed score-bracket avg ({score_avg:+.1f}%)")
+
+        if hold_secs < 120 and not is_win:
+            flags.append("very fast loss (<2min) — likely bad entry timing")
+        if wr_5 < 0.30:
+            flags.append("HOT STREAK WARNING: only 1/5 recent trades profitable")
+        if wr_5 > 0.80:
+            flags.append("strong run: 4+/5 recent profitable")
+        if is_burst:
+            flags.append("BURST MODE entry")
+
+        # ── Log the review ────────────────────────────────────────────────────
+        outcome = "WIN " if is_win else "LOSS"
+        hold_m  = hold_secs / 60
+
+        logger.info(
+            "TRADE REVIEW [%s] %s %+.1f%% | peak=%+.1f%% hold=%.1fm score=%.2f src=%s | "
+            "exit: %s",
+            outcome, symbol, pnl_pct, max_gain, hold_m, score, source, close_why)
+
+        logger.info(
+            "  Win rates → all-time: %.0f%% (%d trades)  last-10: %.0f%%  last-5: %.0f%%",
+            wr_all * 100, total_n, wr_10 * 100, wr_5 * 100)
+
+        if src_avg is not None:
+            logger.info(
+                "  vs %s peers (n=%d): win=%.0f%% avg=%+.1f%%  |  this trade: %+.1f%%  → %s",
+                source, len(src_peers), src_wr * 100, src_avg,
+                pnl_pct, "above avg" if pnl_pct > src_avg else "below avg")
+
+        if score_avg is not None:
+            logger.info(
+                "  vs score %.2f–%.2f peers (n=%d): avg=%+.1f%%  → this: %+.1f%%",
+                score_lo, score_hi, len(score_peers), score_avg, pnl_pct)
+
+        for f in flags:
+            logger.info("  ⚑ %s", f)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Statistics helpers
@@ -150,13 +303,12 @@ class StrategyAuditor:
         return stats
 
     def _score_bucket_stats(self, trades: list) -> dict:
-        """Group by |signal_score| bucket and measure quality."""
         buckets: dict[str, list] = {"low": [], "mid": [], "high": []}
         for t in trades:
             score = abs(t.get("signal_score", 0))
-            if score < 0.35:
+            if score < 0.38:
                 buckets["low"].append(t)
-            elif score < 0.58:
+            elif score < 0.46:
                 buckets["mid"].append(t)
             else:
                 buckets["high"].append(t)
@@ -172,23 +324,20 @@ class StrategyAuditor:
         return result
 
     def _exit_stats(self, trades: list) -> dict:
-        """Categorise exits: stop / trailing / take_profit / time / other."""
         total = len(trades)
         if total == 0:
             return {}
-        reason_lower = [t.get("close_reason", "").lower() for t in trades]
-        stops    = sum(1 for r in reason_lower if "stop" in r)
-        tps      = sum(1 for r in reason_lower if "take profit" in r or "take_profit" in r)
-        trailing = sum(1 for r in reason_lower if "trailing" in r)
+        rl = [t.get("close_reason", "").lower() for t in trades]
         return {
-            "total":        total,
-            "stop_rate":    stops / total,
-            "tp_rate":      tps / total,
-            "trailing_rate": trailing / total,
+            "total":         total,
+            "stop_rate":     sum(1 for r in rl if "stop" in r and "trailing" not in r) / total,
+            "tp_rate":       sum(1 for r in rl if "take profit" in r or "take_profit" in r) / total,
+            "trailing_rate": sum(1 for r in rl if "trailing" in r) / total,
+            "time_rate":     sum(1 for r in rl if "stale" in r or "time" in r) / total,
+            "reversal_rate": sum(1 for r in rl if "reversal" in r or "collapse" in r) / total,
         }
 
     def _detect_regime(self, trades: list) -> str:
-        """Infer dominant regime from signal metadata stored on trades."""
         regimes = [t.get("regime", "") for t in trades if t.get("regime")]
         if not regimes:
             return "unknown"
@@ -203,19 +352,14 @@ class StrategyAuditor:
         low  = score_stats.get("low",  {})
         mid  = score_stats.get("mid",  {})
         high = score_stats.get("high", {})
-
         current = self.cfg.MIN_SIGNAL_STRENGTH
 
-        # Low-score bucket losing → raise threshold to filter weak signals
         if low.get("n", 0) >= 5 and low.get("win_rate", 1.0) < 0.38:
             new = self._clamp("MIN_SIGNAL_STRENGTH", current + 0.03)
             if new != current:
                 self.cfg.MIN_SIGNAL_STRENGTH = new
-                changes.append(
-                    f"MIN_SIGNAL_STRENGTH {current:.2f}→{new:.2f} "
-                    f"(low-score win={low['win_rate']:.0%}, raising bar)")
-
-        # Mid/high both strong but no low-score trades → can afford to lower
+                changes.append(f"MIN_SIGNAL_STRENGTH {current:.2f}→{new:.2f} "
+                                f"(low-score win={low['win_rate']:.0%})")
         elif (low.get("n", 0) == 0
               and mid.get("win_rate", 0) > 0.60
               and high.get("win_rate", 0) > 0.60
@@ -223,16 +367,13 @@ class StrategyAuditor:
             new = self._clamp("MIN_SIGNAL_STRENGTH", current - 0.02)
             if new != current:
                 self.cfg.MIN_SIGNAL_STRENGTH = new
-                changes.append(
-                    f"MIN_SIGNAL_STRENGTH {current:.2f}→{new:.2f} "
-                    f"(all buckets strong, increasing signal flow)")
-
+                changes.append(f"MIN_SIGNAL_STRENGTH {current:.2f}→{new:.2f} "
+                                f"(all buckets strong)")
         return changes
 
     def _repivot_per_market(self, market_stats: dict) -> list[str]:
         changes = []
 
-        # ── Scalping (scalp results land in 'futures' market) ────────────────
         fut = market_stats.get("futures", {})
         if fut.get("n", 0) >= self.MIN_PER_MARKET:
             old = self.cfg.SCALP_MIN_SCORE
@@ -240,36 +381,27 @@ class StrategyAuditor:
                 new = self._clamp("SCALP_MIN_SCORE", old + 0.04)
                 if new != old:
                     self.cfg.SCALP_MIN_SCORE = new
-                    changes.append(
-                        f"SCALP_MIN_SCORE {old:.2f}→{new:.2f} "
-                        f"(futures/scalp win={fut['win_rate']:.0%})")
+                    changes.append(f"SCALP_MIN_SCORE {old:.2f}→{new:.2f} "
+                                   f"(win={fut['win_rate']:.0%})")
             elif fut["win_rate"] > 0.62 and old > 0.24:
                 new = self._clamp("SCALP_MIN_SCORE", old - 0.02)
                 if new != old:
                     self.cfg.SCALP_MIN_SCORE = new
-                    changes.append(
-                        f"SCALP_MIN_SCORE {old:.2f}→{new:.2f} "
-                        f"(futures/scalp strong {fut['win_rate']:.0%})")
+                    changes.append(f"SCALP_MIN_SCORE {old:.2f}→{new:.2f} "
+                                   f"(strong {fut['win_rate']:.0%})")
 
-        # ── Futures conviction gate ───────────────────────────────────────────
-        if fut.get("n", 0) >= self.MIN_PER_MARKET:
             old = self.cfg.MIN_FUTURES_CONVICTION
             if fut["win_rate"] < 0.40:
                 new = self._clamp("MIN_FUTURES_CONVICTION", old + 0.05)
                 if new != old:
                     self.cfg.MIN_FUTURES_CONVICTION = new
-                    changes.append(
-                        f"MIN_FUTURES_CONVICTION {old:.2f}→{new:.2f} "
-                        f"(futures losing, tightening gate)")
+                    changes.append(f"MIN_FUTURES_CONVICTION {old:.2f}→{new:.2f}")
             elif fut["win_rate"] > 0.60:
                 new = self._clamp("MIN_FUTURES_CONVICTION", old - 0.03)
                 if new != old:
                     self.cfg.MIN_FUTURES_CONVICTION = new
-                    changes.append(
-                        f"MIN_FUTURES_CONVICTION {old:.2f}→{new:.2f} "
-                        f"(futures profitable, loosening gate)")
+                    changes.append(f"MIN_FUTURES_CONVICTION {old:.2f}→{new:.2f}")
 
-        # ── Forex ─────────────────────────────────────────────────────────────
         forex = market_stats.get("forex", {})
         if forex.get("n", 0) >= self.MIN_PER_MARKET:
             old = self.cfg.FOREX_MIN_SCORE
@@ -277,81 +409,73 @@ class StrategyAuditor:
                 new = self._clamp("FOREX_MIN_SCORE", old + 0.03)
                 if new != old:
                     self.cfg.FOREX_MIN_SCORE = new
-                    changes.append(
-                        f"FOREX_MIN_SCORE {old:.2f}→{new:.2f} "
-                        f"(forex win={forex['win_rate']:.0%})")
+                    changes.append(f"FOREX_MIN_SCORE {old:.2f}→{new:.2f}")
             elif forex["win_rate"] > 0.62 and old > 0.28:
                 new = self._clamp("FOREX_MIN_SCORE", old - 0.02)
                 if new != old:
                     self.cfg.FOREX_MIN_SCORE = new
-                    changes.append(
-                        f"FOREX_MIN_SCORE {old:.2f}→{new:.2f} "
-                        f"(forex strong {forex['win_rate']:.0%})")
+                    changes.append(f"FOREX_MIN_SCORE {old:.2f}→{new:.2f}")
 
-        # ── DEX ───────────────────────────────────────────────────────────────
         dex = market_stats.get("dex", {})
         if dex.get("n", 0) >= self.MIN_PER_MARKET:
             old_size  = self.cfg.DEX_BASE_POSITION_USD
             old_score = self.cfg.DEX_MIN_SCORE
             if dex["win_rate"] < 0.35:
-                new_size  = self._clamp("DEX_BASE_POSITION_USD", old_size * 0.75)
-                new_score = self._clamp("DEX_MIN_SCORE", old_score + 0.03)
+                new_size  = self._clamp("DEX_BASE_POSITION_USD", old_size * 0.80)
+                new_score = self._clamp("DEX_MIN_SCORE", old_score + 0.02)
                 if new_size != old_size:
                     self.cfg.DEX_BASE_POSITION_USD = new_size
-                    changes.append(
-                        f"DEX_BASE_POSITION_USD ${old_size:.0f}→${new_size:.0f} "
-                        f"(DEX win={dex['win_rate']:.0%})")
+                    changes.append(f"DEX_BASE_POSITION_USD ${old_size:.0f}→${new_size:.0f} "
+                                   f"(DEX win={dex['win_rate']:.0%})")
                 if new_score != old_score:
                     self.cfg.DEX_MIN_SCORE = new_score
-                    changes.append(
-                        f"DEX_MIN_SCORE {old_score:.2f}→{new_score:.2f} "
-                        f"(raising bar on DEX entries)")
+                    changes.append(f"DEX_MIN_SCORE {old_score:.2f}→{new_score:.2f}")
             elif dex["win_rate"] > 0.55 and dex["avg_pnl_pct"] > 2.0:
-                new_size = self._clamp("DEX_BASE_POSITION_USD", old_size * 1.20)
+                new_size = self._clamp("DEX_BASE_POSITION_USD", old_size * 1.15)
                 if new_size != old_size:
                     self.cfg.DEX_BASE_POSITION_USD = new_size
-                    changes.append(
-                        f"DEX_BASE_POSITION_USD ${old_size:.0f}→${new_size:.0f} "
-                        f"(DEX profitable {dex['win_rate']:.0%})")
-
+                    changes.append(f"DEX_BASE_POSITION_USD ${old_size:.0f}→${new_size:.0f} "
+                                   f"(DEX profitable {dex['win_rate']:.0%})")
         return changes
 
     def _repivot_risk_reward(self, exit_stats: dict) -> list[str]:
         changes = []
         if exit_stats.get("total", 0) < 15:
             return changes
-
         stop_rate = exit_stats["stop_rate"] + exit_stats["trailing_rate"]
         tp_rate   = exit_stats["tp_rate"]
-
-        old_stop = self.cfg.STOP_LOSS_PCT
-        old_tp   = self.cfg.TAKE_PROFIT_PCT
+        old_stop  = self.cfg.STOP_LOSS_PCT
+        old_tp    = self.cfg.TAKE_PROFIT_PCT
 
         if stop_rate > 0.55:
-            # Stops too tight — widen by 10 %
-            new_stop = self._clamp("STOP_LOSS_PCT", old_stop * 1.10)
-            if new_stop != old_stop:
-                self.cfg.STOP_LOSS_PCT = new_stop
-                changes.append(
-                    f"STOP_LOSS_PCT {old_stop:.3f}→{new_stop:.3f} "
-                    f"(stops hit {stop_rate:.0%} of trades)")
+            new = self._clamp("STOP_LOSS_PCT", old_stop * 1.10)
+            if new != old_stop:
+                self.cfg.STOP_LOSS_PCT = new
+                changes.append(f"STOP_LOSS_PCT {old_stop:.3f}→{new:.3f} "
+                                f"(stops hit {stop_rate:.0%})")
+        if tp_rate > 0.60:
+            new = self._clamp("TAKE_PROFIT_PCT", old_tp * 1.10)
+            if new != old_tp:
+                self.cfg.TAKE_PROFIT_PCT = new
+                changes.append(f"TAKE_PROFIT_PCT {old_tp:.3f}→{new:.3f} "
+                                f"(TPs hit {tp_rate:.0%})")
 
-        elif tp_rate > 0.60:
-            # TPs hit often — let winners run further
-            new_tp = self._clamp("TAKE_PROFIT_PCT", old_tp * 1.10)
-            if new_tp != old_tp:
-                self.cfg.TAKE_PROFIT_PCT = new_tp
-                changes.append(
-                    f"TAKE_PROFIT_PCT {old_tp:.3f}→{new_tp:.3f} "
-                    f"(TPs hit {tp_rate:.0%}, extending targets)")
-
+        # Time-based exits: if >40% of trades close on stale/time exit with negative PnL,
+        # the bot is holding losers too long → tighten stale exit
+        time_rate = exit_stats.get("time_rate", 0)
+        if time_rate > 0.40:
+            old_stale = getattr(self.cfg, "DEX_STALE_EXIT_HOURS", 2.0)
+            new_stale = self._clamp("DEX_STALE_EXIT_HOURS", old_stale - 0.25)
+            if new_stale != old_stale:
+                self.cfg.DEX_STALE_EXIT_HOURS = new_stale
+                changes.append(f"DEX_STALE_EXIT_HOURS {old_stale}→{new_stale} "
+                                f"(time exits = {time_rate:.0%} of trades)")
         return changes
 
     def _repivot_indicator_weights(self, regime: str) -> list[str]:
         if regime not in ("trending", "ranging", "volatile"):
             return []
-
-        weights = dict(self.cfg.STRATEGY_WEIGHTS)
+        weights  = dict(self.cfg.STRATEGY_WEIGHTS)
         original = dict(weights)
 
         if regime == "trending":
@@ -370,181 +494,170 @@ class StrategyAuditor:
             weights["momentum"]  = weights.get("momentum",  0.15) - 0.04
             weights["rsi"]       = weights.get("rsi",       0.20) - 0.04
 
-        # Clamp each indicator
         weights = {
             k: max(_INDICATOR_BOUNDS.get(k, (0.05, 0.40))[0],
                    min(_INDICATOR_BOUNDS.get(k, (0.05, 0.40))[1], v))
             for k, v in weights.items()
         }
-
-        # Normalise to sum = 1.0
         total = sum(weights.values())
         weights = {k: round(v / total, 4) for k, v in weights.items()}
 
         if weights != original:
             self.cfg.STRATEGY_WEIGHTS = weights
-            return [f"STRATEGY_WEIGHTS adjusted for '{regime}' regime "
+            return [f"STRATEGY_WEIGHTS → {regime} regime "
                     f"(ema={weights.get('ema_cross', 0):.2f} "
                     f"rsi={weights.get('rsi', 0):.2f} "
-                    f"boll={weights.get('bollinger', 0):.2f} "
-                    f"mom={weights.get('momentum', 0):.2f})"]
+                    f"boll={weights.get('bollinger', 0):.2f})"]
         return []
 
     # ─────────────────────────────────────────────────────────────────────────
-    # DEX-specific deep analysis
+    # DEX deep analysis (uses all-time history for maximum sample size)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _repivot_dex_signals(self, dex_trades: list) -> list[str]:
+    def _repivot_dex_signals(self, dex_all: list, dex_recent: list) -> list[str]:
         """
-        Analyse win rate per entry signal type (BURST, 5m momentum, volume, fresh, viral).
-        Adjusts DEX_MIN_SCORE up/down based on which signals correlate with wins.
-        Also logs a signal scorecard so the operator can see what's working.
+        Per-signal win rate across all-time history, with a recent-10 comparison
+        to detect whether specific signals are gaining or losing effectiveness.
+        Adjusts DEX_MIN_SCORE based on lowest score bracket quality.
         """
         changes: list[str] = []
 
-        # Build per-signal win stats
-        signal_stats: dict[str, dict] = {}
-        for label, keyword in _DEX_SIGNAL_KEYS.items():
-            hits = [t for t in dex_trades
-                    if any(keyword in s for s in t.get("signals", []))]
+        # ── Signal-type scorecard ─────────────────────────────────────────────
+        logger.info("  DEX signal scorecard (all-time n=%d):", len(dex_all))
+        for label, keyword in sorted(_DEX_SIGNAL_KEYS.items()):
+            hits    = [t for t in dex_all if any(keyword in s for s in t.get("signals", []))]
             if not hits:
                 continue
-            wins = [t for t in hits if t.get("pnl_usd", 0) > 0]
-            avg_gain = sum(t.get("max_gain_pct", 0) for t in hits) / len(hits)
-            signal_stats[label] = {
-                "n": len(hits),
-                "win_rate": len(wins) / len(hits),
-                "avg_max_gain_pct": avg_gain,
-                "avg_pnl_pct": sum(t.get("pnl_pct", 0) for t in hits) / len(hits),
-            }
+            wins    = sum(1 for t in hits if t.get("pnl_usd", 0) > 0)
+            avg_pnl = sum(t.get("pnl_pct", 0) for t in hits) / len(hits)
+            avg_max = sum(t.get("max_gain_pct", 0) for t in hits) / len(hits)
+            # Recent effectiveness
+            hits_r  = [t for t in dex_recent if any(keyword in s for s in t.get("signals", []))]
+            wr_r    = (sum(1 for t in hits_r if t.get("pnl_usd", 0) > 0) / len(hits_r)
+                       if hits_r else None)
+            recent_str = f"  recent-{len(dex_recent)}: {wr_r:.0%}" if wr_r is not None else ""
+            logger.info("    %-10s  n=%-4d  win=%.0f%%  avgPnL=%+.1f%%  peakGain=+%.1f%%%s",
+                        label, len(hits), wins / len(hits) * 100, avg_pnl, avg_max, recent_str)
 
-        if signal_stats:
-            logger.info("  DEX signal scorecard (last %d trades):", len(dex_trades))
-            for label, s in sorted(signal_stats.items(),
-                                   key=lambda x: x[1]["avg_pnl_pct"], reverse=True):
-                logger.info("    %-10s  n=%-3d  win=%.0f%%  avgPnL=%+.1f%%  peakGain=+%.1f%%",
-                            label, s["n"], s["win_rate"] * 100,
-                            s["avg_pnl_pct"], s["avg_max_gain_pct"])
+        # ── Source scorecard ──────────────────────────────────────────────────
+        sources: dict[str, dict] = {}
+        for t in dex_all:
+            src = t.get("dex_source") or "unknown"
+            if src not in sources:
+                sources[src] = {"n": 0, "wins": 0, "pnl": 0.0, "max_gain": 0.0}
+            sources[src]["n"]       += 1
+            sources[src]["wins"]    += 1 if t.get("pnl_usd", 0) > 0 else 0
+            sources[src]["pnl"]     += t.get("pnl_pct", 0)
+            sources[src]["max_gain"] += t.get("max_gain_pct", 0)
 
-        # Analyse by DEX source (pumpfun_new, birdeye_gainer, etc.)
-        source_stats: dict[str, dict] = {}
-        for t in dex_trades:
-            src = t.get("dex_source", "unknown") or "unknown"
-            if src not in source_stats:
-                source_stats[src] = {"n": 0, "wins": 0, "pnl": 0.0}
-            source_stats[src]["n"] += 1
-            source_stats[src]["wins"] += 1 if t.get("pnl_usd", 0) > 0 else 0
-            source_stats[src]["pnl"] += t.get("pnl_usd", 0)
+        logger.info("  DEX source scorecard:")
+        for src, s in sorted(sources.items(), key=lambda x: x[1]["pnl"], reverse=True):
+            wr  = s["wins"] / s["n"]
+            avg = s["pnl"] / s["n"]
+            pk  = s["max_gain"] / s["n"]
+            logger.info("    %-22s  n=%-4d  win=%.0f%%  avgPnL=%+.1f%%  peakGain=+%.1f%%",
+                        src, s["n"], wr * 100, avg, pk)
 
-        if source_stats:
-            logger.info("  DEX source breakdown:")
-            for src, s in sorted(source_stats.items(),
-                                  key=lambda x: x[1]["pnl"], reverse=True):
-                wr = s["wins"] / s["n"] if s["n"] > 0 else 0
-                logger.info("    %-20s  n=%-3d  win=%.0f%%  pnl=$%+.2f",
-                            src, s["n"], wr * 100, s["pnl"])
-
-        # Score-range breakdown for DEX — gives finer granularity than global buckets
-        score_ranges = [(0.33, 0.38), (0.38, 0.43), (0.43, 0.50), (0.50, 1.0)]
-        logger.info("  DEX score-range breakdown:")
-        for lo, hi in score_ranges:
-            bucket = [t for t in dex_trades
-                      if lo <= t.get("signal_score", 0) < hi]
+        # ── Score-range heatmap ───────────────────────────────────────────────
+        logger.info("  DEX score-range heatmap (all-time):")
+        brackets = [(0.25, 0.30), (0.30, 0.35), (0.35, 0.40),
+                    (0.40, 0.45), (0.45, 0.50), (0.50, 1.00)]
+        for lo, hi in brackets:
+            bucket = [t for t in dex_all if lo <= t.get("signal_score", 0) < hi]
             if not bucket:
                 continue
-            wins = [t for t in bucket if t.get("pnl_usd", 0) > 0]
-            avg_pnl = sum(t.get("pnl_pct", 0) for t in bucket) / len(bucket)
-            logger.info("    score %.2f–%.2f  n=%-3d  win=%.0f%%  avgPnL=%+.1f%%",
-                        lo, hi, len(bucket),
-                        len(wins) / len(bucket) * 100, avg_pnl)
+            wins = sum(1 for t in bucket if t.get("pnl_usd", 0) > 0)
+            avg  = sum(t.get("pnl_pct", 0) for t in bucket) / len(bucket)
+            logger.info("    score %.2f–%.2f  n=%-4d  win=%.0f%%  avg=%+.1f%%",
+                        lo, hi, len(bucket), wins / len(bucket) * 100, avg)
 
-        # Adaptive threshold: if the lowest score bracket is underwater, raise the bar
-        lowest_bracket = [t for t in dex_trades
-                          if t.get("signal_score", 0) < 0.38]
-        if len(lowest_bracket) >= 5:
-            wr = sum(1 for t in lowest_bracket if t.get("pnl_usd", 0) > 0) / len(lowest_bracket)
+        # ── Adaptive threshold from lowest bracket ────────────────────────────
+        low_bracket = [t for t in dex_all if t.get("signal_score", 0) < 0.38]
+        if len(low_bracket) >= 8:
+            wr  = sum(1 for t in low_bracket if t.get("pnl_usd", 0) > 0) / len(low_bracket)
+            avg = sum(t.get("pnl_pct", 0) for t in low_bracket) / len(low_bracket)
             old = self.cfg.DEX_MIN_SCORE
-            if wr < 0.30:
+            if wr < 0.28 or avg < -5:
                 new = self._clamp("DEX_MIN_SCORE", old + 0.02)
                 if new != old:
                     self.cfg.DEX_MIN_SCORE = new
-                    changes.append(
-                        f"DEX_MIN_SCORE {old:.2f}→{new:.2f} "
-                        f"(low-score bracket win={wr:.0%} — raising entry bar)")
-            elif wr > 0.55 and old > 0.33:
+                    changes.append(f"DEX_MIN_SCORE {old:.2f}→{new:.2f} "
+                                   f"(sub-0.38 bucket: win={wr:.0%} avg={avg:+.1f}%)")
+            elif wr > 0.55 and avg > 0 and old > 0.33:
                 new = self._clamp("DEX_MIN_SCORE", old - 0.01)
                 if new != old:
                     self.cfg.DEX_MIN_SCORE = new
-                    changes.append(
-                        f"DEX_MIN_SCORE {old:.2f}→{new:.2f} "
-                        f"(low-score bracket profitable {wr:.0%} — slight relaxation)")
-
+                    changes.append(f"DEX_MIN_SCORE {old:.2f}→{new:.2f} "
+                                   f"(sub-0.38 profitable: win={wr:.0%})")
         return changes
 
-    def _repivot_dex_hold_time(self, dex_trades: list) -> list[str]:
+    def _repivot_dex_hold_time(self, dex_all: list) -> list[str]:
         """
-        Analyse hold time vs. outcome. If trades held >2h tend to lose more than
-        trades exited <30min, tighten the stale-exit timer.
-        Also check whether early partial-profit tiers are being taken and paying off.
+        Hold-time vs outcome, partial-profit impact, BURST vs plain,
+        exit-reason quality. Adjusts DEX_STALE_EXIT_HOURS if long holds lose.
         """
         changes: list[str] = []
 
-        # Split by hold time
-        short_holds  = [t for t in dex_trades if t.get("hold_seconds", 999999) < 1800]   # <30min
-        medium_holds = [t for t in dex_trades if 1800 <= t.get("hold_seconds", 0) < 7200] # 30min–2h
-        long_holds   = [t for t in dex_trades if t.get("hold_seconds", 0) >= 7200]        # >2h
+        short  = [t for t in dex_all if t.get("hold_seconds", 9e9) < 1800]
+        medium = [t for t in dex_all if 1800 <= t.get("hold_seconds", 0) < 7200]
+        long   = [t for t in dex_all if t.get("hold_seconds", 0) >= 7200]
 
-        def _stats(group: list) -> tuple[float, float]:
-            if not group:
-                return 0.0, 0.0
-            wr = sum(1 for t in group if t.get("pnl_usd", 0) > 0) / len(group)
-            avg_pnl = sum(t.get("pnl_pct", 0) for t in group) / len(group)
-            return wr, avg_pnl
+        def _s(g):
+            if not g: return 0.0, 0.0
+            return (sum(1 for t in g if t.get("pnl_usd", 0) > 0) / len(g),
+                    sum(t.get("pnl_pct", 0) for t in g) / len(g))
 
-        short_wr,  short_avg  = _stats(short_holds)
-        medium_wr, medium_avg = _stats(medium_holds)
-        long_wr,   long_avg   = _stats(long_holds)
+        swr, savg = _s(short)
+        mwr, mavg = _s(medium)
+        lwr, lavg = _s(long)
 
-        logger.info("  DEX hold-time analysis  (short<30m n=%d win=%.0f%% avg=%+.1f%%) "
-                    "(mid n=%d win=%.0f%% avg=%+.1f%%) "
-                    "(long>2h n=%d win=%.0f%% avg=%+.1f%%)",
-                    len(short_holds), short_wr * 100, short_avg,
-                    len(medium_holds), medium_wr * 100, medium_avg,
-                    len(long_holds), long_wr * 100, long_avg)
+        logger.info("  DEX hold-time: <30m n=%-3d win=%.0f%% avg=%+.1f%%  "
+                    "30m–2h n=%-3d win=%.0f%% avg=%+.1f%%  "
+                    ">2h n=%-3d win=%.0f%% avg=%+.1f%%",
+                    len(short), swr*100, savg,
+                    len(medium), mwr*100, mavg,
+                    len(long), lwr*100, lavg)
 
-        # If long holds are significantly worse than short holds → tighten stale exit
-        if (len(long_holds) >= 4 and len(short_holds) >= 4
-                and long_avg < short_avg - 10 and long_wr < 0.35):
-            old = self.cfg.DEX_STALE_EXIT_HOURS
-            new = round(max(1.0, old - 0.5), 1)
+        if len(long) >= 4 and len(short) >= 4 and lavg < savg - 10 and lwr < 0.35:
+            old = getattr(self.cfg, "DEX_STALE_EXIT_HOURS", 2.0)
+            new = self._clamp("DEX_STALE_EXIT_HOURS", old - 0.25)
             if new != old:
                 self.cfg.DEX_STALE_EXIT_HOURS = new
-                changes.append(
-                    f"DEX_STALE_EXIT_HOURS {old}→{new} "
-                    f"(long holds losing avg={long_avg:+.1f}%, short avg={short_avg:+.1f}%)")
+                changes.append(f"DEX_STALE_EXIT_HOURS {old}→{new} "
+                                f"(long avg={lavg:+.1f}% vs short avg={savg:+.1f}%)")
 
-        # Partial profit analysis — were the tiers helping?
-        with_partials    = [t for t in dex_trades if t.get("partials_taken")]
-        without_partials = [t for t in dex_trades if not t.get("partials_taken")]
-        if len(with_partials) >= 4 and len(without_partials) >= 4:
-            wp_avg  = sum(t.get("pnl_pct", 0) for t in with_partials) / len(with_partials)
-            wop_avg = sum(t.get("pnl_pct", 0) for t in without_partials) / len(without_partials)
-            logger.info("  DEX partial-profit impact: with_partials n=%d avg=%+.1f%% | "
-                        "no_partials n=%d avg=%+.1f%%",
-                        len(with_partials), wp_avg, len(without_partials), wop_avg)
+        # Partial profit analysis
+        with_p    = [t for t in dex_all if t.get("partials_taken")]
+        without_p = [t for t in dex_all if not t.get("partials_taken")]
+        if len(with_p) >= 4 and len(without_p) >= 4:
+            _, wp_avg  = _s(with_p)
+            _, wop_avg = _s(without_p)
+            logger.info("  DEX partials: with n=%-3d avg=%+.1f%%  |  without n=%-3d avg=%+.1f%%",
+                        len(with_p), wp_avg, len(without_p), wop_avg)
 
-        # Burst vs non-burst comparison
-        burst_trades = [t for t in dex_trades if t.get("is_burst")]
-        plain_trades = [t for t in dex_trades if not t.get("is_burst")]
-        if burst_trades:
-            b_wr  = sum(1 for t in burst_trades if t.get("pnl_usd", 0) > 0) / len(burst_trades)
-            b_avg = sum(t.get("pnl_pct", 0) for t in burst_trades) / len(burst_trades)
-            p_wr  = sum(1 for t in plain_trades if t.get("pnl_usd", 0) > 0) / len(plain_trades) if plain_trades else 0
-            p_avg = sum(t.get("pnl_pct", 0) for t in plain_trades) / len(plain_trades) if plain_trades else 0
-            logger.info("  DEX BURST trades: n=%d win=%.0f%% avg=%+.1f%%  |  "
-                        "plain: n=%d win=%.0f%% avg=%+.1f%%",
-                        len(burst_trades), b_wr * 100, b_avg,
-                        len(plain_trades), p_wr * 100, p_avg)
+        # BURST vs plain
+        burst = [t for t in dex_all if t.get("is_burst")]
+        plain = [t for t in dex_all if not t.get("is_burst")]
+        if burst:
+            bwr, bavg = _s(burst)
+            pwr, pavg = _s(plain)
+            logger.info("  BURST n=%-3d win=%.0f%% avg=%+.1f%%  |  plain n=%-3d win=%.0f%% avg=%+.1f%%",
+                        len(burst), bwr*100, bavg, len(plain), pwr*100, pavg)
+
+        # Exit-reason effectiveness
+        exits: dict[str, list] = {}
+        for t in dex_all:
+            cat = "stop" if "stop" in t.get("close_reason", "").lower() \
+                  else "take_profit" if "take profit" in t.get("close_reason", "").lower() \
+                  else "trailing" if "trailing" in t.get("close_reason", "").lower() \
+                  else "time" if "stale" in t.get("close_reason", "").lower() \
+                  else "other"
+            exits.setdefault(cat, []).append(t)
+        logger.info("  DEX exit reasons:")
+        for cat, ts in sorted(exits.items(), key=lambda x: len(x[1]), reverse=True):
+            wr, avg = _s(ts)
+            logger.info("    %-14s  n=%-4d  win=%.0f%%  avg=%+.1f%%",
+                        cat, len(ts), wr*100, avg)
 
         return changes
 
