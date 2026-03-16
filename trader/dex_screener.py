@@ -115,6 +115,7 @@ class DexToken:
     source: str = "dexscreener"     # Where this token was discovered
     holder_count: int = 0           # Unique holders (from Birdeye token_overview)
     unique_wallets_24h: int = 0     # Unique trading wallets last 24h (Birdeye)
+    extra: Optional[dict] = None    # Arbitrary metadata from enrichment sources
 
     @property
     def buy_sell_ratio_h1(self) -> float:
@@ -210,9 +211,10 @@ class DexScreener:
             "raydium_clmm_p2":  self._executor.submit(self._fetch_raydium_clmm_p2),
             "raydium_fee":      self._executor.submit(self._fetch_raydium_by_fee),
             "raydium_new":      self._executor.submit(self._fetch_raydium_new_pools),
-            # Birdeye — trending + gainers (independent real-time rankings)
+            # Birdeye — trending + gainers + smart money (whale buying signal)
             "be_trend":         self._executor.submit(self._fetch_birdeye_trending),
             "be_gainers":       self._executor.submit(self._fetch_birdeye_gainers),
+            "be_smart_money":   self._executor.submit(self._fetch_birdeye_smart_money),
             # DexScreener token-level endpoints (volume-ranked, no keyword filter)
             "ds_solana_top":    self._executor.submit(self._fetch_dexscreener_top_solana),
             # GMGN — top Solana tokens by swap count + volume (cross-DEX, real-time)
@@ -893,6 +895,15 @@ class DexScreener:
                     signals.append(f"HIGH risk ({safety.safety_score:.2f})")
             else:
                 score *= 0.88   # Unverified — mild penalty only
+
+        # ── Smart money signal ────────────────────────────────────────────
+        # Whale/insider buying from Birdeye smart money endpoint gets a bonus.
+        if token.source == "birdeye_smart_money":
+            score += 0.10
+            signals.append("Smart money buying")
+        elif hasattr(token, "extra") and token.extra and token.extra.get("smart_buy_volume", 0) > 0:
+            score += 0.06
+            signals.append("Smart money buying")
 
         # ── Market intelligence context ───────────────────────────────────
         # Apply market-wide knowledge: narrative heat + macro sentiment.
@@ -1575,6 +1586,50 @@ class DexScreener:
             return tokens
         except Exception as e:
             logger.debug("Birdeye new listings error: %s", e)
+            return []
+
+    def _fetch_birdeye_smart_money(self) -> list[DexToken]:
+        """
+        Birdeye smart money — tokens whales/insiders are actively buying.
+        Strong alpha signal; enriched via DexScreener for full pair data.
+        """
+        be = _get_birdeye()
+        if not be or not be.enabled:
+            return []
+        try:
+            sm_tokens = be.get_smart_money_tokens(limit=20)
+            mints = [t["address"] for t in sm_tokens if t.get("address")][:20]
+            if not mints:
+                return []
+            data = self._get(f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not data or not data.get("pairs"):
+                return []
+            # Index smart money metadata by mint address for score boost later
+            sm_meta = {t["address"]: t for t in sm_tokens}
+            tokens = []
+            seen = set()
+            for p in data["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "birdeye_smart_money"
+                    # Attach smart-money metadata so scorer can use it
+                    base_addr = (p.get("baseToken") or {}).get("address", "")
+                    if base_addr in sm_meta:
+                        meta = sm_meta[base_addr]
+                        t.extra = t.extra or {}
+                        t.extra["smart_buy_volume"] = meta.get("smart_buy_volume", 0)
+                        t.extra["smart_buyers"]     = meta.get("smart_buyers", 0)
+                    tokens.append(t)
+            logger.debug("Birdeye smart money: %d tokens", len(tokens))
+            return tokens
+        except Exception as e:
+            logger.debug("Birdeye smart money error: %s", e)
             return []
 
     # ─── Parsing ──────────────────────────────────────────────────────────────

@@ -376,6 +376,42 @@ class BirdeyeClient:
                 })
         return tokens
 
+    # ─── Smart Money ───────────────────────────────────────────────────────────
+
+    def get_smart_money_tokens(self, limit: int = 20) -> list[dict]:
+        """
+        Fetch tokens that smart money (whales / insiders) are currently buying.
+        Uses Birdeye /smart-money/v1/token/list — strong alpha signal.
+        Returns list of dicts with address, symbol, price, buy_volume, etc.
+        """
+        if not self.enabled:
+            return []
+        data = self._get("/smart-money/v1/token/list", {
+            "sort_type": "desc",
+            "limit": limit,
+        })
+        tokens = []
+        if data and data.get("success"):
+            for t in (data.get("data", {}).get("items") or data.get("data") or []):
+                addr = t.get("address") or t.get("token_address", "")
+                if not addr:
+                    continue
+                tokens.append({
+                    "address": addr,
+                    "symbol": t.get("symbol", ""),
+                    "name": t.get("name", ""),
+                    "price_usd": float(t.get("price", 0) or 0),
+                    "volume_24h": float(t.get("v24hUSD", 0) or t.get("volume24h", 0) or 0),
+                    "price_change_24h": float(t.get("priceChange24h", 0) or 0),
+                    "liquidity": float(t.get("liquidity", 0) or 0),
+                    "market_cap": float(t.get("mc", 0) or t.get("marketcap", 0) or 0),
+                    "smart_buy_volume": float(t.get("buyVolume24h", 0) or t.get("smartBuyVolume", 0) or 0),
+                    "smart_buyers": int(t.get("uniqueBuyers24h", 0) or t.get("smartBuyers", 0) or 0),
+                })
+        if tokens:
+            logger.info("Birdeye smart money: %d tokens with whale activity", len(tokens))
+        return tokens
+
     # ─── HTTP ──────────────────────────────────────────────────────────────────
 
     def _get(self, path: str, params: dict = None,
