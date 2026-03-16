@@ -251,6 +251,69 @@ class SolanaWallet:
                 "       or set HTTPS_PROXY=socks5://localhost:PORT before starting."
             )
 
+        # Pre-warm the PumpSwap global_volume_accumulator address at startup while
+        # the RPC is idle (not competing with concurrent buy requests causing 429s).
+        self._bootstrap_pumpswap_global_va()
+
+    def _bootstrap_pumpswap_global_va(self):
+        """Pre-warm the PumpSwap global_volume_accumulator singleton address.
+
+        Scans recent pAMM program transactions for any buy instruction and
+        caches the global_va at account index [19].  Runs at startup before
+        any buys so it completes without competing with buy-time RPC calls.
+        """
+        global _pumpswap_global_va
+        if _pumpswap_global_va:
+            return  # already cached from a previous run
+        try:
+            import base64 as _b64
+            from solders.pubkey import Pubkey as _Pk
+            from solders.transaction import VersionedTransaction as _VTx
+            _PUMPSWAP_PROG = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+            _BUY_DISC      = bytes.fromhex("c62e1552b4d9e870")
+            r = _session.post(config.SOLANA_RPC_URL, json={
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getSignaturesForAddress",
+                "params": [_PUMPSWAP_PROG, {"limit": 100}],
+            }, timeout=12)
+            if not r.ok:
+                logger.debug("PumpSwap startup bootstrap: RPC %s", r.status_code)
+                return
+            for _si in r.json().get("result", []):
+                try:
+                    _r2 = _session.post(config.SOLANA_RPC_URL, json={
+                        "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
+                        "params": [_si["signature"],
+                                   {"encoding": "base64",
+                                    "maxSupportedTransactionVersion": 0}],
+                    }, timeout=15)
+                    _res = _r2.json().get("result")
+                    if not _res or (_res.get("meta") or {}).get("err") is not None:
+                        continue
+                    _rtx  = _VTx.from_bytes(_b64.b64decode(_res["transaction"][0]))
+                    _rmsg = _rtx.message
+                    _rk   = [str(k) for k in _rmsg.account_keys]
+                    _ld   = (_res.get("meta") or {}).get("loadedAddresses") or {}
+                    _rk.extend(_ld.get("writable", []))
+                    _rk.extend(_ld.get("readonly", []))
+                    for _ix in _rmsg.instructions:
+                        if (_ix.program_id_index >= len(_rk)
+                                or _rk[_ix.program_id_index] != _PUMPSWAP_PROG
+                                or len(_ix.accounts) < 20          # relaxed: accept 20+ accounts
+                                or bytes(_ix.data)[:8] != _BUY_DISC
+                                or not all(i < len(_rk) for i in _ix.accounts)):
+                            continue
+                        _pumpswap_global_va = _rk[_ix.accounts[19]]
+                        logger.info("PumpSwap: startup bootstrap global_va=%s",
+                                    _pumpswap_global_va[:16])
+                        return
+                    if _pumpswap_global_va:
+                        return
+                except Exception:
+                    continue
+        except Exception as _e:
+            logger.debug("PumpSwap: startup bootstrap failed (%s)", _e)
+
     # ─── Properties ────────────────────────────────────────────────────────────
 
     @property
@@ -1243,7 +1306,7 @@ class SolanaWallet:
                         r_prog = _session.post(config.SOLANA_RPC_URL, json={
                             "jsonrpc": "2.0", "id": 1,
                             "method": "getSignaturesForAddress",
-                            "params": [str(PUMPSWAP), {"limit": 20}],
+                            "params": [str(PUMPSWAP), {"limit": 100}],
                         }, timeout=10)
                         for _si in r_prog.json().get("result", []):
                             _r2 = _session.post(config.SOLANA_RPC_URL, json={
@@ -1265,7 +1328,7 @@ class SolanaWallet:
                             for _ix in _rmsg.instructions:
                                 if (_ix.program_id_index >= len(_rk)
                                         or _rk[_ix.program_id_index] != str(PUMPSWAP)
-                                        or len(_ix.accounts) != 24
+                                        or len(_ix.accounts) < 20           # relaxed: accept 20+ accounts
                                         or bytes(_ix.data)[:8] != _PUMPSWAP_BUY_DISC  # only buy layout
                                         or not all(i < len(_rk) for i in _ix.accounts)):
                                     continue
