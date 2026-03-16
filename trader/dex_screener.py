@@ -181,7 +181,7 @@ class DexScreener:
         self._cache_ttl = 25   # 25s — aggressive freshness for fast markets
         self._safety_checker = TokenSafetyChecker()
         self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=30, thread_name_prefix="dex-scanner")
+            max_workers=50, thread_name_prefix="dex-scanner")
         # Recently-evaluated blacklist: pair_address → timestamp last returned
         # Prevents the same top-scorer repeating every 4s scan cycle.
         # Tokens stay blocked for 8 minutes then re-enter the pool.
@@ -958,12 +958,19 @@ class DexScreener:
                 logger.debug("Safety check error %s: %s", t.base_symbol, e)
 
         futures = [self._executor.submit(_check, t) for t in sol_tokens]
-        # Wait with a generous timeout — safety checks can be slow
-        for f in concurrent.futures.as_completed(futures, timeout=20):
-            try:
-                f.result()
-            except Exception:
-                pass
+        # Wait with a generous timeout — safety checks can be slow.
+        # Catch TimeoutError so slow tokens don't abort the entire scan:
+        # already-finished checks are used; timed-out tokens just have no safety report.
+        try:
+            for f in concurrent.futures.as_completed(futures, timeout=25):
+                try:
+                    f.result()
+                except Exception:
+                    pass
+        except concurrent.futures.TimeoutError:
+            done = sum(1 for f in futures if f.done())
+            logger.debug("Safety checks: %d/%d finished within timeout (rest skipped)",
+                         done, len(futures))
 
     # ─── Data Sources ─────────────────────────────────────────────────────────
 
