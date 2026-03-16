@@ -577,7 +577,11 @@ class SolanaWallet:
                 tx_b64, out_amount, price_impact = self._quote_and_build_jupiter(
                     input_mint, output_mint, raw_input_amount, slippage_bps)
             if tx_b64 is None:
-                # Jupiter also failed — PumpPortal as last resort
+                # Jupiter also failed — try PumpPortal auto-route (lets PumpPortal
+                # find any available pool including migrations) before pumpswap
+                tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
+                    input_mint, output_mint, raw_input_amount, slippage_bps, pool="auto")
+            if tx_b64 is None:
                 tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
                     input_mint, output_mint, raw_input_amount, slippage_bps, pool="pumpswap")
         else:
@@ -662,8 +666,12 @@ class SolanaWallet:
                 tx_b64, out_amount, price_impact = self._quote_and_build_raydium(
                     input_mint, output_mint, raw_input_amount, slippage_bps)
             if tx_b64 is None:
+                logger.info("Raydium unavailable — trying PumpPortal auto-route for overflow token")
+                tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
+                    input_mint, output_mint, raw_input_amount, slippage_bps, pool="auto")
+            if tx_b64 is None:
                 return SwapResult(success=False,
-                                  error="PumpSwap overflow — Jupiter + Raydium both failed")
+                                  error="PumpSwap overflow — Jupiter + Raydium + PumpPortal all failed")
             sig = self._sign_and_send_jito(tx_b64, priority_fee)
             if not sig:
                 sig = self._sign_and_send_rpc(tx_b64)
@@ -1083,18 +1091,14 @@ class SolanaWallet:
                 return None, 0, 0.0
 
             # ── Overflow guard ────────────────────────────────────────────────
-            # PumpSwap's on-chain program uses u128 for k = base * quote, so the
-            # real limit is ln(2^127) ≈ 88.02.  The old u64 threshold (43.67) was
-            # a false-positive that blocked every high-supply token post-graduation.
-            # We still check vs u128 to catch genuinely broken pools.
-            import math as _math
-            _LOG_U128_MAX = 87.0   # ln(2^127) ≈ 88.02; use 87 for safety margin
-            if (_math.log(float(base_reserve)) + _math.log(float(quote_reserve))
-                    > _LOG_U128_MAX):
+            # PumpSwap v1 BUY formula: tokens_out = (base_reserve * sol_in) / (quote_reserve + sol_in)
+            # The multiply `base_reserve * sol_in` is done as u64 on-chain → error 0x1787 if it overflows.
+            # We check the exact operands (not k = base*quote) using Python big-int to avoid false positives.
+            if not is_sell and base_reserve * amount_raw > 0xFFFF_FFFF_FFFF_FFFF:
                 logger.warning(
-                    "PumpSwap: u128 k-overflow for pool %s "
-                    "(base=%d quote=%d) — truly untradeable, skipping",
-                    pool_address[:16], base_reserve, quote_reserve)
+                    "PumpSwap: u64 buy-overflow for pool %s "
+                    "(base=%d × sol_in=%d > 2^64) — token untradeable at this size",
+                    pool_address[:16], base_reserve, amount_raw)
                 return None, 0, 0.0
 
             # ── Step 4: AMM calculation (~1% total fees) ──────────────────────
@@ -1545,7 +1549,11 @@ class SolanaWallet:
             return tx_b64, out_amount, 0.0
 
         except Exception as e:
-            logger.warning("PumpSwap exception: %s", e)
+            msg = str(e)
+            if "429" in msg or not msg:
+                logger.warning("PumpSwap exception (RPC rate-limited or timeout): %s", e)
+            else:
+                logger.warning("PumpSwap exception: %s", e)
             return None, 0, 0.0
 
     def _quote_and_build_pumpfun(self, input_mint: str, output_mint: str,
