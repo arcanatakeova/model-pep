@@ -53,6 +53,7 @@ DEXSCREENER_BASE = "https://api.dexscreener.com"
 PUMPFUN_BASE     = "https://frontend-api.pump.fun"
 RAYDIUM_BASE     = "https://api-v3.raydium.io"
 JUPITER_PRICE    = "https://api.jup.ag/price/v2"
+GMGN_BASE        = "https://gmgn.ai/defi/quotation/v1"
 
 # ── Hard filters (applied before scoring) ──────────────────────────────────────
 MIN_LIQUIDITY_USD  = 5_000       # $5k — catch early pumps (was 8k: missed entries)
@@ -192,23 +193,30 @@ class DexScreener:
         # All sources rank tokens by pure on-chain activity — no name/keyword bias.
         futures = {
             # DexScreener objective feeds
-            "boosted":         self._executor.submit(self._fetch_boosted_tokens),
-            "profiles":        self._executor.submit(self._fetch_token_profiles),
-            # Pump.fun — 3 independent sort orders, no name filter
-            "pumpfun_active":  self._executor.submit(self._fetch_pumpfun_tokens),
-            "pumpfun_mcap":    self._executor.submit(self._fetch_pumpfun_by_mcap),
-            "pumpfun_viral":   self._executor.submit(self._fetch_pumpfun_viral),
-            "pumpfun_new":     self._executor.submit(self._fetch_pumpfun_new),
-            # Raydium — AMM pages 1-3 + CLMM pools (4 independent ranked lists)
-            "raydium_amm_p1":  self._executor.submit(self._fetch_raydium_pools, 1),
-            "raydium_amm_p2":  self._executor.submit(self._fetch_raydium_pools, 2),
-            "raydium_amm_p3":  self._executor.submit(self._fetch_raydium_pools, 3),
-            "raydium_clmm":    self._executor.submit(self._fetch_raydium_clmm),
-            # Birdeye — trending + gainers (independent rankings)
-            "be_trend":        self._executor.submit(self._fetch_birdeye_trending),
-            "be_gainers":      self._executor.submit(self._fetch_birdeye_gainers),
+            "boosted":          self._executor.submit(self._fetch_boosted_tokens),
+            "profiles":         self._executor.submit(self._fetch_token_profiles),
+            # Pump.fun — 4 independent sort orders + near-graduation snipe
+            "pumpfun_active":   self._executor.submit(self._fetch_pumpfun_tokens),
+            "pumpfun_mcap":     self._executor.submit(self._fetch_pumpfun_by_mcap),
+            "pumpfun_viral":    self._executor.submit(self._fetch_pumpfun_viral),
+            "pumpfun_new":      self._executor.submit(self._fetch_pumpfun_new),
+            "pumpfun_grad":     self._executor.submit(self._fetch_pumpfun_graduating),
+            # Raydium — AMM vol pages 1-4, CLMM pages 1-2, fee-sort, newest pools
+            "raydium_amm_p1":   self._executor.submit(self._fetch_raydium_pools, 1),
+            "raydium_amm_p2":   self._executor.submit(self._fetch_raydium_pools, 2),
+            "raydium_amm_p3":   self._executor.submit(self._fetch_raydium_pools, 3),
+            "raydium_amm_p4":   self._executor.submit(self._fetch_raydium_pools, 4),
+            "raydium_clmm":     self._executor.submit(self._fetch_raydium_clmm),
+            "raydium_clmm_p2":  self._executor.submit(self._fetch_raydium_clmm_p2),
+            "raydium_fee":      self._executor.submit(self._fetch_raydium_by_fee),
+            "raydium_new":      self._executor.submit(self._fetch_raydium_new_pools),
+            # Birdeye — trending + gainers (independent real-time rankings)
+            "be_trend":         self._executor.submit(self._fetch_birdeye_trending),
+            "be_gainers":       self._executor.submit(self._fetch_birdeye_gainers),
             # DexScreener token-level endpoints (volume-ranked, no keyword filter)
-            "ds_solana_top":   self._executor.submit(self._fetch_dexscreener_top_solana),
+            "ds_solana_top":    self._executor.submit(self._fetch_dexscreener_top_solana),
+            # GMGN — top Solana tokens by swap count + volume (cross-DEX, real-time)
+            "gmgn":             self._executor.submit(self._fetch_gmgn_trending),
         }
 
         raw_tokens: list[DexToken] = []
@@ -266,6 +274,15 @@ class DexScreener:
                                 t.volume_h24 = bp.volume_24h_usd
                 except Exception as e:
                     logger.debug("Batch price refresh error: %s", e)
+
+        # ── Feed ALL discovered tokens to market intelligence engine ─────────
+        # The engine needs the full breadth (before blacklist filtering) to
+        # compute accurate market-wide sentiment and narrative heat.
+        try:
+            from market_intelligence import get_engine as _mi_engine
+            _mi_engine().record_scan_batch(unique)
+        except Exception:
+            pass
 
         # ── Remove recently-evaluated tokens ─────────────────────────────────
         fresh = [t for t in unique if t.pair_address not in self._evaluated]
@@ -399,6 +416,28 @@ class DexScreener:
 
         unique.sort(key=lambda t: t.score, reverse=True)
         logger.info("Full DEX scan complete: %d unique opportunities", len(unique))
+
+        # ── Log market intelligence summary ──────────────────────────────────
+        try:
+            from market_intelligence import get_engine as _mi_engine
+            _mi = _mi_engine()
+            ms = _mi.get_market_summary()
+            narr_str = ", ".join(
+                f"{n}({g})" for n, g in ms.get("hot_narratives", [])[:3]
+            ) or "none"
+            logger.info(
+                "[MARKET] %s (%.2f) | seen today: %d tokens (+%d scored≥0.6 last 1h) "
+                "| hot sectors: %s | outcomes: win=%s avg=%+.0f%% (%d trades) "
+                "| context: ×%.2f",
+                ms["sentiment"], ms["sentiment_score"],
+                ms["tokens_seen_today"], ms["high_score_1h"],
+                narr_str,
+                f"{ms['win_rate_1h']:.0%}", ms["avg_gain_1h"], ms["outcome_n"],
+                ms["context_mult"],
+            )
+        except Exception:
+            pass
+
         return unique
 
     def get_token_info(self, token_address: str, chain: str = "solana") -> Optional[DexToken]:
@@ -855,6 +894,24 @@ class DexScreener:
             else:
                 score *= 0.88   # Unverified — mild penalty only
 
+        # ── Market intelligence context ───────────────────────────────────
+        # Apply market-wide knowledge: narrative heat + macro sentiment.
+        # This is fast — results are cached in the engine.
+        try:
+            from market_intelligence import get_engine as _mi_engine
+            _mi = _mi_engine()
+            # Narrative boost: is this token's category currently outperforming?
+            narr_boost, narr_label = _mi.get_narrative_boost(token.base_symbol or "")
+            if narr_boost > 0.0:
+                score += narr_boost
+                signals.append(narr_label)
+            # Market context multiplier: HOT/COLD adjusts the score slightly
+            mkt_mult = _mi.get_market_context_multiplier()
+            if mkt_mult != 1.0:
+                score *= mkt_mult
+        except Exception:
+            pass   # market intelligence is advisory — never block a trade
+
         token.score = float(np.clip(score, 0.0, 1.0))
         token.signals = signals[:5]   # cap at 5 signal tags
         return token.score
@@ -954,6 +1011,231 @@ class DexScreener:
         except Exception as e:
             logger.debug("DS top solana error: %s", e)
         return tokens
+
+    # ── New data sources ──────────────────────────────────────────────────────
+
+    def _fetch_gmgn_trending(self) -> list[DexToken]:
+        """
+        GMGN.ai — top Solana tokens by swap count (1h).
+        GMGN aggregates ALL Solana DEXes and surfaces the most actively-traded
+        tokens in real time, catching moves that DexScreener or Pump.fun miss.
+        Two sorts: by swap count (raw activity) and by volume (size of money).
+        """
+        tokens = []
+        for orderby in ("swaps", "volume"):
+            try:
+                data = self._get(
+                    f"{GMGN_BASE}/rank/sol/swaps/1h",
+                    params={"orderby": orderby, "direction": "desc",
+                            "filters[]": "not_wash_trade"},
+                    timeout=10)
+                items = (data or {}).get("data", {}).get("rank", []) if isinstance(data, dict) else []
+                mints = [item["address"] for item in (items or [])
+                         if item.get("address")][:30]
+                if not mints:
+                    continue
+                result = self._get(
+                    f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+                if not result or not result.get("pairs"):
+                    continue
+                seen_here: set[str] = set()
+                for p in result["pairs"]:
+                    if p.get("chainId") != "solana":
+                        continue
+                    addr = p.get("pairAddress", "")
+                    if addr in seen_here:
+                        continue
+                    seen_here.add(addr)
+                    t = self._parse_pair(p)
+                    if t:
+                        t.source = "gmgn_trending"
+                        tokens.append(t)
+            except Exception as e:
+                logger.debug("GMGN %s error: %s", orderby, e)
+        logger.debug("GMGN trending: %d tokens", len(tokens))
+        return tokens
+
+    def _fetch_pumpfun_graduating(self) -> list[DexToken]:
+        """
+        Pump.fun tokens approaching graduation ($69k bonding curve threshold).
+        These are pre-DEX tokens with strong momentum about to hit PumpSwap —
+        catching them just before graduation is a high-upside entry point.
+        Also captures 'King of the Hill' — the single most-traded token.
+        """
+        try:
+            data = self._get(
+                f"{PUMPFUN_BASE}/coins",
+                params={"limit": 100, "sort": "last_trade_unix_time",
+                        "order": "DESC", "includeNsfw": "false"},
+                timeout=8)
+            if not isinstance(data, list):
+                return []
+            # Approaching graduation: >$40k mcap, still on bonding curve
+            near_grad = [c for c in data
+                         if not c.get("complete")
+                         and c.get("usd_market_cap", 0) >= 40_000]
+            near_grad.sort(key=lambda c: c.get("usd_market_cap", 0), reverse=True)
+            mints = [c["mint"] for c in near_grad[:15] if c.get("mint")]
+            if not mints:
+                return []
+            result = self._get(
+                f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not result or not result.get("pairs"):
+                return []
+            tokens = []
+            seen: set[str] = set()
+            for p in result["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "pumpfun_graduating"
+                    tokens.append(t)
+            logger.debug("Pump.fun graduating: %d tokens", len(tokens))
+            return tokens
+        except Exception as e:
+            logger.debug("Pump.fun graduating error: %s", e)
+            return []
+
+    def _fetch_raydium_by_fee(self) -> list[DexToken]:
+        """
+        Raydium pools sorted by fee revenue (24h).
+        Fee revenue ≠ raw volume — high fees signal high-frequency meme trading
+        rather than whale wash-trading.  Surfaces a different set than vol-sort.
+        """
+        try:
+            data = self._get(
+                f"{RAYDIUM_BASE}/pools/info/list",
+                params={"poolType": "all", "poolSortField": "fee24h",
+                        "sortType": "desc", "pageSize": 50, "page": 1},
+                timeout=10)
+            if not data or not data.get("data", {}).get("data"):
+                return []
+            pools = data["data"]["data"]
+            mints: list[str] = []
+            for p in pools:
+                for fld in ("mintA", "mintB"):
+                    mint = (p.get(fld) or {}).get("address", "")
+                    if mint and mint not in mints:
+                        mints.append(mint)
+            mints = mints[:30]
+            if not mints:
+                return []
+            result = self._get(
+                f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not result or not result.get("pairs"):
+                return []
+            tokens = []
+            seen: set[str] = set()
+            for p in result["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "raydium_fee"
+                    tokens.append(t)
+            logger.debug("Raydium fee-sort: %d tokens", len(tokens))
+            return tokens
+        except Exception as e:
+            logger.debug("Raydium fee-sort error: %s", e)
+            return []
+
+    def _fetch_raydium_new_pools(self) -> list[DexToken]:
+        """
+        Raydium newest pool launches — tokens that just graduated from Pump.fun
+        or just listed on Raydium directly.  Sorted by pool creation time.
+        """
+        try:
+            data = self._get(
+                f"{RAYDIUM_BASE}/pools/info/list",
+                params={"poolType": "all", "poolSortField": "default",
+                        "sortType": "desc", "pageSize": 50, "page": 1},
+                timeout=10)
+            if not data or not data.get("data", {}).get("data"):
+                return []
+            pools = data["data"]["data"]
+            mints: list[str] = []
+            for p in pools:
+                for fld in ("mintA", "mintB"):
+                    mint = (p.get(fld) or {}).get("address", "")
+                    if mint and mint not in mints:
+                        mints.append(mint)
+            mints = mints[:30]
+            if not mints:
+                return []
+            result = self._get(
+                f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not result or not result.get("pairs"):
+                return []
+            tokens = []
+            seen: set[str] = set()
+            for p in result["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "raydium_new"
+                    tokens.append(t)
+            logger.debug("Raydium new pools: %d tokens", len(tokens))
+            return tokens
+        except Exception as e:
+            logger.debug("Raydium new pools error: %s", e)
+            return []
+
+    def _fetch_raydium_clmm_p2(self) -> list[DexToken]:
+        """Raydium CLMM page 2 — extends CLMM coverage beyond the top 50."""
+        try:
+            data = self._get(
+                f"{RAYDIUM_BASE}/pools/info/list",
+                params={"poolType": "concentrated", "poolSortField": "volume24h",
+                        "sortType": "desc", "pageSize": 50, "page": 2},
+                timeout=10)
+            if not data or not data.get("data", {}).get("data"):
+                return []
+            pools = data["data"]["data"]
+            mints: list[str] = []
+            for p in pools:
+                for fld in ("mintA", "mintB"):
+                    mint = (p.get(fld) or {}).get("address", "")
+                    if mint and mint not in mints:
+                        mints.append(mint)
+            mints = mints[:30]
+            if not mints:
+                return []
+            result = self._get(
+                f"{DEXSCREENER_BASE}/latest/dex/tokens/{','.join(mints)}")
+            if not result or not result.get("pairs"):
+                return []
+            tokens = []
+            seen: set[str] = set()
+            for p in result["pairs"]:
+                if p.get("chainId") != "solana":
+                    continue
+                addr = p.get("pairAddress", "")
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                t = self._parse_pair(p)
+                if t:
+                    t.source = "raydium_clmm"
+                    tokens.append(t)
+            logger.debug("Raydium CLMM p2: %d tokens", len(tokens))
+            return tokens
+        except Exception as e:
+            logger.debug("Raydium CLMM p2 error: %s", e)
+            return []
 
     def _evict_evaluated(self):
         """Remove expired entries from the recently-evaluated blacklist."""
