@@ -93,6 +93,11 @@ from strategies.funding_arb import FundingArbScanner
 from strategies.grid_trader import GridTrader
 from dex_screener import DexScreener
 from polymarket import PolymarketEngine
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location("polymarket_legacy", str(_pathlib.Path(__file__).resolve().parent / "polymarket.py"))
+_polymarket_legacy = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_polymarket_legacy)
+PolymarketTrader = _polymarket_legacy.PolymarketTrader
 from solana_wallet import SolanaWallet, SOL_MINT, USDC_MINT, USDT_MINT
 from token_safety import TokenSafetyChecker
 import data_fetcher as df_mod
