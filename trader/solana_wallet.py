@@ -95,7 +95,8 @@ USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 
 # Safety constants
-MIN_SOL_RESERVE_LAMPORTS = 50_000_000   # 0.05 SOL — reserve for fees + tip headroom
+MIN_SOL_RESERVE_LAMPORTS      = 50_000_000   # 0.05 SOL — reserve for BUY fees + tip + WSOL rent
+MIN_SOL_RESERVE_SELL_LAMPORTS =  3_000_000   # 0.003 SOL — minimum for SELL tx fee + Jito tip
 QUOTE_MAX_AGE_SECS       = 5            # Refetch quote if older than this
 MAX_PRICE_IMPACT_PCT     = 4.0          # Reject swaps with > 4% impact
 CONFIRMATION_TIMEOUT     = 60           # Seconds to wait for finalized
@@ -372,7 +373,7 @@ class SolanaWallet:
             logger.info("PAPER SELL: %s est=$%.2f", token_mint[:12], est_value_usd)
             return f"paper_sell_{int(time.time())}", est_value_usd
 
-        if not self._check_lamport_balance():
+        if not self._check_lamport_balance(is_sell=True):
             logger.error("Insufficient SOL for fees — skipping sell of %s", token_mint[:12])
             return None
 
@@ -424,7 +425,7 @@ class SolanaWallet:
             logger.info("PAPER PARTIAL SELL: %s %.0f%%", token_mint[:12], fraction * 100)
             return f"paper_partial_sell_{int(time.time())}", 0.0
 
-        if not self._check_lamport_balance():
+        if not self._check_lamport_balance(is_sell=True):
             return None
 
         raw_amount, decimals = self._get_token_raw_balance(token_mint)
@@ -1758,12 +1759,16 @@ class SolanaWallet:
 
     # ─── Balance helpers ───────────────────────────────────────────────────────
 
-    def _check_lamport_balance(self) -> bool:
-        """Return True if wallet has enough SOL to cover tx fees + Jito tip."""
+    def _check_lamport_balance(self, is_sell: bool = False) -> bool:
+        """Return True if wallet has enough SOL to cover tx fees + Jito tip.
+        Sells use a much lower threshold (0.003 SOL) since SOL is received back.
+        Buys use the full reserve (0.05 SOL) to cover the trade + WSOL account rent.
+        """
         lamports = self.get_sol_balance_lamports()
-        if lamports < MIN_SOL_RESERVE_LAMPORTS:
+        threshold = MIN_SOL_RESERVE_SELL_LAMPORTS if is_sell else MIN_SOL_RESERVE_LAMPORTS
+        if lamports < threshold:
             logger.warning("Low SOL balance: %.6f SOL (need ≥ %.3f for fees + tip)",
-                           lamports / 1e9, MIN_SOL_RESERVE_LAMPORTS / 1e9)
+                           lamports / 1e9, threshold / 1e9)
             return False
         return True
 

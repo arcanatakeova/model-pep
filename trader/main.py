@@ -176,6 +176,7 @@ class AITrader:
         self._equity_curve   = self._load_equity_curve()  # Persist chart history across restarts
         self._dex_positions: dict = {}  # addr → {buy_price, qty, chain, symbol}
         self._dex_lock = threading.Lock()  # Protects _dex_positions cross-thread (fast monitor + main)
+        self._dex_closed_count = 0         # Counts DEX closes; triggers audit every 25
         self._cex_signals_cache = []    # Shared between CEX scan + futures swing scan
         self._cex_cache_lock = threading.Lock()  # Protects _cex_signals_cache cross-thread
         self._market_snapshot: dict = {}  # Latest market overview (BTC dom, sentiment)
@@ -1388,6 +1389,12 @@ class AITrader:
                     pos["symbol"], sign, pnl_pct * 100, sign, pnl_usd,
                     remaining * 100, reason)
 
+        # ── Max-adverse and max-favourable excursion (key for audit analysis)
+        peak_price  = pos.get("peak_price", entry)
+        max_gain    = (peak_price - entry) / entry if entry > 0 else 0  # best price seen
+        hold_secs   = (datetime.now(timezone.utc) -
+                       datetime.fromisoformat(pos["opened_at"])).total_seconds()
+
         trade_record = {
             "asset_id": pair_addr,
             "symbol": pos["symbol"],
@@ -1404,6 +1411,16 @@ class AITrader:
             "safety_score": pos.get("safety_score"),
             "opened_at": pos["opened_at"],
             "closed_at": datetime.now(timezone.utc).isoformat(),
+            # ── Audit fields (used by StrategyAuditor for DEX-specific analysis)
+            "signal_score": pos.get("score", 0),          # entry score (0–1)
+            "signals": pos.get("signals", []),             # list of signal labels
+            "dex_source": pos.get("source", ""),           # dex scan source (pumpfun_new, etc.)
+            "max_gain_pct": round(max_gain * 100, 2),      # peak unrealised gain
+            "hold_seconds": round(hold_secs),              # how long held
+            "partials_taken": pos.get("partial_profits_taken", []),  # tiers hit
+            "stop_pct": pos.get("stop_pct", 0),            # stop that was set
+            "target_pct": pos.get("target_pct", 0),        # take-profit target
+            "is_burst": "BURST MODE" in " ".join(pos.get("signals", [])),
         }
         self.portfolio.closed_trades.append(trade_record)
         # Persist to Supabase (fire-and-forget)
@@ -1416,6 +1433,15 @@ class AITrader:
         from portfolio import _MAX_CLOSED_TRADES_MEMORY
         if len(self.portfolio.closed_trades) > _MAX_CLOSED_TRADES_MEMORY:
             self.portfolio._archive_old_trades()
+
+        # ── Trigger strategy audit every 25 DEX closes ────────────────────
+        self._dex_closed_count += 1
+        if self._dex_closed_count % 25 == 0:
+            try:
+                self.auditor.run_audit()
+            except Exception as _ae:
+                logger.debug("Auditor error: %s", _ae)
+
         return True
 
     def _execute_partial_profit(self, pair_addr: str, pos: dict,
