@@ -1429,6 +1429,15 @@ class AITrader:
 
         liq_usd = pos.get("liquidity_usd", 0.0)
         if pos["chain"] == "solana" and self.solana.is_connected and "paper" not in pos.get("tx", ""):
+            # Pre-seed balance cache from known buy quantity so sell_token's 429 fallback
+            # returns the correct raw amount instead of (0, 6).
+            # pos["qty"] is in UI units (e.g. 1549.66 tokens). Most pump.fun tokens use
+            # 6 decimals. ts=0 marks it as stale so it's overwritten on the next real RPC read,
+            # but the 429 fallback path uses existence (not TTL) so it will find this value.
+            _qty_hint = pos.get("qty", 0) * remaining
+            _addr     = pos["address"]
+            if _qty_hint > 0 and self.solana._token_balance_cache.get(_addr, (0,))[0] == 0:
+                self.solana._token_balance_cache[_addr] = (int(_qty_hint * 1_000_000), 6, 0.0)
             sell_result = self.solana.sell_token(pos["address"], proceeds,
                                                 liquidity_usd=liq_usd,
                                                 pair_address=pair_addr if pos.get("dex_id") == "pumpswap" else None)
