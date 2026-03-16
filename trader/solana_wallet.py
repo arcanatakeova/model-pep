@@ -415,6 +415,12 @@ class SolanaWallet:
             pair_address=pair_address,
         )
         if result.success:
+            # Pre-warm the balance cache from the swap output so the fast monitor's
+            # first sell attempt works even when the RPC is rate-limited (429).
+            # Without this, cache is empty → 429 → (0,6) → sell skipped forever.
+            # raw_amount is in smallest units; decimals don't affect the sell swap.
+            if result.out_amount > 0:
+                self._token_balance_cache[token_mint] = (result.out_amount, 6, time.time())
             logger.info("BUY %s $%.2f SOL slippage=%dbps impact=%.2f%% | tx=%s",
                         token_mint[:12], usdc_amount, slippage_bps,
                         result.price_impact_pct, result.signature[:16])
