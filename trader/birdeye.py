@@ -414,14 +414,24 @@ class BirdeyeClient:
 
     # ─── HTTP ──────────────────────────────────────────────────────────────────
 
+    # Endpoints that require premium plans — 401 on these means "not on your plan",
+    # NOT "invalid key". Don't disable the whole client for these.
+    _PREMIUM_PATHS = frozenset({
+        "/smart-money/v1/token/list",
+        "/defi/token_security",
+        "/defi/token_overview",
+        "/wallet/v2/",
+    })
+
     def _get(self, path: str, params: dict = None,
              timeout: int = 8) -> Optional[dict]:
         """Make a GET request to the Birdeye API."""
         if not self.enabled:
             return None
         url = f"{BIRDEYE_BASE}{path}"
+        is_premium = any(path.startswith(p) for p in self._PREMIUM_PATHS)
         for attempt in range(3):
-            if not self.enabled:   # re-check each iteration — another thread may have disabled
+            if not self.enabled:   # re-check — another thread may have disabled
                 return None
             try:
                 resp = self._session.get(url, params=params, timeout=timeout)
@@ -431,9 +441,13 @@ class BirdeyeClient:
                     time.sleep(wait)
                     continue
                 if resp.status_code in (401, 403):
-                    logger.error(
-                        "Birdeye: invalid API key — disabling Birdeye for this session")
-                    self._api_key = ""   # flip enabled=False, stops all further calls
+                    if is_premium:
+                        # Premium endpoint not available on this plan — skip silently
+                        logger.debug("Birdeye %s: not available on current plan (401)", path)
+                    else:
+                        logger.error(
+                            "Birdeye: invalid API key — disabling Birdeye for this session")
+                        self._api_key = ""  # flip enabled=False, stops all further calls
                     return None
                 if not resp.ok:
                     logger.debug("Birdeye %s → %d: %s",
