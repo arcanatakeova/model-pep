@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+import threading
+
 import requests
 from requests.adapters import HTTPAdapter as _HTTPAdapter
 
@@ -95,6 +97,11 @@ class BirdeyeClient:
     _OHLCV_TTL     = 30
     _TRENDING_TTL  = 60
 
+    # Global rate limiter shared across ALL instances and threads (free tier = 1 req/s)
+    _global_lock = threading.Lock()
+    _global_last_request_ts: float = 0.0
+    _global_backoff_until: float = 0.0  # circuit breaker: skip requests until this time
+
     def __init__(self, api_key: str = ""):
         self._api_key = api_key or config.BIRDEYE_API_KEY
         self._session = requests.Session()
@@ -107,7 +114,6 @@ class BirdeyeClient:
         self._security_cache: dict[str, tuple[BirdeyeSecurity, float]] = {}
         self._ohlcv_cache:    dict[str, tuple[list[BirdeyeOHLCV], float]] = {}
         self._trending_cache: tuple[list[dict], float] = ([], 0.0)
-        self._last_request_ts: float = 0.0  # for 1 req/s rate limiting (free tier)
 
     @property
     def enabled(self) -> bool:
@@ -379,42 +385,53 @@ class BirdeyeClient:
 
     # ─── HTTP ──────────────────────────────────────────────────────────────────
 
-    def _rate_limit(self):
-        """Enforce 1 request per second for free-tier Birdeye API."""
-        now = time.time()
-        elapsed = now - self._last_request_ts
-        if elapsed < 1.0:
-            time.sleep(1.0 - elapsed)
-        self._last_request_ts = time.time()
+    @classmethod
+    def _rate_limit(cls):
+        """Enforce 1 request per second globally across all instances/threads."""
+        with cls._global_lock:
+            now = time.time()
+            # Circuit breaker: skip if in backoff period
+            if now < cls._global_backoff_until:
+                return False  # caller should skip
+            elapsed = now - cls._global_last_request_ts
+            if elapsed < 1.0:
+                time.sleep(1.0 - elapsed)
+            cls._global_last_request_ts = time.time()
+            return True  # OK to proceed
 
     def _get(self, path: str, params: dict = None,
              timeout: int = 8) -> Optional[dict]:
         """Make a GET request to the Birdeye API."""
         if not self.enabled:
             return None
+        # Circuit breaker check (don't even wait if backed off)
+        if time.time() < self._global_backoff_until:
+            return None
+        if not self._rate_limit():
+            return None
         url = f"{BIRDEYE_BASE}{path}"
-        self._rate_limit()
-        for attempt in range(3):
-            try:
-                resp = self._session.get(url, params=params, timeout=timeout)
-                if resp.status_code == 429:
-                    wait = 2 ** attempt
-                    logger.warning("Birdeye rate limit — waiting %ds", wait)
-                    time.sleep(wait)
-                    continue
-                if resp.status_code == 401:
-                    logger.error("Birdeye: invalid API key")
-                    return None
-                if not resp.ok:
-                    logger.debug("Birdeye %s → %d: %s",
-                                 path, resp.status_code, resp.text[:100])
-                    return None
-                return resp.json()
-            except Exception as e:
-                logger.debug("Birdeye request error (%s): %s", path, e)
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
-        return None
+        try:
+            resp = self._session.get(url, params=params, timeout=timeout)
+            if resp.status_code == 429:
+                # Back off for 30s on rate limit
+                logger.warning("Birdeye rate limited — backing off 30s")
+                with self._global_lock:
+                    self.__class__._global_backoff_until = time.time() + 30
+                return None
+            if resp.status_code == 401:
+                # Back off for 60s on auth failure (free tier overloaded)
+                logger.error("Birdeye: API key rejected — backing off 60s")
+                with self._global_lock:
+                    self.__class__._global_backoff_until = time.time() + 60
+                return None
+            if not resp.ok:
+                logger.debug("Birdeye %s → %d: %s",
+                             path, resp.status_code, resp.text[:100])
+                return None
+            return resp.json()
+        except Exception as e:
+            logger.debug("Birdeye request error (%s): %s", path, e)
+            return None
 
     # ─── Cache helpers ─────────────────────────────────────────────────────────
 
