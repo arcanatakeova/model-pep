@@ -171,10 +171,12 @@ class EnsembleSignal:
         except Exception:
             atr_ratio = 1.0
 
-        # BB width as ranging proxy
+        # BB width as ranging proxy (guard against zero mid values)
         upper, mid, lower = ind.bollinger(close)
         bb_width = (upper.iloc[-1] - lower.iloc[-1]) / mid.iloc[-1] if mid.iloc[-1] > 0 else 0
-        bb_avg   = ((upper - lower) / mid).tail(period).mean()
+        safe_mid = mid.replace(0, np.nan)
+        bb_avg   = ((upper - lower) / safe_mid).tail(period).mean()
+        bb_avg   = bb_avg if not np.isnan(bb_avg) else bb_width
         bb_expanding = bb_width > bb_avg * 1.1
 
         if atr_ratio > 1.3 and bb_expanding:

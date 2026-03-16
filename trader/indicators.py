@@ -184,9 +184,14 @@ def ema_cross_signal(close: pd.Series,
     f = ema(close, fast)
     s = ema(close, slow)
 
-    diff     = f.iloc[-1] - s.iloc[-1]
-    diff_prev = f.iloc[-2] - s.iloc[-2]
-    spread   = abs(diff) / s.iloc[-1] if (s.iloc[-1] != 0 and not pd.isna(s.iloc[-1])) else 0
+    f_last, f_prev = float(f.iloc[-1]), float(f.iloc[-2])
+    s_last, s_prev = float(s.iloc[-1]), float(s.iloc[-2])
+    if any(np.isnan(v) for v in (f_last, f_prev, s_last, s_prev)):
+        return 0.0
+
+    diff      = f_last - s_last
+    diff_prev = f_prev - s_prev
+    spread   = abs(diff) / s_last if s_last != 0 else 0
 
     score = 0.0
     # Direction: 0.5
