@@ -392,8 +392,10 @@ class BirdeyeClient:
                     logger.warning("Birdeye rate limit — waiting %ds", wait)
                     time.sleep(wait)
                     continue
-                if resp.status_code == 401:
-                    logger.error("Birdeye: invalid API key")
+                if resp.status_code in (401, 403):
+                    logger.error(
+                        "Birdeye: invalid API key — disabling Birdeye for this session")
+                    self._api_key = ""   # flip enabled=False, stops all further calls
                     return None
                 if not resp.ok:
                     logger.debug("Birdeye %s → %d: %s",
