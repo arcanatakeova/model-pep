@@ -1091,14 +1091,21 @@ class SolanaWallet:
                 return None, 0, 0.0
 
             # ── Overflow guard ────────────────────────────────────────────────
-            # PumpSwap v1 BUY formula: tokens_out = (base_reserve * sol_in) / (quote_reserve + sol_in)
-            # The multiply `base_reserve * sol_in` is done as u64 on-chain → error 0x1787 if it overflows.
-            # We check the exact operands (not k = base*quote) using Python big-int to avoid false positives.
+            # PumpSwap v1 swap formula uses u64 arithmetic:
+            #   BUY:  overflow if base_reserve * sol_in          > 2^64
+            #   SELL: overflow if token_amount_in * quote_reserve > 2^64
+            # Both produce on-chain error 0x1787.
             if not is_sell and base_reserve * amount_raw > 0xFFFF_FFFF_FFFF_FFFF:
                 logger.warning(
                     "PumpSwap: u64 buy-overflow for pool %s "
                     "(base=%d × sol_in=%d > 2^64) — token untradeable at this size",
                     pool_address[:16], base_reserve, amount_raw)
+                return None, 0, 0.0
+            if is_sell and amount_raw * quote_reserve > 0xFFFF_FFFF_FFFF_FFFF:
+                logger.warning(
+                    "PumpSwap: u64 sell-overflow for pool %s "
+                    "(token_in=%d × quote=%d > 2^64) — cannot sell via direct path",
+                    pool_address[:16], amount_raw, quote_reserve)
                 return None, 0, 0.0
 
             # ── Step 4: AMM calculation (~1% total fees) ──────────────────────
@@ -1894,7 +1901,23 @@ class SolanaWallet:
                 ],
             }, timeout=10)
             if not resp.ok:
-                return 0, 6
+                if resp.status_code == 429:
+                    logger.warning("Token balance: RPC 429 for %s — retrying in 2s",
+                                   mint_address[:12])
+                    import time as _time; _time.sleep(2)
+                    resp = _session.post(config.SOLANA_RPC_URL, json={
+                        "jsonrpc": "2.0", "id": 1,
+                        "method": "getTokenAccountsByOwner",
+                        "params": [
+                            self._pubkey,
+                            {"mint": mint_address},
+                            {"encoding": "jsonParsed", "commitment": "confirmed"},
+                        ],
+                    }, timeout=10)
+                    if not resp.ok:
+                        return 0, 6
+                else:
+                    return 0, 6
             for acc in resp.json().get("result", {}).get("value", []):
                 ta = (acc.get("account", {})
                         .get("data", {})
