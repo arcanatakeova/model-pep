@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trading Bot Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d1117; color: #e6edf3; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; font-size: 13px; }
+  header { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 20px; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 16px; font-weight: 600; color: #58a6ff; }
+  #status-dot { width: 8px; height: 8px; border-radius: 50%; background: #3fb950; flex-shrink: 0; }
+  #status-dot.stale { background: #f85149; }
+  #last-update { color: #8b949e; font-size: 11px; margin-left: auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; padding: 16px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
+  .card .label { color: #8b949e; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .card .value { font-size: 22px; font-weight: 700; }
+  .card .sub { color: #8b949e; font-size: 11px; margin-top: 2px; }
+  .pos { color: #3fb950; } .neg { color: #f85149; } .neu { color: #e6edf3; }
+  section { padding: 0 16px 16px; }
+  section h2 { font-size: 13px; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+  table { width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+  th { background: #21262d; color: #8b949e; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; padding: 8px 12px; text-align: left; }
+  td { padding: 8px 12px; border-top: 1px solid #21262d; }
+  tr:hover td { background: #1c2128; }
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 12px; font-size: 10px; font-weight: 600; }
+  .badge-green { background: #1a4731; color: #3fb950; }
+  .badge-red { background: #4b1113; color: #f85149; }
+  .badge-yellow { background: #3d2b00; color: #d29922; }
+  #no-positions, #no-trades { color: #8b949e; font-size: 12px; padding: 16px 0; text-align: center; }
+  .signals-list { display: flex; flex-wrap: wrap; gap: 6px; }
+  .signal-item { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; font-size: 11px; }
+  .signal-item .sym { font-weight: 600; color: #58a6ff; }
+  .signal-item .score { color: #d29922; }
+</style>
+</head>
+<body>
+<header>
+  <div id="status-dot"></div>
+  <h1>Trading Bot Dashboard</h1>
+  <span id="mode-badge" class="badge badge-yellow">—</span>
+  <span id="last-update">Loading...</span>
+</header>
+
+<div class="grid" id="stats-grid">
+  <div class="card"><div class="label">Portfolio Value</div><div class="value neu" id="equity">—</div><div class="sub" id="equity-sub">—</div></div>
+  <div class="card"><div class="label">Available Cash</div><div class="value neu" id="cash">—</div></div>
+  <div class="card"><div class="label">Daily P&amp;L</div><div class="value" id="daily-pnl">—</div><div class="sub" id="daily-pnl-sub">—</div></div>
+  <div class="card"><div class="label">Total P&amp;L</div><div class="value" id="total-pnl">—</div></div>
+  <div class="card"><div class="label">Win Rate</div><div class="value neu" id="win-rate">—</div><div class="sub" id="total-trades">—</div></div>
+  <div class="card"><div class="label">Open Positions</div><div class="value neu" id="open-pos">—</div></div>
+  <div class="card"><div class="label">Wallet (SOL)</div><div class="value neu" id="wallet-sol">—</div><div class="sub" id="wallet-sol-usd">—</div></div>
+  <div class="card"><div class="label">Cycle</div><div class="value neu" id="cycle">—</div><div class="sub" id="cycle-ms">—</div></div>
+</div>
+
+<section>
+  <h2>DEX Positions</h2>
+  <div id="dex-positions-wrap">
+    <p id="no-positions">No open positions</p>
+  </div>
+</section>
+
+<section>
+  <h2>Recent Trades</h2>
+  <div id="trades-wrap">
+    <p id="no-trades">No trades yet</p>
+  </div>
+</section>
+
+<section>
+  <h2>Top Signals (Last Scan)</h2>
+  <div class="signals-list" id="signals-list">
+    <span style="color:#8b949e;font-size:12px">No signals yet</span>
+  </div>
+</section>
+
+<script>
+const SUPABASE_URL = "https://iimijdyiaookufieauea.supabase.co";
+const SUPABASE_ANON = "sb_publishable_JpcuptFD0r8u44wJ437fig_A7qyhlEB";
+
+function fmt(v, decimals=2, prefix='$') {
+  if (v == null || isNaN(v)) return '—';
+  return prefix + Math.abs(v).toFixed(decimals);
+}
+function pct(v) {
+  if (v == null || isNaN(v)) return '—';
+  return (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
+}
+function colorClass(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'neu'; }
+
+async function fetchState() {
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/bot_state?id=eq.1&select=state,updated_at`,
+      { headers: { 'apikey': SUPABASE_ANON, 'Authorization': `Bearer ${SUPABASE_ANON}` } }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const rows = await res.json();
+    if (!rows.length) return;
+    render(rows[0].state, rows[0].updated_at);
+  } catch (e) {
+    document.getElementById('last-update').textContent = 'Error: ' + e.message;
+    document.getElementById('status-dot').className = 'stale';
+  }
+}
+
+function render(s, updatedAt) {
+  // Header
+  const dot = document.getElementById('status-dot');
+  const upd = new Date(updatedAt);
+  const age = (Date.now() - upd.getTime()) / 1000;
+  dot.className = age > 30 ? 'stale' : '';
+  document.getElementById('last-update').textContent =
+    'Updated ' + (age < 60 ? Math.round(age) + 's' : Math.round(age/60) + 'm') + ' ago';
+
+  const modeBadge = document.getElementById('mode-badge');
+  modeBadge.textContent = (s.mode || 'unknown').toUpperCase();
+  modeBadge.className = 'badge ' + (s.mode === 'live' ? 'badge-green' : 'badge-yellow');
+
+  // Stats
+  const eq = s.equity || 0;
+  document.getElementById('equity').textContent = '$' + eq.toFixed(2);
+  document.getElementById('equity').className = 'value ' + colorClass(eq - (s.initial_capital||0));
+  document.getElementById('equity-sub').textContent =
+    'Peak: $' + (s.peak_equity||0).toFixed(2) + ' · Max DD: ' + (s.max_drawdown_pct||0).toFixed(1) + '%';
+
+  document.getElementById('cash').textContent = '$' + (s.cash||0).toFixed(2);
+
+  const dpnl = s.daily_pnl_usd || 0;
+  const dpct = s.daily_pnl_pct || 0;
+  document.getElementById('daily-pnl').textContent = (dpnl>=0?'+':'') + '$' + Math.abs(dpnl).toFixed(2);
+  document.getElementById('daily-pnl').className = 'value ' + colorClass(dpnl);
+  document.getElementById('daily-pnl-sub').textContent = pct(dpct);
+
+  const tpnl = s.total_pnl_usd || 0;
+  document.getElementById('total-pnl').textContent = (tpnl>=0?'+':'') + '$' + Math.abs(tpnl).toFixed(2);
+  document.getElementById('total-pnl').className = 'value ' + colorClass(tpnl);
+
+  document.getElementById('win-rate').textContent = (s.win_rate_pct||0).toFixed(0) + '%';
+  document.getElementById('total-trades').textContent = (s.total_trades||0) + ' trades · PF: ' + (s.profit_factor||0).toFixed(2);
+  document.getElementById('open-pos').textContent = (s.open_positions||0) + ' CEX + ' + (s.dex_positions||0) + ' DEX';
+  document.getElementById('wallet-sol').textContent = (s.wallet_sol||0).toFixed(4) + ' SOL';
+  document.getElementById('wallet-sol-usd').textContent = '≈ $' + (s.wallet_sol_usd||0).toFixed(2);
+  document.getElementById('cycle').textContent = '#' + (s.cycle||0);
+  document.getElementById('cycle-ms').textContent = (s.last_cycle_ms||0).toFixed(0) + 'ms / cycle';
+
+  // DEX positions
+  const dexWrap = document.getElementById('dex-positions-wrap');
+  const positions = s.dex_position_details || [];
+  if (!positions.length) {
+    dexWrap.innerHTML = '<p id="no-positions" style="color:#8b949e;text-align:center;padding:16px 0">No open DEX positions</p>';
+  } else {
+    let html = '<table><tr><th>Token</th><th>Entry</th><th>Current</th><th>P&L</th><th>Size</th><th>Age</th></tr>';
+    positions.forEach(p => {
+      const pnl = p.pnl_pct || 0;
+      const cl = colorClass(pnl);
+      html += `<tr>
+        <td><strong>${p.symbol||'?'}</strong></td>
+        <td>$${(p.entry_price||0).toExponential(3)}</td>
+        <td>$${(p.current_price||0).toExponential(3)}</td>
+        <td class="${cl}">${pct(pnl*100)}</td>
+        <td>$${(p.size_usd||0).toFixed(2)}</td>
+        <td>${p.age_min ? p.age_min.toFixed(0)+'m' : '—'}</td>
+      </tr>`;
+    });
+    html += '</table>';
+    dexWrap.innerHTML = html;
+  }
+
+  // Recent trades
+  const tradesWrap = document.getElementById('trades-wrap');
+  const trades = (s.recent_trades || []).slice(0, 15);
+  if (!trades.length) {
+    tradesWrap.innerHTML = '<p style="color:#8b949e;text-align:center;padding:16px 0">No trades yet</p>';
+  } else {
+    let html = '<table><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>P&L</th></tr>';
+    trades.forEach(t => {
+      const pnl = t.pnl_usd || t.pnl || 0;
+      const pnlPct = t.pnl_pct || 0;
+      const cl = colorClass(pnl);
+      const ts = t.closed_at ? new Date(t.closed_at).toLocaleTimeString() : '—';
+      html += `<tr>
+        <td style="color:#8b949e">${ts}</td>
+        <td><strong>${t.symbol||'?'}</strong></td>
+        <td><span class="badge ${t.side==='long'||t.side==='buy' ? 'badge-green' : 'badge-red'}">${(t.side||'?').toUpperCase()}</span></td>
+        <td>$${(t.entry_price||0).toFixed(4)}</td>
+        <td>$${(t.exit_price||t.close_price||0).toFixed(4)}</td>
+        <td class="${cl}">${pnl>=0?'+':''}$${Math.abs(pnl).toFixed(2)} (${pct(pnlPct*100)})</td>
+      </tr>`;
+    });
+    html += '</table>';
+    tradesWrap.innerHTML = html;
+  }
+
+  // Signals
+  const sigList = document.getElementById('signals-list');
+  const sigs = s.signal_table || [];
+  if (!sigs.length) {
+    sigList.innerHTML = '<span style="color:#8b949e;font-size:12px">No signals from last scan</span>';
+  } else {
+    sigList.innerHTML = sigs.slice(0,20).map(sig => {
+      const score = sig.score || sig.signal_score || 0;
+      return `<div class="signal-item">
+        <span class="sym">${sig.symbol||'?'}</span>
+        <span class="score"> ${(score*100).toFixed(0)}</span>
+      </div>`;
+    }).join('');
+  }
+}
+
+fetchState();
+setInterval(fetchState, 5000);
+</script>
+</body>
+</html>

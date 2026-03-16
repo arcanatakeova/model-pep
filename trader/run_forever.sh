@@ -10,11 +10,12 @@
 #
 # The script:
 #   1. Writes its PID + mode to files (used by update.sh)
-#   2. Launches main.py with any args you pass
-#   3. On crash / exit: waits 5s then relaunches
-#   4. Logs restart events with timestamps
-#   5. Removes PID file on clean exit
-#   6. Press Ctrl+C to stop cleanly
+#   2. Launches Streamlit dashboard on http://localhost:8501
+#   3. Launches main.py with any args you pass
+#   4. On crash / exit: waits 5s then relaunches
+#   5. Logs restart events with timestamps
+#   6. Removes PID file on clean exit
+#   7. Press Ctrl+C to stop cleanly
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -30,6 +31,7 @@ MODEFILE=".mode"
 RESTART_DELAY=5   # seconds between restarts
 MAX_RESTARTS=1000 # safety cap (prevents infinite tight crash loops)
 restart_count=0
+DASHBOARD_PID=""
 
 # ── Write PID and mode files so update.sh can find us ────────────────────────
 echo $$ > "$PIDFILE"
@@ -42,6 +44,7 @@ fi
 # ── Cleanup on exit ───────────────────────────────────────────────────────────
 cleanup() {
     rm -f "$PIDFILE"
+    [[ -n "$DASHBOARD_PID" ]] && kill "$DASHBOARD_PID" 2>/dev/null || true
     echo "$(date '+%Y-%m-%d %H:%M:%S') [WATCHDOG] Stopped. PID file removed." | tee -a "$LOGFILE"
 }
 trap cleanup EXIT INT TERM
@@ -56,7 +59,29 @@ if [[ -f ".env" ]]; then
     set +a
 fi
 
+# ── Launch Streamlit dashboard in background (port 8501) ──────────────────────
+if command -v streamlit &>/dev/null; then
+    streamlit run dashboard.py --server.port 8501 \
+        --server.headless true --server.address 0.0.0.0 \
+        >> trader_dashboard.log 2>&1 &
+    DASHBOARD_PID=$!
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [WATCHDOG] Dashboard → http://localhost:8501 (PID=$DASHBOARD_PID)" | tee -a "$LOGFILE"
+else
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [WATCHDOG] streamlit not found — run: pip3 install streamlit plotly" | tee -a "$LOGFILE"
+fi
+
 while true; do
+    # ── Auto-update: pull latest code before each launch ─────────────────────
+    if git -C "$SCRIPT_DIR/.." rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
+        BEFORE="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD 2>/dev/null)"
+        git -C "$SCRIPT_DIR/.." pull origin claude/ai-trading-bot-SaLev \
+            >> "$LOGFILE" 2>&1 || true
+        AFTER="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD 2>/dev/null)"
+        if [[ "$BEFORE" != "$AFTER" ]]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') [WATCHDOG] Updated $BEFORE → $AFTER" | tee -a "$LOGFILE"
+        fi
+    fi
+
     python3 main.py $ARGS 2>&1 | tee -a "$LOGFILE" || true
     exit_code=$?
 

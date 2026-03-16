@@ -142,7 +142,7 @@ TRADE_LOG_FILE = "trades.json"
 PORTFOLIO_SNAPSHOT_INTERVAL = 300   # Save portfolio snapshot every 5 minutes
 
 # ─── DEX / On-Chain Settings ──────────────────────────────────────────────────
-DEX_MIN_SCORE = 0.30               # Quality gate (lowered from 0.38: 3-5x more candidates)
+DEX_MIN_SCORE = 0.33               # Quality gate — 0.36 yielded 0 opportunities; 0.33 filters bottom tier
 DEX_MAX_POSITION_USD = 750.0       # Max per DEX token (raised from $500)
 DEX_PREFERRED_CHAINS = ["solana"]  # Solana only
 DEX_SCAN_INTERVAL_SEC = 4          # Scan DEX every 4s — catch entries faster
@@ -168,17 +168,17 @@ MAX_MEMECOIN_ALLOCATION_PCT = 0.65 # Max 65% of equity in memecoins (raised from
 
 # ─── Time-Based Exit Rules ──────────────────────────────────────────────────
 DEX_MAX_HOLD_HOURS = 10            # Force exit after 10h (raised from 6h — let winners run)
-DEX_STALE_EXIT_HOURS = 2.5         # Exit if no momentum after 2.5h (raised from 1.5h)
-DEX_STALE_MIN_GAIN_PCT = 0.015     # Need +1.5% gain to justify holding (lowered from 3%)
+DEX_STALE_EXIT_HOURS = 2.0         # Exit if no momentum after 2.0h (tightened from 2.5h)
+DEX_STALE_MIN_GAIN_PCT = 0.03      # Need +3% gain to justify holding past stale threshold
 
 # ─── Partial Profit Taking ──────────────────────────────────────────────────
 PARTIAL_PROFIT_ENABLED = True
 PARTIAL_PROFIT_TIERS = [
-    (0.25, 0.15),   # At +25% gain, sell 15% — secure initial profit (was 20%/20%)
-    (0.60, 0.15),   # At +60% gain, sell another 15%
-    (1.20, 0.15),   # At +120% gain, sell another 15% (2.2x)
-    (2.50, 0.15),   # At +250% gain, sell another 15% (3.5x)
-    # Remaining 40% rides with trailing stop — moonshot runner (up from 20%)
+    (0.15, 0.20),   # At +15% gain, sell 20% — lock first profit faster (was +25%/15%)
+    (0.40, 0.20),   # At +40% gain, sell another 20%
+    (0.90, 0.20),   # At +90% gain (near 2x), sell another 20%
+    (2.00, 0.20),   # At +200% gain (3x), sell another 20%
+    # Remaining 20% rides with trailing stop — moonshot runner
 ]
 
 # ─── MEV / Sandwich Protection ──────────────────────────────────────────────
@@ -187,8 +187,8 @@ MEV_MAX_SLIPPAGE_BPS = 100         # Tighter slippage (1%) for MEV protection
 MEV_PRIORITY_FEE_LAMPORTS = 50000  # Higher priority fee to front-run sandwich
 
 # ─── Concentration Limits ───────────────────────────────────────────────────
-MAX_DEX_POSITIONS = 15             # Max concurrent DEX/memecoin positions (up from 10)
-MAX_SAME_DEX_POSITIONS = 10        # Max positions on same DEX
+MAX_DEX_POSITIONS = 250            # Max concurrent DEX/memecoin positions
+MAX_SAME_DEX_POSITIONS = 100       # Max positions on same DEX
 MIN_LIQUIDITY_RATIO = 0.15         # Position must be < 15% of pool liquidity (up from 8%)
 
 # ─── Solana / Phantom Wallet ──────────────────────────────────────────────────

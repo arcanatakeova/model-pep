@@ -32,8 +32,13 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import requests
+from requests.adapters import HTTPAdapter as _HTTPAdapter
 
 import config
+
+_session = requests.Session()
+_session.mount("https://", _HTTPAdapter(pool_connections=20, pool_maxsize=50))
+_session.mount("http://",  _HTTPAdapter(pool_connections=20, pool_maxsize=50))
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +106,8 @@ class TokenSafetyChecker:
 
         # Lazy-import Birdeye client to avoid circular deps
         self._birdeye = None
+        self._session.mount("https://", _HTTPAdapter(pool_connections=20, pool_maxsize=100))
+        self._session.mount("http://",  _HTTPAdapter(pool_connections=20, pool_maxsize=100))
 
     def _get_birdeye(self):
         """Lazy-load Birdeye client."""
