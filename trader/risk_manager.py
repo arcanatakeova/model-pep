@@ -287,8 +287,13 @@ class RiskManager:
         # 6. Caps
         size = min(size, config.DEX_MAX_POSITION_USD)
         size = min(size, liquidity_usd * config.MIN_LIQUIDITY_RATIO)
-        # Cash cap: use up to 90% of available cash — leave room for tx fees
-        size = min(size, self.portfolio.cash * 0.90)
+        # Cash cap: divide available cash across MAX_DEX_POSITIONS slots
+        # so one trade can't drain the wallet (e.g. 5 slots → max 20% of cash each)
+        open_dex = len([p for p in self.portfolio.open_positions.values()
+                        if p.get("market") == "dex"])
+        free_slots = max(1, config.MAX_DEX_POSITIONS - open_dex)
+        per_slot_cash = self.portfolio.cash * 0.85 / free_slots  # 85% total, split evenly
+        size = min(size, per_slot_cash)
 
         if size < config.DEX_MIN_POSITION_USD:
             return 0.0
