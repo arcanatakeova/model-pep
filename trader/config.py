@@ -168,19 +168,25 @@ POSITION_VOL_SCALAR = 1.0          # Multiplier for vol-adjusted sizing
 MAX_MEMECOIN_ALLOCATION_PCT = 0.65 # Max 65% of equity in memecoins (raised from 50%)
 
 # ─── Time-Based Exit Rules ──────────────────────────────────────────────────
-DEX_MAX_HOLD_HOURS = 10            # Force exit after 10h (raised from 6h — let winners run)
-DEX_STALE_EXIT_HOURS = 2.0         # Exit if no momentum after 2.0h (tightened from 2.5h)
-DEX_STALE_MIN_GAIN_PCT = 0.03      # Need +3% gain to justify holding past stale threshold
+DEX_MAX_HOLD_HOURS = 4             # Force exit after 4h — don't baghold (was 10h)
+DEX_STALE_EXIT_HOURS = 0.75        # Exit if no momentum after 45min (was 2h)
+DEX_STALE_MIN_GAIN_PCT = 0.02      # Need +2% gain to justify holding past stale
 
 # ─── Partial Profit Taking ──────────────────────────────────────────────────
 PARTIAL_PROFIT_ENABLED = True
 PARTIAL_PROFIT_TIERS = [
-    (0.15, 0.20),   # At +15% gain, sell 20% — lock first profit faster (was +25%/15%)
-    (0.40, 0.20),   # At +40% gain, sell another 20%
-    (0.90, 0.20),   # At +90% gain (near 2x), sell another 20%
-    (2.00, 0.20),   # At +200% gain (3x), sell another 20%
-    # Remaining 20% rides with trailing stop — moonshot runner
+    (0.08, 0.30),   # At +8% sell 30% — capture small gains quickly before reversal
+    (0.20, 0.25),   # At +20% sell 25% — lock in solid momentum move
+    (0.50, 0.20),   # At +50% sell 20%
+    (1.20, 0.15),   # At +120% sell 15% — let 10% ride as moonshot runner
 ]
+
+# ─── Scalp Mode (high-volatility token exits) ───────────────────────────────
+# Tokens with large 1h moves get tighter exits — scalp the spike, don't overstay
+SCALP_MODE_VOL_THRESHOLD = 15.0   # h1% change that activates scalp mode
+SCALP_TARGET_PCT         = 0.18   # Close full position at +18% in scalp mode
+SCALP_REVERSAL_PCT       = 0.05   # Exit if price drops 5% from peak in scalp mode
+SCALP_STALE_MINUTES      = 20     # Exit stale scalp position after 20 minutes
 
 # ─── MEV / Sandwich Protection ──────────────────────────────────────────────
 MEV_PROTECTION_ENABLED = True

@@ -835,7 +835,9 @@ class AITrader:
             target_pct = self.risk_mgr.dynamic_dex_target_pct(
                 price_change_h24 = getattr(token, "price_change_h24", 0) or 0,
                 score            = token.score,
+                price_change_h1  = getattr(token, "price_change_h1",  0) or 0,
             )
+            _h1_chg = abs(getattr(token, "price_change_h1", 0) or 0)
             pos_data = {
                 "symbol": token.base_symbol,
                 "address": token.base_address,
@@ -856,6 +858,9 @@ class AITrader:
                 "peak_price": token.price_usd,
                 "current_pnl_pct": 0.0,
                 "liquidity_usd": token.liquidity_usd,  # for dynamic slippage on exit
+                # Scalp mode: high 1h volatility → tight exits to secure quick profits
+                "scalp_mode": _h1_chg >= config.SCALP_MODE_VOL_THRESHOLD,
+                "entry_h1_vol": _h1_chg,
             }
 
             if token.chain_id == "solana" and self.solana.is_connected:
@@ -974,37 +979,46 @@ class AITrader:
                     if prev > 0:
                         pos["price_change_m5"] = (current - prev) / prev * 100
 
-                    # ── 1. Spike capture: only sell the spike if already well in profit
-                    # Don't sell early runners — only take spikes when you've already
-                    # captured a solid gain (>25%). Otherwise you sell the start of a moon.
-                    if prev > 0 and pnl_pct > 0.25 and current > prev:
+                    scalp = pos.get("scalp_mode", False)
+
+                    # ── 1. Spike capture: sell the pump before the inevitable dump ─
+                    # Scalp mode: exit at any 10% surge once barely in profit (+8%)
+                    # Normal mode: exit 15% surge after solid gain (+15%)
+                    spike_pnl_thr  = 0.08 if scalp else 0.15
+                    spike_surge_thr = 0.10 if scalp else 0.15
+                    if prev > 0 and pnl_pct > spike_pnl_thr and current > prev:
                         surge = (current - prev) / prev
-                        if surge >= 0.15:
+                        if surge >= spike_surge_thr:
                             to_close.append((
                                 pair_addr, pos, current,
-                                f"FastMonitor spike: +{surge:.0%} in 3s (PnL +{pnl_pct:.0%})"))
+                                f"FastMonitor spike: +{surge:.0%} in 3s (PnL +{pnl_pct:.0%})"
+                                + (" [SCALP]" if scalp else "")))
                             continue
 
-                    # ── 2. Reversal after peak: price dropped fast from ATH ───
+                    # ── 2. Reversal after peak: price dropped from ATH ────────
                     peak = pos.get("peak_price", entry)
                     if peak > entry and pnl_pct > 0:
                         reversal = (peak - current) / peak
-                        # Tighter for small profits, widens as gains increase.
-                        # At +8% profit sell if -12% reversal; at +100% allow -28%.
-                        reversal_threshold = min(0.12 + pnl_pct * 0.08, 0.28)
-                        if reversal >= reversal_threshold and pnl_pct > 0.05:
+                        if scalp:
+                            # Scalp: exit the moment it drops 5% from peak
+                            reversal_threshold = config.SCALP_REVERSAL_PCT
+                            min_profit_thr = 0.04
+                        else:
+                            # Normal: tightened from 0.12+pnl*0.08 → 0.07+pnl*0.06
+                            reversal_threshold = min(0.07 + pnl_pct * 0.06, 0.20)
+                            min_profit_thr = 0.04
+                        if reversal >= reversal_threshold and pnl_pct > min_profit_thr:
                             to_close.append((
                                 pair_addr, pos, current,
                                 f"FastMonitor reversal: -{reversal:.0%} from peak "
-                                f"(PnL +{pnl_pct:.0%})"))
+                                f"(PnL +{pnl_pct:.0%})" + (" [SCALP]" if scalp else "")))
                             continue
 
                     # ── 2b. Momentum collapse: sharp 3s drop while barely in profit ─
-                    # If we haven't yet secured meaningful gains and the token is
-                    # dumping fast, exit before the loss deepens.
                     if prev > 0:
                         tick_drop = (current - prev) / prev
-                        if tick_drop <= -0.08 and pnl_pct < 0.05:
+                        collapse_thr = -0.05 if scalp else -0.07
+                        if tick_drop <= collapse_thr and pnl_pct < 0.08:
                             to_close.append((
                                 pair_addr, pos, current,
                                 f"FastMonitor momentum collapse: {tick_drop:.0%} tick "
@@ -1272,12 +1286,16 @@ class AITrader:
                 # Raise target as partials are taken — the moonshot runner rides for more
                 adj_target = pos["target_pct"] * (1 + (1 - remaining) * 0.5)
 
-                # ── Momentum hold extension: if 5m momentum still strong
-                # AND we're already in profit, extend the target by 30% to
-                # avoid cutting a still-running token at its first target.
+                # ── Scalp mode: override target to quick scalp threshold ────
+                scalp = pos.get("scalp_mode", False)
+                if scalp and adj_target > config.SCALP_TARGET_PCT:
+                    adj_target = config.SCALP_TARGET_PCT
+
+                # ── Momentum hold extension: only for non-scalp positions ───
+                # Avoid cutting a still-running swing trade at its first target.
                 m5_chg = pos.get("price_change_m5", 0)
-                if pnl_pct > 0.15 and abs(m5_chg) > 5:
-                    adj_target *= 1.30
+                if not scalp and pnl_pct > 0.15 and abs(m5_chg) > 5:
+                    adj_target *= 1.20   # reduced from 1.30 — don't overstay
                     logger.debug("%s momentum extension: target → %.1f%% (5m: %+.1f%%)",
                                  pos.get("symbol", "?"), adj_target * 100, m5_chg)
 

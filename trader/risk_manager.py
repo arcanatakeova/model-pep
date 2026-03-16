@@ -328,25 +328,29 @@ class RiskManager:
                      h1_vol*100, h6_vol*100, h24_vol*100, safety_score, stop*100)
         return stop
 
-    def dynamic_dex_target_pct(self, price_change_h24: float, score: float) -> float:
+    def dynamic_dex_target_pct(self, price_change_h24: float, score: float,
+                               price_change_h1: float = 0.0) -> float:
         """
         AI-set take-profit for each DEX trade based on momentum strength.
 
-        A token that already ran +200% in 24h has shown it CAN move big.
-        Set targets proportionally — don't cut a moonshot at +40%.
-
-          Base target = 80% of the 24h move already seen (tokens often continue)
-          Minimum     = 35% (never settle for less on a memecoin)
-          Maximum     = 250% (realistic ceiling for a 1-3 day hold)
-          Score boost = higher conviction → higher target
+        Scalp mode (|h1| >= SCALP_MODE_VOL_THRESHOLD): target is capped at
+        SCALP_TARGET_PCT — get in, grab the spike, get out.
+        Normal mode: target proportional to 24h move, minimum 25%.
         """
+        h1_vol = abs(price_change_h1 or 0)
+        if h1_vol >= config.SCALP_MODE_VOL_THRESHOLD:
+            # High-volatility token — scalp it; don't try to ride a moonshot
+            target = config.SCALP_TARGET_PCT * (1 + score * 0.2)
+            logger.debug("Scalp target: h1=%.1f%% score=%.2f → target=%.1f%%",
+                         h1_vol, score, target * 100)
+            return round(target, 3)
+
         h24 = abs(price_change_h24 or 0) / 100
-        # Tokens that already ran big can run further — set target proportionally
         if h24 > 1.0:
             base = h24 * 0.50   # Already 100%+ → target 50% of that (they continue)
         else:
-            base = max(h24 * 0.80, 0.35)
-        base = min(base, 4.00)  # 400% ceiling (was 250% — too conservative)
+            base = max(h24 * 0.80, 0.25)   # minimum 25% (was 35%)
+        base = min(base, 4.00)
         target = round(base * (1 + score * 0.4), 3)
         logger.debug("Dynamic target: h24=%.1f%% score=%.2f → target=%.1f%%",
                      h24*100, score, target*100)
@@ -391,6 +395,15 @@ class RiskManager:
         # Hard time limit
         if age_hours >= config.DEX_MAX_HOLD_HOURS:
             return True, f"Max hold time ({age_hours:.1f}h >= {config.DEX_MAX_HOLD_HOURS}h)"
+
+        # Scalp mode: exit after SCALP_STALE_MINUTES if no meaningful gain
+        if position.get("scalp_mode"):
+            stale_h = config.SCALP_STALE_MINUTES / 60
+            if age_hours >= stale_h:
+                pnl_pct = position.get("current_pnl_pct", 0)
+                if pnl_pct < config.SCALP_TARGET_PCT * 0.5:
+                    return True, (f"Scalp stale ({age_hours*60:.0f}min, "
+                                  f"only {pnl_pct:.1%} — exiting)")
 
         # Stale position: no meaningful gain after N hours
         if age_hours >= config.DEX_STALE_EXIT_HOURS:

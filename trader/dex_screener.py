@@ -56,9 +56,10 @@ JUPITER_PRICE    = "https://api.jup.ag/price/v2"
 GMGN_BASE        = "https://gmgn.ai/defi/quotation/v1"
 
 # ── Hard filters (applied before scoring) ──────────────────────────────────────
-MIN_LIQUIDITY_USD  = 5_000       # $5k — catch early pumps (was 8k: missed entries)
-MIN_VOLUME_H24_USD = 10_000      # $10k/24h (was 15k: too restrictive for new tokens)
-MIN_MARKET_CAP     = 15_000      # $15k mcap (was 30k: pump.fun starts small)
+MIN_LIQUIDITY_USD  = 8_000       # $8k — avoids near-empty pools (raised from 5k)
+MIN_VOLUME_H24_USD = 30_000      # $30k/24h — filters ghost coins (raised from 10k)
+MIN_MARKET_CAP     = 20_000      # $20k mcap floor
+MIN_TXNS_H1        = 40          # At least 40 transactions last hour (organic activity)
 MAX_MARKET_CAP     = 500_000_000 # $500M ceiling
 MAX_PAIR_AGE_HOURS = 24          # 24h max (was 96: dead tokens waste API calls)
 PREFERRED_CHAINS   = ["solana"]
@@ -494,6 +495,8 @@ class DexScreener:
             return 0.0
         if token.volume_h24 < MIN_VOLUME_H24_USD:
             return 0.0
+        if (token.buys_h1 + token.sells_h1) < MIN_TXNS_H1:
+            return 0.0
         s = 0.0
         if token.price_change_m5 > 3:
             s += 0.25
@@ -522,6 +525,13 @@ class DexScreener:
             token.score = 0.0
             return 0.0
         if token.volume_h24 < MIN_VOLUME_H24_USD:
+            token.score = 0.0
+            return 0.0
+        if (token.buys_h1 + token.sells_h1) < MIN_TXNS_H1:
+            token.score = 0.0
+            return 0.0
+        # Fewer than 30 unique wallets 24h = wash-trading / manipulation risk
+        if token.unique_wallets_24h > 0 and token.unique_wallets_24h < 30:
             token.score = 0.0
             return 0.0
         if token.market_cap > 0 and token.market_cap < MIN_MARKET_CAP:
@@ -657,18 +667,18 @@ class DexScreener:
 
         # Absolute buy count (not just ratio) matters — low-liquidity pairs
         # can have 100% buy ratio with only 5 transactions (manipulated)
-        if bsr > 0.75 and total_txns_h1 > 200:
+        if bsr > 0.75 and total_txns_h1 > 300:
             score += 0.15
             signals.append(f"Frenzy: {token.buys_h1} buys/h ({bsr:.0%})")
-        elif bsr > 0.70 and total_txns_h1 > 100:
+        elif bsr > 0.70 and total_txns_h1 > 150:
             score += 0.12
             signals.append(f"Strong buys: {token.buys_h1}/h ({bsr:.0%})")
-        elif bsr > 0.65 and total_txns_h1 > 50:
+        elif bsr > 0.65 and total_txns_h1 > 80:
             score += 0.09
             signals.append(f"Buy pressure {bsr:.0%}")
-        elif bsr > 0.60 and total_txns_h1 > 20:
+        elif bsr > 0.60 and total_txns_h1 > 40:
             score += 0.05
-        elif bsr < 0.40 and total_txns_h1 > 20:
+        elif bsr < 0.40 and total_txns_h1 > 40:
             score -= 0.10   # Heavy selling
 
         # 5-min buy pressure (ultra-recent signal)
