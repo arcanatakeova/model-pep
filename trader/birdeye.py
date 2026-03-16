@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+import threading
+
 import requests
 from requests.adapters import HTTPAdapter as _HTTPAdapter
 
@@ -32,6 +34,13 @@ _session.mount("https://", _HTTPAdapter(pool_connections=20, pool_maxsize=50))
 _session.mount("http://",  _HTTPAdapter(pool_connections=20, pool_maxsize=50))
 
 logger = logging.getLogger(__name__)
+
+# ── Global Birdeye rate limiter ────────────────────────────────────────────
+# Free tier: 1 req/s.  All threads share this lock so requests are serialised
+# and we never fire multiple concurrent calls that immediately 429.
+_rate_lock   = threading.Lock()
+_last_req_ts = 0.0
+_MIN_INTERVAL = 1.05   # seconds between requests (slight margin over 1 s)
 
 BIRDEYE_BASE = "https://public-api.birdeye.so"
 _CHAIN = "solana"
@@ -428,22 +437,30 @@ class BirdeyeClient:
         """Make a GET request to the Birdeye API."""
         if not self.enabled:
             return None
+        global _last_req_ts
         url = f"{BIRDEYE_BASE}{path}"
         is_premium = any(path.startswith(p) for p in self._PREMIUM_PATHS)
         for attempt in range(3):
             if not self.enabled:   # re-check — another thread may have disabled
                 return None
+            # ── Rate-limit: max 1 req/s across all threads ──────────────────
+            with _rate_lock:
+                now = time.time()
+                wait_for = _MIN_INTERVAL - (now - _last_req_ts)
+                if wait_for > 0:
+                    time.sleep(wait_for)
+                _last_req_ts = time.time()
+            # ────────────────────────────────────────────────────────────────
             try:
                 resp = self._session.get(url, params=params, timeout=timeout)
                 if resp.status_code == 429:
-                    wait = 2 ** attempt
-                    logger.warning("Birdeye rate limit — waiting %ds", wait)
-                    time.sleep(wait)
+                    # Shouldn't happen often now, but back off if it does
+                    logger.debug("Birdeye 429 on %s — backing off", path)
+                    time.sleep(2 ** attempt)
                     continue
                 if resp.status_code in (401, 403):
                     if is_premium:
-                        # Premium endpoint not available on this plan — skip silently
-                        logger.debug("Birdeye %s: not available on current plan (401)", path)
+                        logger.debug("Birdeye %s: not available on current plan", path)
                     else:
                         logger.error(
                             "Birdeye: invalid API key — disabling Birdeye for this session")
@@ -457,7 +474,7 @@ class BirdeyeClient:
             except Exception as e:
                 logger.debug("Birdeye request error (%s): %s", path, e)
                 if attempt < 2:
-                    time.sleep(2 ** attempt)
+                    time.sleep(1)
         return None
 
     # ─── Cache helpers ─────────────────────────────────────────────────────────
