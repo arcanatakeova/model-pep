@@ -56,7 +56,7 @@ JUPITER_PRICE    = "https://api.jup.ag/price/v2"
 GMGN_BASE        = "https://gmgn.ai/defi/quotation/v1"
 
 # ── Hard filters (applied before scoring) ──────────────────────────────────────
-MIN_LIQUIDITY_USD  = 5_000       # $5k — catch early pumps (was 8k: missed entries)
+MIN_LIQUIDITY_USD  = 15_000      # $15k — require meaningful liquidity for safer exits
 MIN_VOLUME_H24_USD = 10_000      # $10k/24h (was 15k: too restrictive for new tokens)
 MIN_MARKET_CAP     = 15_000      # $15k mcap (was 30k: pump.fun starts small)
 MAX_MARKET_CAP     = 500_000_000 # $500M ceiling
@@ -113,8 +113,11 @@ class DexToken:
     buys_m5: int = 0
     sells_m5: int = 0
     source: str = "dexscreener"     # Where this token was discovered
-    holder_count: int = 0           # Unique holders (from Birdeye token_overview)
+    holder_count: Optional[int] = None  # None=unknown, 0=verified empty
     unique_wallets_24h: int = 0     # Unique trading wallets last 24h (Birdeye)
+    birdeye_price_confirmed: bool = False  # True = Birdeye agreed on price
+    ta_score: Optional[float] = None        # [-1, +1] technical analysis score
+    ta_confidence: Optional[float] = None   # 0-1 data quality confidence
 
     @property
     def buy_sell_ratio_h1(self) -> float:
@@ -156,6 +159,8 @@ class DexToken:
             "safety_score": self.safety_report.safety_score if self.safety_report else None,
             "risk_level": self.safety_report.risk_level if self.safety_report else None,
             "risk_flags": self.safety_report.risk_flags if self.safety_report else [],
+            "ta_score": round(self.ta_score, 3) if self.ta_score is not None else None,
+            "ta_confidence": round(self.ta_confidence, 3) if self.ta_confidence is not None else None,
         }
 
 
@@ -169,7 +174,7 @@ class DexScreener:
 
     def __init__(self):
         self._cache: dict = {}
-        self._cache_ttl = 25   # 25s — aggressive freshness for fast markets
+        self._cache_ttl = config.DATA_CACHE_TTL  # Use config (8s) — match scan frequency
         self._safety_checker = TokenSafetyChecker()
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=30, thread_name_prefix="dex-scanner")
@@ -266,6 +271,7 @@ class DexScreener:
                         bp = fresh_prices.get(t.base_address)
                         if bp and bp.price_usd > 0:
                             t.price_usd = bp.price_usd
+                            t.birdeye_price_confirmed = True
                             if bp.market_cap > 0:
                                 t.market_cap = bp.market_cap
                             if bp.liquidity_usd > 0:
@@ -308,10 +314,13 @@ class DexScreener:
                 scored.append(t)
         scored.sort(key=lambda t: t.score, reverse=True)
 
-        # Mark returned tokens as evaluated so they won't repeat immediately
+        # Mark returned tokens as evaluated so they won't repeat immediately.
+        # High-volatility tokens use a shorter block (180s) so that a crash-and-recover
+        # bounce is still caught within the same 3-minute window.
         now = time.time()
         for t in scored:
-            self._evaluated[t.pair_address] = now
+            block_secs = 180 if t.score >= 0.70 else self._EVAL_BLOCK_SECS
+            self._evaluated[t.pair_address] = now + block_secs - self._EVAL_BLOCK_SECS
 
         logger.info(
             "Trending scan: %d sources → %d raw → %d fresh (-%d blacklisted) → %d scored >= %.2f",
@@ -323,7 +332,8 @@ class DexScreener:
         """
         New pair sniping: DexScreener search + Birdeye new listings + Pump.fun new.
         """
-        # All sources are activity-ranked — no keyword filtering
+        # Mix of activity-ranked sources — includes DexScreener/GMGN as reliable fallbacks
+        # in case Pump.fun/Raydium/Birdeye APIs are down or rate-limited.
         futures = {
             "be_new":         self._executor.submit(self._fetch_birdeye_new_listings),
             "pump_new":       self._executor.submit(self._fetch_pumpfun_new),
@@ -331,6 +341,9 @@ class DexScreener:
             "pump_active":    self._executor.submit(self._fetch_pumpfun_tokens),
             "raydium_amm_p1": self._executor.submit(self._fetch_raydium_pools, 1),
             "raydium_clmm":   self._executor.submit(self._fetch_raydium_clmm),
+            # Reliable fallbacks — DexScreener and GMGN rarely fail
+            "ds_solana":      self._executor.submit(self._fetch_dexscreener_top_solana),
+            "gmgn":           self._executor.submit(self._fetch_gmgn_trending),
         }
 
         raw: list[DexToken] = []
@@ -338,7 +351,7 @@ class DexScreener:
             try:
                 raw.extend(fut.result(timeout=12))
             except Exception as e:
-                logger.debug("new_pairs %s error: %s", key, e)
+                logger.warning("new_pairs %s failed: %s", key, e)
 
         # Filter by age + liquidity, skip native infrastructure tokens
         _SKIP_BASE = {
@@ -399,12 +412,27 @@ class DexScreener:
         """
         Full scan combining trending + new pairs. Used by main trading cycle.
         """
+        # Dynamic min_score: lower threshold in quiet/dead markets to find more candidates.
+        # In a bull run, raise it to be selective.
+        min_score = config.DEX_MIN_SCORE  # default 0.50
+        try:
+            from market_intelligence import get_engine as _mi_eng
+            ms = _mi_eng().get_market_summary()
+            if ms.get("high_score_1h", 1) == 0 and ms.get("sentiment_score", 0.5) < 0.45:
+                # Dead market: zero high-scorers in last hour → open up
+                min_score = max(0.42, config.DEX_MIN_SCORE - 0.08)
+            elif ms.get("context_mult", 1.0) >= 1.30:
+                # Strong bull: be selective
+                min_score = min(0.60, config.DEX_MIN_SCORE + 0.05)
+        except Exception:
+            pass
+
         # Run both in parallel since they hit different API endpoints
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            f_trend = ex.submit(self.get_trending_tokens, config.DEX_MIN_SCORE)
-            f_new   = ex.submit(self.get_new_pairs, config.NEW_PAIR_MAX_AGE_HOURS, config.DEX_MIN_SCORE)
-            trending  = f_trend.result(timeout=60)
-            new_pairs = f_new.result(timeout=60)
+            f_trend = ex.submit(self.get_trending_tokens, min_score)
+            f_new   = ex.submit(self.get_new_pairs, config.NEW_PAIR_MAX_AGE_HOURS, min_score)
+            trending  = f_trend.result(timeout=120)
+            new_pairs = f_new.result(timeout=120)
 
         all_tokens = trending + new_pairs
         seen = set()
@@ -425,14 +453,20 @@ class DexScreener:
             narr_str = ", ".join(
                 f"{n}({g})" for n, g in ms.get("hot_narratives", [])[:3]
             ) or "none"
+            # Trade performance (actual closed trades, 24h)
+            tn = ms.get("trade_n", 0)
+            if tn > 0:
+                trade_str = (f"trades: {ms['trade_win_rate']:.0%} win "
+                             f"avg={ms['trade_avg_pnl']:+.1f}% "
+                             f"${ms['trade_total_pnl']:+.2f} ({tn})")
+            else:
+                trade_str = "trades: none yet"
             logger.info(
                 "[MARKET] %s (%.2f) | seen today: %d tokens (+%d scored≥0.6 last 1h) "
-                "| hot sectors: %s | outcomes: win=%s avg=%+.0f%% (%d trades) "
-                "| context: ×%.2f",
+                "| hot sectors: %s | %s | context: ×%.2f",
                 ms["sentiment"], ms["sentiment_score"],
                 ms["tokens_seen_today"], ms["high_score_1h"],
-                narr_str,
-                f"{ms['win_rate_1h']:.0%}", ms["avg_gain_1h"], ms["outcome_n"],
+                narr_str, trade_str,
                 ms["context_mult"],
             )
         except Exception:
@@ -534,6 +568,11 @@ class DexScreener:
                 token.market_cap / token.liquidity_usd > 200):
             token.score = 0.0
             return 0.0
+        # Hard-block tokens < 10 minutes old — highest rug risk window
+        if token.age_hours is not None and token.age_hours < 0.167:
+            token.score = 0.0
+            token.signals = [f"BLOCKED: too new ({token.age_hours*60:.0f}min old)"]
+            return 0.0
 
         # ── 5-minute momentum (25%) — best predictor for short trades ─────
         # If it's moving hard right now, that's the signal we care about most
@@ -611,9 +650,11 @@ class DexScreener:
             score -= 0.05   # Too big for memecoin alpha
 
         # ── Volume acceleration (20%) — is buying pressure building? ──────
-        if token.volume_h1 > 0 and token.volume_h24 > 0:
+        # Require minimum $1k h1 volume to avoid noise at low volumes
+        _MIN_H1_VOL = 1000.0
+        if token.volume_h1 > _MIN_H1_VOL and token.volume_h24 > 0:
             hourly_avg = token.volume_h24 / 24
-            if hourly_avg > 0:
+            if hourly_avg > _MIN_H1_VOL / 24:
                 vol_ratio = token.volume_h1 / hourly_avg
                 if vol_ratio > 10:
                     score += 0.20
@@ -641,9 +682,10 @@ class DexScreener:
             _vol_ratio = token.volume_h1 / _hourly_avg if _hourly_avg > 0 else 0
         _is_burst = (
             _vol_ratio > 5
+            and token.volume_h1 > _MIN_H1_VOL  # Absolute volume floor
             and token.price_change_h1 > 10
             and token.buys_h1 > 150           # raised from 100 — need real conviction
-            and token.price_change_m5 > -5    # not already reversing
+            and token.price_change_m5 > 2     # MUST be actively pumping (not flat/dumping)
         )
         if _is_burst:
             score += 0.15
@@ -703,45 +745,28 @@ class DexScreener:
         elif liq > 50_000:
             score += 0.02
 
-        # ── Age bonus (10%) — early mover advantage (boosted) ────────────
+        # ── Age penalty — extremely new tokens are most dangerous ──────
         age = token.age_hours
         if age is not None:
-            if age < 0.25:
-                score += 0.15   # <15min — maximum alpha window
-                signals.append("FRESH (<15min)")
-            elif age < 0.5:
-                score += 0.12   # Brand new (<30min)
-                signals.append("Brand new (<30min)")
+            if age < 0.5:
+                score -= 0.20   # <30min — highest rug risk window
+                signals.append(f"DANGER: extremely new ({age*60:.0f}min old)")
             elif age < 1:
-                score += 0.09
+                score -= 0.10
                 signals.append(f"Very new ({age*60:.0f}min old)")
-            elif age < 3:
-                score += 0.06
-                signals.append(f"New ({age*60:.0f}min old)")
-            elif age < 6:
-                score += 0.04
-            elif age < 12:
-                score += 0.02
             elif age > 18:
                 score -= 0.05   # Stale — momentum probably dead
 
         # ── Holder concentration guard (Birdeye token_overview data) ─────
-        if token.holder_count > 0:
-            if token.holder_count < 20:
-                # <20 holders = almost certainly a rug (hard block)
+        if token.holder_count is not None and token.holder_count > 0:
+            if token.holder_count < 100:
+                # <100 holders = almost certainly a rug (hard block)
                 token.score = 0.0
                 token.signals = [f"BLOCKED: only {token.holder_count} holders"]
                 return 0.0
-            elif token.holder_count < 50:
-                # 20-50: risky but allow if token is very new (< 1h old)
-                if age is not None and age < 1:
-                    score -= 0.05   # Mild penalty — new tokens always start small
-                    signals.append(f"New token, {token.holder_count} holders")
-                else:
-                    score -= 0.15   # Older token with few holders = red flag
-                    signals.append(f"Few holders ({token.holder_count})")
-            elif token.holder_count < 200:
-                score -= 0.06
+            elif token.holder_count < 500:
+                score -= 0.15
+                signals.append(f"Few holders ({token.holder_count})")
             elif token.holder_count > 2000:
                 score += 0.04
                 signals.append(f"Good distribution ({token.holder_count} holders)")
@@ -758,7 +783,7 @@ class DexScreener:
             score -= 0.05   # Thin trading = manipulation risk
 
         # Holder growth velocity: if holders growing fast → accumulation phase
-        if token.holder_count > 0 and token.age_hours and token.age_hours > 0:
+        if token.holder_count is not None and token.holder_count > 0 and token.age_hours and token.age_hours > 0:
             holder_velocity = token.holder_count / token.age_hours  # holders/hour
             if holder_velocity > 200:
                 score += 0.06
@@ -847,6 +872,13 @@ class DexScreener:
         elif token.source == "raydium":
             score += 0.02
 
+        # ── Birdeye price confirmation bonus ─────────────────────────────
+        # Small bonus for Birdeye-confirmed price — reliable real-time quote.
+        # No penalty for unconfirmed: new Pump.fun tokens often aren't indexed
+        # by Birdeye yet but are perfectly tradeable via PumpSwap direct.
+        if token.chain_id == "solana" and token.birdeye_price_confirmed:
+            score += 0.02
+
         # ── Solana chain preference ───────────────────────────────────────
         if token.chain_id == "solana":
             score += 0.02
@@ -867,12 +899,10 @@ class DexScreener:
                 if not safety.is_safe_to_trade:
                     # Conviction-based override: allow MEDIUM-risk tokens if score
                     # is high enough (good momentum beats borderline safety flags)
-                    if score >= 0.50 and safety.risk_level == "MEDIUM":
-                        score *= 0.70   # 30% penalty for MEDIUM risk override
-                        signals.append(f"OVERRIDE: MEDIUM risk (conviction {score:.2f})")
-                    elif score >= 0.70 and safety.risk_level == "HIGH":
-                        score *= 0.45   # 55% penalty for HIGH risk — possible but costly
-                        signals.append(f"OVERRIDE: HIGH risk (strong signal)")
+                    if safety.risk_level == "HIGH":
+                        score = 0.0  # Hard block HIGH risk tokens
+                    elif safety.risk_level == "MEDIUM":
+                        score *= 0.50  # Severe penalty
                     else:
                         token.score = 0.0
                         token.signals = [f"BLOCKED: {safety.risk_level} risk"] + safety.risk_flags[:2]
@@ -889,10 +919,10 @@ class DexScreener:
                     flag = safety.risk_flags[0] if safety.risk_flags else "caution"
                     signals.append(f"MEDIUM risk: {flag}")
                 elif safety.risk_level == "HIGH":
-                    score *= 0.50   # Heavy penalty for HIGH risk
-                    signals.append(f"HIGH risk ({safety.safety_score:.2f})")
+                    score = 0.0   # Hard block HIGH risk tokens
+                    signals.append(f"BLOCKED: HIGH risk ({safety.safety_score:.2f})")
             else:
-                score *= 0.88   # Unverified — mild penalty only
+                score *= 0.60   # Unverified — heavy penalty (no safety data = assume risky)
 
         # ── Market intelligence context ───────────────────────────────────
         # Apply market-wide knowledge: narrative heat + macro sentiment.
@@ -903,7 +933,7 @@ class DexScreener:
             # Narrative boost: is this token's category currently outperforming?
             narr_boost, narr_label = _mi.get_narrative_boost(token.base_symbol or "")
             if narr_boost > 0.0:
-                score += narr_boost
+                score += min(narr_boost, 0.10)  # Cap narrative boost at 10%
                 signals.append(narr_label)
             # Market context multiplier: HOT/COLD adjusts the score slightly
             mkt_mult = _mi.get_market_context_multiplier()
@@ -912,30 +942,106 @@ class DexScreener:
         except Exception:
             pass   # market intelligence is advisory — never block a trade
 
+        # ── Technical indicators enhancement (OHLCV-based) ────────────────
+        # Only run for tokens that already look promising (avoids excess API calls).
+        if config.TA_ENABLED and score >= config.TA_MIN_SCORE_THRESHOLD and token.chain_id == "solana":
+            try:
+                from ta_layer import fetch_ta_signals
+                be = _get_birdeye()
+                if be and be.enabled:
+                    ta_s, ta_conf, ta_labels = fetch_ta_signals(token.base_address, be)
+                    token.ta_score = ta_s
+                    token.ta_confidence = ta_conf
+                    if ta_conf > 0:
+                        ta_adjustment = ta_s * ta_conf * config.TA_MAX_ADJUSTMENT
+                        score += ta_adjustment
+                        if ta_labels:
+                            signals.extend(ta_labels[:2])
+            except Exception:
+                pass   # TA is advisory — never block a trade
+
+        # ── Multi-timeframe pump-and-dump detection ────────────────────────
+        # ALL timeframes red-hot simultaneously = likely distribution phase.
+        # Smart money dumps while retail chases the final leg up.
+        _m5_hot = token.price_change_m5 > 10
+        _h1_hot = token.price_change_h1 > 50
+        _h6_hot = h6 > 100 if h6 else False
+        _h24_hot = h24 > 200 if h24 else False
+        if _m5_hot and _h1_hot and (_h6_hot or _h24_hot):
+            score *= 0.60
+            signals.append("LATE ENTRY: all timeframes overheated")
+
+        # ── Direction gate: NEVER buy tokens with negative short-term momentum ──
+        # Volume spikes during dumps = classic pump-and-dump exit liquidity trap.
+        # Require at least flat or positive 5m AND 1h momentum to enter.
+        m5 = token.price_change_m5
+        h1 = token.price_change_h1
+        if m5 < -3:
+            # Active dump — hard block regardless of score
+            score *= 0.30
+            signals.append(f"DUMP: {m5:.1f}% 5m")
+        elif m5 < 0 and h1 < 0:
+            # Both timeframes negative — fading, not a buy
+            score *= 0.50
+            signals.append(f"Fading: {m5:.1f}%/5m {h1:.1f}%/1h")
+
         token.score = float(np.clip(score, 0.0, 1.0))
         token.signals = signals[:5]   # cap at 5 signal tags
         return token.score
 
     def _run_concurrent_safety_checks(self, tokens: list[DexToken]):
-        """Run safety checks for all tokens in parallel, update in-place."""
+        """Run safety checks + Birdeye overview (holder count) for all tokens in parallel."""
         sol_tokens = [t for t in tokens
                       if t.chain_id == "solana" and t.safety_report is None]
         if not sol_tokens:
             return
+
+        be = _get_birdeye()
 
         def _check(t: DexToken):
             try:
                 t.safety_report = self._safety_checker.check_token_safety(t.base_address)
             except Exception as e:
                 logger.debug("Safety check error %s: %s", t.base_symbol, e)
+            # Enrich with holder count + unique wallets from Birdeye overview
+            if be and be.enabled and t.holder_count is None:
+                try:
+                    ov = be.get_token_overview(t.base_address)
+                    if ov:
+                        raw_h = ov.get("holder") or ov.get("holderCount")
+                        if raw_h is not None:
+                            t.holder_count = int(raw_h)
+                        raw_w = ov.get("uniqueWallet24h") or ov.get("uniqueWallets24h")
+                        if raw_w is not None:
+                            t.unique_wallets_24h = int(raw_w)
+                        # 1h volume from Birdeye — more accurate than DexScreener for scoring
+                        raw_v1h = ov.get("v1hUSD") or ov.get("v1h")
+                        if raw_v1h and float(raw_v1h) > 0:
+                            t.volume_h1 = float(raw_v1h)
+                        # Birdeye price/liquidity from overview if not already confirmed
+                        if not t.birdeye_price_confirmed:
+                            ov_price = ov.get("price")
+                            if ov_price and float(ov_price) > 0:
+                                t.price_usd = float(ov_price)
+                                t.birdeye_price_confirmed = True
+                            ov_liq = ov.get("liquidity")
+                            if ov_liq and float(ov_liq) > 0:
+                                t.liquidity_usd = float(ov_liq)
+                except Exception as e:
+                    logger.debug("Overview fetch error %s: %s", t.base_symbol, e)
 
         futures = [self._executor.submit(_check, t) for t in sol_tokens]
         # Wait with a generous timeout — safety checks can be slow
-        for f in concurrent.futures.as_completed(futures, timeout=20):
-            try:
-                f.result()
-            except Exception:
-                pass
+        try:
+            for f in concurrent.futures.as_completed(futures, timeout=90):
+                try:
+                    f.result()
+                except Exception:
+                    pass
+        except concurrent.futures.TimeoutError as e:
+            done = sum(1 for f in futures if f.done())
+            logger.warning("Safety checks partial timeout — %d/%d completed (%s). "
+                           "Proceeding with available data.", done, len(futures), e)
 
     # ─── Data Sources ─────────────────────────────────────────────────────────
 

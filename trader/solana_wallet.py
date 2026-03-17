@@ -140,7 +140,8 @@ class SolanaWallet:
         self._pubkey    = None
         self._client    = None
         self._sol_price_cache: tuple[float, float] = (0.0, 0.0)  # (price, ts)
-        self._cached_lamports: int = 0  # last known-good lamport balance (fallback on RPC 429)
+        self._cached_lamports: int = 0       # last known-good lamport balance (fallback on RPC 429)
+        self._cached_lamports_ts: float = 0.0  # timestamp of last successful lamport fetch
 
         if private_key_b58:
             self._init_wallet()
@@ -338,17 +339,24 @@ class SolanaWallet:
             return 0.0
 
     def get_sol_balance_lamports(self) -> int:
-        """Get SOL balance in lamports. Returns cached value on RPC failure (avoids false-low on 429)."""
+        """Get SOL balance in lamports. Returns cached value on RPC failure (avoids false-low on 429).
+        Cached value is only trusted for 30 seconds; stale cache is NOT used (returns 0)
+        so trades are blocked rather than proceeding with insufficient SOL."""
         if not self.is_connected:
             return 0
         try:
             val = self._client.get_balance(self._keypair.pubkey()).value
-            self._cached_lamports = val  # update cache on success
+            self._cached_lamports = val
+            self._cached_lamports_ts = time.time()
             return val
         except Exception as e:
-            if self._cached_lamports > 0:
-                logger.debug("get_sol_balance_lamports RPC error (%s) — using cached %d", e, self._cached_lamports)
+            cache_age = time.time() - self._cached_lamports_ts
+            if self._cached_lamports > 0 and cache_age < 30:
+                logger.debug("get_sol_balance_lamports RPC error (%s) — using cached %d (age=%.0fs)",
+                             e, self._cached_lamports, cache_age)
                 return self._cached_lamports
+            if cache_age >= 30:
+                logger.warning("Lamport cache stale (%.0fs) — blocking trade until fresh balance obtained", cache_age)
             return 0
 
     def get_token_balance(self, mint_address: str) -> float:
@@ -651,19 +659,23 @@ class SolanaWallet:
 
         # PumpSwap AMM math overflow (0x1787) — the direct on-chain path can
         # overflow for tokens with very large base_reserve * sol_in product.
-        # Try Jupiter first, then Raydium as secondary fallback.
+        # Try Jupiter → Raydium → PumpPortal as fallback chain.
         if sig == "PUMPSWAP_OVERFLOW":
             logger.info("PumpSwap overflow fallback: retrying %s via Jupiter",
                         output_mint[:12])
             tx_b64, out_amount, price_impact = self._quote_and_build_jupiter(
                 input_mint, output_mint, raw_input_amount, slippage_bps)
             if tx_b64 is None:
-                logger.info("Jupiter unavailable — trying Raydium for PumpSwap overflow token")
+                logger.info("Jupiter no route — trying Raydium for PumpSwap overflow token")
                 tx_b64, out_amount, price_impact = self._quote_and_build_raydium(
                     input_mint, output_mint, raw_input_amount, slippage_bps)
             if tx_b64 is None:
+                logger.info("Raydium no route — trying PumpPortal for PumpSwap overflow token")
+                tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
+                    input_mint, output_mint, raw_input_amount, slippage_bps, pool="pumpswap")
+            if tx_b64 is None:
                 return SwapResult(success=False,
-                                  error="PumpSwap overflow — Jupiter + Raydium both failed")
+                                  error="PumpSwap overflow — Jupiter + Raydium + PumpPortal all failed")
             sig = self._sign_and_send_jito(tx_b64, priority_fee)
             if not sig:
                 sig = self._sign_and_send_rpc(tx_b64)
@@ -1083,14 +1095,14 @@ class SolanaWallet:
                 return None, 0, 0.0
 
             # ── Early overflow guard ───────────────────────────────────────────
-            # PumpSwap AMM computes k = base_reserve * quote_reserve as u64.
-            # For high-supply tokens this overflows → on-chain error 0x1787.
-            # Detect it here (via logarithms to avoid Python bigint issues) and
-            # bail before wasting RPC calls on a transaction that will always fail.
+            # PumpSwap AMM uses u128 for k = base_reserve * quote_reserve.
+            # Only bail if k exceeds u128 (ln(2^127) ≈ 88.03).
+            # Previous u64 threshold (43.668) was too aggressive and blocked
+            # all graduated Pump.fun tokens with normal reserves.
             import math as _math
-            _LOG_U64_MAX = 43.668  # ln(2^63) — use 63 bits for safety margin
+            _LOG_U128_MAX = 88.03  # ln(2^127) — u128 safety margin
             if (_math.log(float(base_reserve)) + _math.log(float(quote_reserve))
-                    > _LOG_U64_MAX):
+                    > _LOG_U128_MAX):
                 logger.warning(
                     "PumpSwap: k-overflow detected for pool %s "
                     "(base=%d quote=%d) — token untradeable via direct path",
