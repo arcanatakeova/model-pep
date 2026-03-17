@@ -736,7 +736,7 @@ class AITrader:
             def _validate(args):
                 """
                 Returns (token, size_usd, safety) if validation passes, else None.
-                All network calls happen here so they run in parallel.
+                Runs concurrent network calls: Jupiter price confirmation + holder check.
                 """
                 tok, sz, sfty = args
 
@@ -745,6 +745,25 @@ class AITrader:
                     logger.warning("SKIP %s: only %d holders (rug risk)",
                                    tok.base_symbol, sfty.holder_count)
                     return None
+
+                # Jupiter price confirmation: reject if Jupiter price deviates >20%
+                # from DexScreener price (stale data or being manipulated).
+                if tok.base_address and tok.price_usd > 0:
+                    try:
+                        jup_price = self._get_jupiter_price(tok.base_address)
+                        if jup_price and jup_price > 0:
+                            spread = abs(jup_price - tok.price_usd) / tok.price_usd
+                            if spread > 0.20:
+                                logger.warning(
+                                    "SKIP %s: Jupiter price $%.8f vs DexScreener $%.8f "
+                                    "(%.0f%% spread — stale or manipulated data)",
+                                    tok.base_symbol, jup_price, tok.price_usd, spread * 100)
+                                return None
+                            # Update token price to the real Jupiter quote
+                            tok.price_usd = jup_price
+                    except Exception as e:
+                        logger.debug("Jupiter price check for %s failed: %s", tok.base_symbol, e)
+                        # Don't reject on API failure — just use DexScreener price
 
                 return (tok, sz, sfty)
 
@@ -969,6 +988,15 @@ class AITrader:
                     pos["current_price"]   = current
                     pos["current_pnl_pct"] = pnl_pct
                     pos["peak_price"]      = max(pos.get("peak_price", entry), current)
+
+                    # Feed live prices into market intelligence outcome learning
+                    # This resolves 1h/4h outcome records so calibration actually works
+                    if mint:
+                        try:
+                            from market_intelligence import get_engine as _mi_engine
+                            _mi_engine().record_price_update(mint, current)
+                        except Exception:
+                            pass
 
                     prev = pos.get("fast_prev_price", entry)
                     pos["fast_prev_price"] = current
