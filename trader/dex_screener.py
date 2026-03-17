@@ -425,14 +425,20 @@ class DexScreener:
             narr_str = ", ".join(
                 f"{n}({g})" for n, g in ms.get("hot_narratives", [])[:3]
             ) or "none"
+            # Trade performance (actual closed trades, 24h)
+            tn = ms.get("trade_n", 0)
+            if tn > 0:
+                trade_str = (f"trades: {ms['trade_win_rate']:.0%} win "
+                             f"avg={ms['trade_avg_pnl']:+.1f}% "
+                             f"${ms['trade_total_pnl']:+.2f} ({tn})")
+            else:
+                trade_str = "trades: none yet"
             logger.info(
                 "[MARKET] %s (%.2f) | seen today: %d tokens (+%d scored≥0.6 last 1h) "
-                "| hot sectors: %s | outcomes: win=%s avg=%+.0f%% (%d trades) "
-                "| context: ×%.2f",
+                "| hot sectors: %s | %s | context: ×%.2f",
                 ms["sentiment"], ms["sentiment_score"],
                 ms["tokens_seen_today"], ms["high_score_1h"],
-                narr_str,
-                f"{ms['win_rate_1h']:.0%}", ms["avg_gain_1h"], ms["outcome_n"],
+                narr_str, trade_str,
                 ms["context_mult"],
             )
         except Exception:

@@ -950,17 +950,28 @@ class AITrader:
                 time.sleep(3)
                 if not self._dex_positions:
                     continue
+                mints_and_pairs = [(pos["address"], pair_addr, pos)
+                                   for pair_addr, pos in self._dex_positions.items()
+                                   if pos.get("chain") == "solana"]
+                if not mints_and_pairs:
+                    continue
+                mints = [m for m, _, _ in mints_and_pairs]
+
+                # Try Birdeye first; fall back to Jupiter price API if unavailable
                 be = _get_birdeye()
-                if not be or not be.enabled:
-                    continue
+                prices = {}
+                if be and be.enabled:
+                    prices = be.get_multi_price(mints) or {}
 
-                # Batch-fetch all held Solana token prices in one API call
-                mints = [pos["address"] for pos in self._dex_positions.values()
-                         if pos.get("chain") == "solana"]
-                if not mints:
-                    continue
-
-                prices = be.get_multi_price(mints)
+                # Jupiter fallback for any mints Birdeye didn't return
+                missing = [m for m in mints if m not in prices or not prices[m]]
+                if missing:
+                    for mint in missing:
+                        jp = self._get_jupiter_price(mint)
+                        if jp and jp > 0:
+                            from types import SimpleNamespace
+                            prices[mint] = SimpleNamespace(
+                                price_usd=jp, volume_24h_usd=0)
 
                 to_close = []
                 for pair_addr, pos in list(self._dex_positions.items()):
@@ -1441,6 +1452,16 @@ class AITrader:
         from portfolio import _MAX_CLOSED_TRADES_MEMORY
         if len(self.portfolio.closed_trades) > _MAX_CLOSED_TRADES_MEMORY:
             self.portfolio._archive_old_trades()
+
+        # ── Feed outcome to market intelligence ────────────────────────
+        try:
+            from market_intelligence import get_engine as _mi_engine
+            _mi_engine().record_trade_outcome(
+                pnl_pct=trade_record.get("pnl_pct", 0),
+                pnl_usd=trade_record.get("pnl_usd", 0),
+            )
+        except Exception:
+            pass
 
         # ── Trigger per-trade review + periodic repivot on every close ────
         self._dex_closed_count += 1

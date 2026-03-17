@@ -139,6 +139,9 @@ class MarketIntelligenceEngine:
         self._stats_path = os.path.join(os.path.dirname(__file__), "market_outcomes.json")
         self._outcome_stats: dict = self._load_stats()
 
+        # Actual trade outcomes (fed from main.py on every DEX close)
+        self._trade_outcomes: deque = deque(maxlen=500)  # (timestamp, pnl_pct, pnl_usd)
+
         logger.info("MarketIntelligenceEngine online — tracking market breadth + sentiment")
 
     # ── Feed API (called by DexScreener) ──────────────────────────────────────
@@ -200,6 +203,11 @@ class MarketIntelligenceEngine:
 
                 if elapsed >= 14400 and rec.outcome_4h_pct is None:
                     rec.outcome_4h_pct = gain_pct
+
+    def record_trade_outcome(self, pnl_pct: float, pnl_usd: float) -> None:
+        """Record an actual closed trade outcome for market stats."""
+        with self._lock:
+            self._trade_outcomes.append((time.time(), pnl_pct, pnl_usd))
 
     # ── Query API (called by scoring + logging) ───────────────────────────────
 
@@ -347,6 +355,16 @@ class MarketIntelligenceEngine:
             avg_1h  = (sum(r.outcome_1h_pct for r in with_outcome)
                        / len(with_outcome) if with_outcome else 0)
 
+            # Actual trade outcomes (24h window)
+            cutoff_24h = now - 86400
+            recent_trades = [(ts, pnl, usd) for ts, pnl, usd in self._trade_outcomes
+                             if ts > cutoff_24h]
+            trade_n     = len(recent_trades)
+            trade_wins  = sum(1 for _, _, u in recent_trades if u > 0)
+            trade_wr    = trade_wins / trade_n if trade_n else 0
+            trade_avg   = sum(p for _, p, _ in recent_trades) / trade_n if trade_n else 0
+            trade_total = sum(u for _, _, u in recent_trades)
+
         return {
             "sentiment":        sentiment_label,
             "sentiment_score":  round(sentiment_score, 3),
@@ -358,6 +376,11 @@ class MarketIntelligenceEngine:
             "outcome_n":        len(with_outcome),
             "win_rate_1h":      round(win_1h, 2),
             "avg_gain_1h":      round(avg_1h, 1),
+            # Actual trade stats
+            "trade_n":          trade_n,
+            "trade_win_rate":   round(trade_wr, 2),
+            "trade_avg_pnl":    round(trade_avg, 1),
+            "trade_total_pnl":  round(trade_total, 2),
             "calibration":      self.get_outcome_calibration(),
         }
 
