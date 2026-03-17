@@ -134,7 +134,7 @@ class BirdeyeClient:
             if now - ts < self._PRICE_TTL:
                 return p
 
-        data = self._get("/defi/price", {"address": mint_address})
+        data = self._get("/defi/price", {"address": mint_address, "include_liquidity": "true"})
         if not data or not data.get("success"):
             return None
 
@@ -142,9 +142,9 @@ class BirdeyeClient:
         price = BirdeyePrice(
             address=mint_address,
             price_usd=float(d.get("value", 0) or 0),
-            price_change_24h_pct=float(d.get("priceChange24H", 0) or 0),
-            volume_24h_usd=float(d.get("volume24H", 0) or 0),
-            liquidity_usd=float(d.get("liquidity", 0) or 0),
+            price_change_24h_pct=float(d.get("priceChange24h", 0) or 0),  # lowercase h per API docs
+            volume_24h_usd=0.0,  # not returned by /defi/price — use token_overview for volume
+            liquidity_usd=float(d.get("liquidity", 0) or 0),  # requires include_liquidity=true
             fetched_at=now,
         )
         self._price_cache[mint_address] = (price, now)
@@ -173,8 +173,10 @@ class BirdeyeClient:
             _BATCH = 100
             for i in range(0, len(stale), _BATCH):
                 batch = stale[i:i + _BATCH]
-                data = self._get("/defi/multi_price",
-                                 {"list_address": ",".join(batch)})
+                data = self._get("/defi/multi_price", {
+                    "list_address": ",".join(batch),
+                    "include_liquidity": "true",  # required to get liquidity field
+                })
                 if data and data.get("success"):
                     for addr, d in (data.get("data") or {}).items():
                         if not d:
@@ -182,8 +184,8 @@ class BirdeyeClient:
                         p = BirdeyePrice(
                             address=addr,
                             price_usd=float(d.get("value", 0) or 0),
-                            price_change_24h_pct=float(d.get("priceChange24H", 0) or 0),
-                            volume_24h_usd=float(d.get("volume24H", 0) or 0),
+                            price_change_24h_pct=float(d.get("priceChange24h", 0) or 0),  # lowercase h
+                            volume_24h_usd=0.0,  # not in /defi/price responses
                             liquidity_usd=float(d.get("liquidity", 0) or 0),
                             fetched_at=now,
                         )
