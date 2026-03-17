@@ -150,6 +150,7 @@ NEW_PAIR_MAX_AGE_HOURS = 24        # Only tokens < 24h old (memecoins die after 
 NEW_PAIR_MIN_LIQUIDITY = 5_000     # $5k minimum liquidity (catch very early pumps)
 
 # ─── Token Safety / Rug Protection (Balanced Mode) ──────────────────────────
+REQUIRE_LOCKED_LP = True           # Hard-block tokens with explicitly unlocked liquidity
 MIN_SAFETY_SCORE = 0.28            # Lowered: high-conviction overrides, more trades
 SAFETY_SCORE_WEIGHT = 0.12         # Reduced weight (was 0.15): momentum > safety for memecoins
 ENABLE_SELL_SIMULATION = True      # Honeypot check via Jupiter round-trip quote

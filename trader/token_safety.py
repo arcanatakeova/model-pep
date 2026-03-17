@@ -244,12 +244,35 @@ class TokenSafetyChecker:
                 flags.append(f"Top 10 holders own {top10:.0%}")
 
         # ─── LP lock status ────────────────────────────────────────────────────
-        lp_locked = rc.get("lp_locked")
-        if lp_locked is True:
-            score += 0.05
-        elif lp_locked is False:
-            score -= 0.12
-            flags.append("Liquidity not locked")
+        # Priority: Birdeye > RugCheck.
+        # lp_locked=True  → LP burned or locked via locker (safe)
+        # lp_locked=False → dev holds LP and can drain it at any time → HARD BLOCK
+        # lp_locked=None  → unknown (too new / not yet indexed) → soft penalty only
+        lp_locked = (
+            (getattr(birdeye_sec, "lp_locked", None) if birdeye_sec else None)
+            or rc.get("lp_locked")
+        )
+
+        if lp_locked is False and getattr(config, "REQUIRE_LOCKED_LP", True):
+            # Same hard-block path as honeypots — developer can drain liquidity
+            report = TokenSafetyReport(
+                mint_address=mint_address,
+                safety_score=0.0,
+                is_safe_to_trade=False,
+                risk_level="CRITICAL",
+                lp_locked=False,
+                sell_simulation_passed=sell_passed,
+                round_trip_tax_pct=round_trip_tax,
+                risk_flags=["UNLOCKED LP: developer can drain liquidity at any time"],
+                checked_at=now,
+            )
+            self._store(mint_address, report, now)
+            return report
+        elif lp_locked is True:
+            score += 0.10   # Locked/burned LP is a strong positive signal
+        elif lp_locked is None:
+            score -= 0.05   # Unknown — slight penalty for missing data
+            flags.append("LP lock status unknown (new token or not yet indexed)")
 
         # ─── RugCheck risk level ───────────────────────────────────────────────
         rc_risk = rc.get("risk_level")
