@@ -373,8 +373,8 @@ class AITrader:
             self._save_strategy_states()
             self._last_save = time.time()
 
-        # ── 17. Wallet sync handled by _live_dashboard_writer (5s thread) ───
-        # SOL balance + position reconciliation run every 5s/30s in the background.
+        # ── 17. Live wallet sync every cycle ─────────────────────────────
+        self._sync_wallet_positions()
 
         logger.info("Cycle #%d done in %.0fms", self._cycle, elapsed_ms)
 
