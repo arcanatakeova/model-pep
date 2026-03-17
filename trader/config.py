@@ -99,8 +99,13 @@ EMA_SLOW = 21
 MOMENTUM_PERIOD = 10
 
 # Supertrend indicator (ATR-based trend filter)
-SUPERTREND_PERIOD    = 10
+SUPERTREND_PERIOD     = 10
 SUPERTREND_MULTIPLIER = 3.0
+
+# Stochastic RSI
+STOCH_RSI_PERIOD      = 14
+STOCH_RSI_SMOOTH_K    = 3
+STOCH_RSI_SMOOTH_D    = 3
 
 # ─── API Endpoints (Free / No-Key Required) ───────────────────────────────────
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
