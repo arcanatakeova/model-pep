@@ -115,6 +115,7 @@ class DexToken:
     source: str = "dexscreener"     # Where this token was discovered
     holder_count: Optional[int] = None  # None=unknown, 0=verified empty
     unique_wallets_24h: int = 0     # Unique trading wallets last 24h (Birdeye)
+    birdeye_price_confirmed: bool = False  # True = Birdeye agreed on price
     ta_score: Optional[float] = None        # [-1, +1] technical analysis score
     ta_confidence: Optional[float] = None   # 0-1 data quality confidence
 
@@ -270,6 +271,7 @@ class DexScreener:
                         bp = fresh_prices.get(t.base_address)
                         if bp and bp.price_usd > 0:
                             t.price_usd = bp.price_usd
+                            t.birdeye_price_confirmed = True
                             if bp.market_cap > 0:
                                 t.market_cap = bp.market_cap
                             if bp.liquidity_usd > 0:
@@ -855,6 +857,16 @@ class DexScreener:
         elif token.source == "raydium":
             score += 0.02
 
+        # ── Birdeye price confirmation bonus/penalty ─────────────────────
+        # Birdeye-confirmed price = reliable real-time quote.
+        # No confirmation = DexScreener-only quote, possibly stale.
+        if token.chain_id == "solana":
+            if token.birdeye_price_confirmed:
+                score += 0.02  # small bonus — trusted price source
+            else:
+                score -= 0.04  # penalty — unverified price, higher manipulation risk
+                signals.append("Unconfirmed price")
+
         # ── Solana chain preference ───────────────────────────────────────
         if token.chain_id == "solana":
             score += 0.02
@@ -990,6 +1002,19 @@ class DexScreener:
                         raw_w = ov.get("uniqueWallet24h") or ov.get("uniqueWallets24h")
                         if raw_w is not None:
                             t.unique_wallets_24h = int(raw_w)
+                        # 1h volume from Birdeye — more accurate than DexScreener for scoring
+                        raw_v1h = ov.get("v1hUSD") or ov.get("v1h")
+                        if raw_v1h and float(raw_v1h) > 0:
+                            t.volume_h1 = float(raw_v1h)
+                        # Birdeye price/liquidity from overview if not already confirmed
+                        if not t.birdeye_price_confirmed:
+                            ov_price = ov.get("price")
+                            if ov_price and float(ov_price) > 0:
+                                t.price_usd = float(ov_price)
+                                t.birdeye_price_confirmed = True
+                            ov_liq = ov.get("liquidity")
+                            if ov_liq and float(ov_liq) > 0:
+                                t.liquidity_usd = float(ov_liq)
                 except Exception as e:
                     logger.debug("Overview fetch error %s: %s", t.base_symbol, e)
 

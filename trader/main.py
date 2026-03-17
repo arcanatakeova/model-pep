@@ -850,6 +850,34 @@ class AITrader:
                                    sol_bal_usd, size_usd)
                     return
 
+            # ── Pre-entry Birdeye price cross-validation ─────────────────────
+            # If DexScreener and Birdeye disagree >25%, the DexScreener quote is
+            # likely stale or manipulated — skip to avoid entering at wrong price.
+            if token.chain_id == "solana" and not getattr(token, "birdeye_price_confirmed", False):
+                try:
+                    from dex_screener import _get_birdeye as _dex_be
+                    _be = _dex_be()
+                    if _be and _be.enabled:
+                        bp = _be.get_price(token.base_address)
+                        if bp and bp.price_usd > 0:
+                            divergence = abs(bp.price_usd - token.price_usd) / token.price_usd
+                            if divergence > 0.25:
+                                logger.warning(
+                                    "SKIP %s: price divergence %.0f%% "
+                                    "(DS=$%.8f BE=$%.8f) — stale quote",
+                                    token.base_symbol, divergence * 100,
+                                    token.price_usd, bp.price_usd)
+                                return
+                            token.price_usd = bp.price_usd  # use fresh Birdeye price
+                        # If Birdeye has no price at all, allow entry (very new token)
+                        # but log it so we can monitor these trades
+                        else:
+                            logger.info(
+                                "ENTRY NOTE %s: no Birdeye price — very new or illiquid token",
+                                token.base_symbol)
+                except Exception:
+                    pass  # Birdeye check failed — proceed with existing price
+
             safety_score = safety.safety_score if safety else 0.0  # Unknown = don't trade
             # AI-computed stop and target per trade based on token's own volatility
             stop_pct   = self.risk_mgr.dynamic_dex_stop_pct(
