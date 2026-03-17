@@ -98,6 +98,10 @@ EMA_SLOW = 21
 
 MOMENTUM_PERIOD = 10
 
+# Supertrend indicator (ATR-based trend filter)
+SUPERTREND_PERIOD    = 10
+SUPERTREND_MULTIPLIER = 3.0
+
 # ─── API Endpoints (Free / No-Key Required) ───────────────────────────────────
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 COINCAP_BASE = "https://api.coincap.io/v2"
