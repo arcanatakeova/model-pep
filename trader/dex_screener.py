@@ -323,7 +323,8 @@ class DexScreener:
         """
         New pair sniping: DexScreener search + Birdeye new listings + Pump.fun new.
         """
-        # All sources are activity-ranked — no keyword filtering
+        # Mix of activity-ranked sources — includes DexScreener/GMGN as reliable fallbacks
+        # in case Pump.fun/Raydium/Birdeye APIs are down or rate-limited.
         futures = {
             "be_new":         self._executor.submit(self._fetch_birdeye_new_listings),
             "pump_new":       self._executor.submit(self._fetch_pumpfun_new),
@@ -331,6 +332,9 @@ class DexScreener:
             "pump_active":    self._executor.submit(self._fetch_pumpfun_tokens),
             "raydium_amm_p1": self._executor.submit(self._fetch_raydium_pools, 1),
             "raydium_clmm":   self._executor.submit(self._fetch_raydium_clmm),
+            # Reliable fallbacks — DexScreener and GMGN rarely fail
+            "ds_solana":      self._executor.submit(self._fetch_dexscreener_top_solana),
+            "gmgn":           self._executor.submit(self._fetch_gmgn_trending),
         }
 
         raw: list[DexToken] = []
@@ -338,7 +342,7 @@ class DexScreener:
             try:
                 raw.extend(fut.result(timeout=12))
             except Exception as e:
-                logger.debug("new_pairs %s error: %s", key, e)
+                logger.warning("new_pairs %s failed: %s", key, e)
 
         # Filter by age + liquidity, skip native infrastructure tokens
         _SKIP_BASE = {
