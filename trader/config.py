@@ -118,7 +118,7 @@ FINNHUB_KEY       = os.getenv("FINNHUB_KEY", "")
 
 # ─── Birdeye API (Real-time Solana data) ──────────────────────────────────────
 # Get key at https://birdeye.so — Starter plan ($99/mo) recommended
-BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "82bb2d6860fc49a2b616acf0faed71e8")
+BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "")
 
 # Exchange API keys for live CEX trading (optional)
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")

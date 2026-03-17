@@ -207,12 +207,15 @@ class AITrader:
                     os.unlink(fname)
                 except FileNotFoundError:
                     pass
-            self._equity_curve = []
+            self._equity_curve = collections.deque(maxlen=17_280)
 
         self.portfolio.load()
         self._load_dex_positions()
         self._reconcile_wallet_positions()
         self.risk_mgr.reset_daily_loss_tracker()
+
+        # ── Startup configuration health check ───────────────────────────
+        self._log_startup_health(live)
 
         # Initialise settings.json if missing
         if not os.path.exists("settings.json"):
@@ -2010,6 +2013,50 @@ class AITrader:
                     })
         except Exception as e:
             logger.debug("Live wallet sync error: %s", e)
+
+    def _log_startup_health(self, live: bool):
+        """Print a clear checklist of which keys/services are present at startup."""
+        ok  = "\u2713"
+        bad = "\u2717"
+
+        checks = []
+        # Birdeye — required for prices, safety data, trending
+        be_ok = bool(config.BIRDEYE_API_KEY)
+        checks.append((be_ok, "Birdeye API key",
+                       "Set BIRDEYE_API_KEY in .env (get one at birdeye.so — free tier available)"))
+
+        # Phantom wallet — required for real trades
+        wallet_ok = self.solana.is_connected
+        checks.append((wallet_ok, "Phantom wallet",
+                       "Set PHANTOM_PRIVATE_KEY in .env (Phantom → Settings → Export Private Key)"))
+
+        # Solana RPC — warn if using slow public endpoint
+        rpc = config.SOLANA_RPC_URL
+        rpc_ok = "mainnet-beta.solana.com" not in rpc
+        checks.append((rpc_ok, f"Solana RPC ({rpc.split('/')[2][:30]})",
+                       "Public RPC is heavily throttled — use Helius/QuickNode free tier: "
+                       "helius.dev → set SOLANA_RPC_URL in .env"))
+
+        # Supabase — optional but useful for persistence
+        sb_ok = bool(config.SUPABASE_URL and config.SUPABASE_SERVICE_KEY)
+        checks.append((sb_ok, "Supabase (persistence)",
+                       "Optional — set SUPABASE_URL + SUPABASE_SERVICE_KEY in .env for trade history"))
+
+        lines = [f"  {'LIVE' if live else 'PAPER'} MODE — startup health check"]
+        for is_ok, name, fix in checks:
+            icon = ok if is_ok else bad
+            lines.append(f"  {icon} {name}")
+            if not is_ok:
+                lines.append(f"      FIX: {fix}")
+
+        # Critical: can't trade without Birdeye + wallet in live mode
+        critical_missing = live and (not be_ok or not wallet_ok)
+        if critical_missing:
+            lines.append("  ! DEX trading disabled until BIRDEYE_API_KEY and "
+                         "PHANTOM_PRIVATE_KEY are configured")
+
+        level = logging.WARNING if (not be_ok or (live and not wallet_ok)) else logging.INFO
+        logger.log(level, "\n".join(lines))
 
     def _save_dex_positions(self):
         """Persist open DEX positions so they survive restarts."""
