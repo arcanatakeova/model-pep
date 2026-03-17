@@ -1272,7 +1272,11 @@ class AITrader:
                 pos["_price_miss"] = 0  # reset on successful fetch
 
                 entry   = pos["entry_price"]
-                current = token.price_usd
+                # Prefer Birdeye price (updated every 3s by fast monitor) over
+                # DexScreener — DexScreener can return stale/inflated quotes for
+                # illiquid tokens, causing false spike exits at the wrong price.
+                birdeye_price = pos.get("current_price", 0)
+                current = birdeye_price if birdeye_price > 0 else token.price_usd
                 pnl_pct = (current - entry) / entry if entry > 0 else 0
                 pos["current_price"]  = current
                 pos["current_pnl_pct"] = pnl_pct
