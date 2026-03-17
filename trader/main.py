@@ -993,6 +993,17 @@ class AITrader:
                     if prev > 0:
                         pos["price_change_m5"] = (current - prev) / prev * 100
 
+                    # ── 0. PARTIAL PROFIT-TAKING (runs on 3s fast loop) ─────
+                    # Must run BEFORE any full-close logic so partials fire first.
+                    sell_frac, partial_reason, partial_threshold = \
+                        self.risk_mgr.get_partial_profit_action(pos)
+                    if sell_frac is not None:
+                        logger.info("FAST PARTIAL %s: %s", pos.get("symbol", "?"), partial_reason)
+                        self._execute_partial_profit(
+                            pair_addr, pos, sell_frac, partial_reason, partial_threshold)
+                        # Don't full-close on the same tick — let the runner ride
+                        continue
+
                     # ── 1. Spike capture: only sell the spike if already well in profit
                     # Don't sell early runners — only take spikes when you've already
                     # captured a solid gain (>25%). Otherwise you sell the start of a moon.
@@ -1253,7 +1264,13 @@ class AITrader:
                     pos["stop_pct"] = min(pos.get("stop_pct", 0.20),
                                          max(0.08, pnl_pct * 0.30))  # protect 70% of gains
 
-                # 0. VOLATILITY SPIKE EXIT — sell at the top of a sudden pump
+                # 0. PARTIAL PROFIT-TAKING — must run before any full-close logic
+                # so we lock in gains tier by tier instead of closing everything at once
+                sell_frac, partial_reason, partial_threshold = self.risk_mgr.get_partial_profit_action(pos)
+                if sell_frac is not None:
+                    self._execute_partial_profit(pair_addr, pos, sell_frac, partial_reason, partial_threshold)
+
+                # 0b. VOLATILITY SPIKE EXIT — sell at the top of a sudden pump
                 # If price surged ≥15% since the last cycle, we're likely at or near
                 # the peak; sell immediately before the dump reversal.
                 prev_price = pos.get("prev_price", entry)
@@ -1280,11 +1297,6 @@ class AITrader:
                     self._try_close_dex_position(
                         pair_addr, pos, current, "Dust cleanup (<2% remaining)")
                     continue
-
-                # 3. PARTIAL PROFIT-TAKING
-                sell_frac, partial_reason, partial_threshold = self.risk_mgr.get_partial_profit_action(pos)
-                if sell_frac is not None:
-                    self._execute_partial_profit(pair_addr, pos, sell_frac, partial_reason, partial_threshold)
 
                 # 4. FULL EXIT conditions
                 remaining = pos.get("remaining_fraction", 1.0)
