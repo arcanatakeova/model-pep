@@ -1361,8 +1361,8 @@ class AITrader:
         result = self._close_dex_position(pair_addr, pos, current_price, reason)
         if result is False:
             # On-chain sell failed — re-insert so the next cycle can retry.
-            # Only re-insert if nothing else has taken that slot (shouldn't happen,
-            # but guard anyway to avoid overwriting a re-opened position).
+            # Track retry count so slippage widens on each attempt.
+            pos["_sell_retries"] = pos.get("_sell_retries", 0) + 1
             with self._dex_lock:
                 if pair_addr not in self._dex_positions:
                     self._dex_positions[pair_addr] = pos
@@ -1382,8 +1382,17 @@ class AITrader:
 
         liq_usd = pos.get("liquidity_usd", 0.0)
         if pos["chain"] == "solana" and self.solana.is_connected and "paper" not in pos.get("tx", ""):
+            # Widen slippage on sell retries — each failed attempt adds 200bps (2%)
+            # so emergency sells go through even on volatile tokens
+            retry_n = pos.get("_sell_retries", 0)
+            emergency_slippage = None
+            if retry_n > 0:
+                emergency_slippage = min(300 + retry_n * 200, 2000)  # up to 20%
+                logger.info("Sell retry #%d for %s — slippage widened to %dbps",
+                            retry_n, pos.get("symbol", "?"), emergency_slippage)
             sell_result = self.solana.sell_token(pos["address"], proceeds,
                                                 liquidity_usd=liq_usd,
+                                                slippage_bps=emergency_slippage,
                                                 pair_address=pair_addr if pos.get("dex_id") == "pumpswap" else None)
             if sell_result:
                 _sig, actual_usd = sell_result

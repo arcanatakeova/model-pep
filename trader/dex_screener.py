@@ -899,6 +899,20 @@ class DexScreener:
         except Exception:
             pass   # market intelligence is advisory — never block a trade
 
+        # ── Direction gate: NEVER buy tokens with negative short-term momentum ──
+        # Volume spikes during dumps = classic pump-and-dump exit liquidity trap.
+        # Require at least flat or positive 5m AND 1h momentum to enter.
+        m5 = token.price_change_m5
+        h1 = token.price_change_h1
+        if m5 < -3:
+            # Active dump — hard block regardless of score
+            score *= 0.30
+            signals.append(f"DUMP: {m5:.1f}% 5m")
+        elif m5 < 0 and h1 < 0:
+            # Both timeframes negative — fading, not a buy
+            score *= 0.50
+            signals.append(f"Fading: {m5:.1f}%/5m {h1:.1f}%/1h")
+
         token.score = float(np.clip(score, 0.0, 1.0))
         token.signals = signals[:5]   # cap at 5 signal tags
         return token.score
