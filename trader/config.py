@@ -6,7 +6,7 @@ import os
 
 # ─── Trading Mode ─────────────────────────────────────────────────────────────
 PAPER_TRADING = False         # Live mode by default — real Solana DEX trades via Phantom
-INITIAL_CAPITAL = 100_000.0   # Starting capital in USD (overridden by wallet balance)
+INITIAL_CAPITAL = 0.0         # Synced from real wallet balance at startup — never hard-code
 
 # ─── Risk Management ──────────────────────────────────────────────────────────
 MAX_POSITION_PCT = 0.18       # Max 18% of portfolio per position (up from 15%)
@@ -162,6 +162,7 @@ NEW_PAIR_MIN_LIQUIDITY = 5_000     # $5k minimum liquidity (catch very early pum
 
 # ─── Token Safety / Rug Protection (Balanced Mode) ──────────────────────────
 REQUIRE_LOCKED_LP = True           # Hard-block tokens with explicitly unlocked liquidity
+TA_ENABLED        = True           # Enable technical analysis indicators in DEX scan
 MIN_SAFETY_SCORE = 0.28            # Lowered: high-conviction overrides, more trades
 SAFETY_SCORE_WEIGHT = 0.12         # Reduced weight (was 0.15): momentum > safety for memecoins
 ENABLE_SELL_SIMULATION = True      # Honeypot check via Jupiter round-trip quote

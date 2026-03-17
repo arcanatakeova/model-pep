@@ -1421,9 +1421,36 @@ class AITrader:
             self._dex_positions.pop(pair_addr)  # Claim ownership before releasing lock
         result = self._close_dex_position(pair_addr, pos, current_price, reason)
         if result is False:
-            # On-chain sell failed — re-insert so the next cycle can retry.
-            # Only re-insert if nothing else has taken that slot (shouldn't happen,
-            # but guard anyway to avoid overwriting a re-opened position).
+            # On-chain sell failed — increment failure counter.
+            sell_fails = pos.get("_sell_failures", 0) + 1
+            pos["_sell_failures"] = sell_fails
+
+            if sell_fails >= 5:
+                # 5 consecutive sell failures = token is unsellable (zero liquidity,
+                # pool drained, all routes dead). Force-remove and record 100% loss
+                # rather than retrying forever and blocking the position slot.
+                entry  = pos.get("entry_price", 0)
+                size   = pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
+                symbol = pos.get("symbol", "?")
+                logger.error(
+                    "ABANDONING %s after %d sell failures — token unsellable, "
+                    "recording 100%% loss of $%.2f", symbol, sell_fails, size)
+                self.portfolio.closed_trades.append({
+                    "asset_id":    pair_addr,
+                    "symbol":      symbol,
+                    "side":        "long",
+                    "entry_price": entry,
+                    "exit_price":  0.0,
+                    "pnl_usd":     round(-size, 4),
+                    "pnl_pct":     -100.0,
+                    "closed_at":   datetime.now(timezone.utc).isoformat(),
+                    "reason":      f"abandoned_unsellable ({sell_fails} sell failures)",
+                    "chain":       pos.get("chain", "solana"),
+                })
+                # Do NOT re-insert — position is gone
+                return False
+
+            # Re-insert for retry next cycle
             with self._dex_lock:
                 if pair_addr not in self._dex_positions:
                     self._dex_positions[pair_addr] = pos
