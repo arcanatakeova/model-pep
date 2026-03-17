@@ -659,19 +659,23 @@ class SolanaWallet:
 
         # PumpSwap AMM math overflow (0x1787) — the direct on-chain path can
         # overflow for tokens with very large base_reserve * sol_in product.
-        # Try Jupiter first, then Raydium as secondary fallback.
+        # Try Jupiter → Raydium → PumpPortal as fallback chain.
         if sig == "PUMPSWAP_OVERFLOW":
             logger.info("PumpSwap overflow fallback: retrying %s via Jupiter",
                         output_mint[:12])
             tx_b64, out_amount, price_impact = self._quote_and_build_jupiter(
                 input_mint, output_mint, raw_input_amount, slippage_bps)
             if tx_b64 is None:
-                logger.info("Jupiter unavailable — trying Raydium for PumpSwap overflow token")
+                logger.info("Jupiter no route — trying Raydium for PumpSwap overflow token")
                 tx_b64, out_amount, price_impact = self._quote_and_build_raydium(
                     input_mint, output_mint, raw_input_amount, slippage_bps)
             if tx_b64 is None:
+                logger.info("Raydium no route — trying PumpPortal for PumpSwap overflow token")
+                tx_b64, out_amount, price_impact = self._quote_and_build_pumpfun(
+                    input_mint, output_mint, raw_input_amount, slippage_bps, pool="pumpswap")
+            if tx_b64 is None:
                 return SwapResult(success=False,
-                                  error="PumpSwap overflow — Jupiter + Raydium both failed")
+                                  error="PumpSwap overflow — Jupiter + Raydium + PumpPortal all failed")
             sig = self._sign_and_send_jito(tx_b64, priority_fee)
             if not sig:
                 sig = self._sign_and_send_rpc(tx_b64)

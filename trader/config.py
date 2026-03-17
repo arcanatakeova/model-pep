@@ -6,7 +6,7 @@ import os
 
 # ─── Trading Mode ─────────────────────────────────────────────────────────────
 PAPER_TRADING = False         # Live mode by default — real Solana DEX trades via Phantom
-INITIAL_CAPITAL = 100_000.0   # Starting capital in USD (overridden by wallet balance)
+INITIAL_CAPITAL = 15.0        # Starting capital in USD (overridden by wallet balance)
 
 # ─── Risk Management ──────────────────────────────────────────────────────────
 MAX_POSITION_PCT = 0.18       # Max 18% of portfolio per position (up from 15%)
