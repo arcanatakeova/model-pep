@@ -667,6 +667,20 @@ class AITrader:
         try:
             # Circuit breakers removed — bot always scans and trades
 
+            # Snapshot Solana wallet balance — each trading platform has its own
+            # balance; memecoin sizing is based purely on what's in this wallet.
+            _sol, _usdc, _sol_usd, _cache_ts = self._wallet_balance_cache
+            if self.solana.is_connected and (time.time() - _cache_ts > 5):
+                try:
+                    _sol_usd = self.solana.get_portfolio_value_usd()
+                    self._wallet_balance_cache = (
+                        self.solana.get_sol_balance(),
+                        self.solana.get_usdc_balance(),
+                        _sol_usd, time.time())
+                except Exception:
+                    pass
+            sol_wallet_usd = _sol_usd  # Used for sizing and allocation cap
+
             tokens = self.dex_screener.get_multi_chain_opportunities()
             if not tokens:
                 logger.info("DEX scan: no opportunities found")
@@ -702,7 +716,7 @@ class AITrader:
             n_blocked_conc = n_blocked_safety = n_blocked_size = 0
             for token in candidates:
                 allowed, reason = self.risk_mgr.check_dex_concentration(
-                    self._dex_positions, token.dex_id)
+                    self._dex_positions, token.dex_id, wallet_usd=sol_wallet_usd)
                 if not allowed:
                     logger.info("Concentration block %s: %s", token.base_symbol, reason)
                     n_blocked_conc += 1
@@ -721,6 +735,7 @@ class AITrader:
                     liquidity_usd=token.liquidity_usd,
                     price_change_h1=token.price_change_h1,
                     price_change_h6=token.price_change_h6,
+                    wallet_usd=sol_wallet_usd,
                 )
                 size_usd = min(size_usd, config.DEX_MAX_POSITION_USD)
                 if size_usd < config.DEX_MIN_POSITION_USD:

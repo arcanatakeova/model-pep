@@ -250,13 +250,17 @@ class RiskManager:
 
     def dex_position_size_usd(self, token_score: float, safety_score: float,
                                liquidity_usd: float, price_change_h1: float,
-                               price_change_h6: float) -> float:
+                               price_change_h6: float,
+                               wallet_usd: float = 0.0) -> float:
         """
         Volatility-adjusted position sizing for DEX/memecoin trades.
         Higher volatility = smaller size. Lower safety = smaller size.
+        wallet_usd: the Solana wallet balance — used as the cash basis so that
+        other platform balances (Polymarket, CEX) don't dilute sizing.
         """
-        equity = self.portfolio.equity()
-        if equity <= 0:
+        # Each trading type has its own balance; use wallet_usd if provided.
+        available = wallet_usd if wallet_usd > 0 else self.portfolio.cash
+        if available <= 0:
             return 0.0
 
         base_size = config.DEX_BASE_POSITION_USD
@@ -280,19 +284,19 @@ class RiskManager:
         # 4. Liquidity cap: never more than 2% of pool liquidity
         size = min(size, liquidity_usd * 0.02)
 
-        # 5. Equity-scaled floor: minimal (1% of equity)
-        equity_floor = equity * 0.01
-        size = max(size, equity_floor)
+        # 5. Wallet-scaled floor: minimal (1% of wallet)
+        wallet_floor = available * 0.01
+        size = max(size, wallet_floor)
 
         # 6. Caps
         size = min(size, config.DEX_MAX_POSITION_USD)
         size = min(size, liquidity_usd * config.MIN_LIQUIDITY_RATIO)
-        # Cash cap: divide available cash across slots so one trade can't drain wallet.
-        # For small portfolios, reduce slot count so per-slot stays above min position.
+        # Cash cap: divide usable wallet balance across open slots.
+        # 90% of wallet is allocated to memecoins; split across remaining slots.
         open_dex = len([p for p in self.portfolio.open_positions.values()
                         if p.get("market") == "dex"])
         free_slots = max(1, config.MAX_DEX_POSITIONS - open_dex)
-        usable_cash = self.portfolio.cash * 0.85
+        usable_cash = available * config.MAX_MEMECOIN_ALLOCATION_PCT
         # Don't split into more slots than cash can support at minimum position size
         min_pos = config.DEX_MIN_POSITION_USD
         max_affordable_slots = max(1, int(usable_cash / min_pos)) if min_pos > 0 else free_slots
@@ -382,8 +386,12 @@ class RiskManager:
         return target
 
     def check_dex_concentration(self, dex_positions: dict,
-                                 token_dex_id: str = "") -> tuple[bool, str]:
-        """Check memecoin concentration limits before opening new position."""
+                                 token_dex_id: str = "",
+                                 wallet_usd: float = 0.0) -> tuple[bool, str]:
+        """Check memecoin concentration limits before opening new position.
+        wallet_usd: Solana wallet balance — cap is applied against this, not overall equity,
+        since each trading platform manages its own separate balance.
+        """
         if len(dex_positions) >= config.MAX_DEX_POSITIONS:
             return False, f"Max DEX positions reached ({config.MAX_DEX_POSITIONS})"
 
@@ -392,18 +400,17 @@ class RiskManager:
             p.get("size_usd", 0) * p.get("remaining_fraction", 1.0)
             for p in dex_positions.values()
         )
-        # Enforce memecoin allocation cap — but allow new trades when legacy
-        # positions already exceed the cap (they'll exit on their own via stops/TP).
-        # Only hard-block when BOTH: already way over cap AND new trade is large.
-        equity = self.portfolio.equity()
-        if equity > 0:
-            cap_usd = equity * config.MAX_MEMECOIN_ALLOCATION_PCT
+        # Each platform has its own balance; cap memecoins against the Solana wallet.
+        basis = wallet_usd if wallet_usd > 0 else self.portfolio.equity()
+        if basis > 0:
+            cap_usd = basis * config.MAX_MEMECOIN_ALLOCATION_PCT
             free_slots = max(1, config.MAX_DEX_POSITIONS - len(dex_positions))
-            next_trade_size = (self.portfolio.cash * 0.85) / free_slots
+            available = wallet_usd if wallet_usd > 0 else self.portfolio.cash
+            next_trade_size = (available * config.MAX_MEMECOIN_ALLOCATION_PCT) / free_slots
             # Only block if we'd exceed 120% of the cap after adding the new trade
             # (20% buffer prevents thrashing near the boundary)
             if total_dex_usd + next_trade_size > cap_usd * 1.20:
-                return False, f"Memecoin allocation cap ({config.MAX_MEMECOIN_ALLOCATION_PCT:.0%} of equity)"
+                return False, f"Memecoin allocation cap ({config.MAX_MEMECOIN_ALLOCATION_PCT:.0%} of wallet)"
 
         if token_dex_id:
             same_dex = sum(1 for p in dex_positions.values()

@@ -164,7 +164,7 @@ MAX_TOP10_HOLDER_PCT = 0.85        # Penalize if top 10 holders own > 85% (loose
 DEX_BASE_POSITION_USD = 50.0       # Base position for memecoin trades (reduced for safety)
 DEX_MIN_POSITION_USD = 1.0         # Minimum position size (covers Solana fees ~$0.50)
 POSITION_VOL_SCALAR = 1.0          # Multiplier for vol-adjusted sizing
-MAX_MEMECOIN_ALLOCATION_PCT = 0.60 # Max 60% of equity in memecoins (raised from 30% — small portfolios need room)
+MAX_MEMECOIN_ALLOCATION_PCT = 0.90 # 90% of Solana wallet dedicated to memecoins
 
 # ─── Time-Based Exit Rules ──────────────────────────────────────────────────
 DEX_MAX_HOLD_HOURS = 4             # Force exit after 4h — exit faster
