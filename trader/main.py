@@ -30,6 +30,7 @@ Usage:
   python main.py --growth         # Show projected compound growth table
 """
 import argparse
+import collections
 import concurrent.futures
 import json
 import logging
@@ -179,7 +180,8 @@ class AITrader:
         self._last_wallet_sync = 0.0   # Live wallet position sync every 30s
         self._day_start_eq   = self.portfolio.equity()
         self._last_day       = datetime.now(timezone.utc).date()
-        self._equity_curve   = self._load_equity_curve()  # Persist chart history across restarts
+        self._equity_curve   = collections.deque(
+            self._load_equity_curve(), maxlen=17_280)  # 24h at 5s cadence; bounded automatically
         self._dex_positions: dict = {}  # addr → {buy_price, qty, chain, symbol}
         self._dex_lock = threading.Lock()  # Protects _dex_positions cross-thread (fast monitor + main)
         self._dex_closed_count = 0         # Counts DEX closes; drives audit cadence
@@ -347,8 +349,6 @@ class AITrader:
             "equity": round(equity, 2),
             "cycle": self._cycle,
         })
-        if len(self._equity_curve) > 17_280:
-            self._equity_curve = self._equity_curve[-17_280:]
 
         # ── 14. Risk report ───────────────────────────────────────────────
         risk = self.risk_mgr.risk_report()
@@ -1112,6 +1112,26 @@ class AITrader:
                         to_close.append((
                             pair_addr, pos, current,
                             f"FastMonitor stop-loss {pnl_pct:.0%}"))
+                        continue
+
+                    # ── 5. Liquidity decay detection ──────────────────────────
+                    # Rapidly draining liquidity = rug or coordinated mass exit.
+                    # Exit before slippage becomes catastrophic.
+                    cur_liq = getattr(bp, "liquidity_usd", 0) or 0
+                    entry_liq = pos.get("entry_liquidity_usd", 0)
+                    if entry_liq <= 0 and cur_liq > 0:
+                        pos["entry_liquidity_usd"] = cur_liq
+                    elif entry_liq > 0 and cur_liq > 0:
+                        liq_drop = (entry_liq - cur_liq) / entry_liq
+                        prev_liq_drop = pos.get("prev_liq_drop", 0.0)
+                        pos["prev_liq_drop"] = liq_drop
+                        # Two consecutive ticks showing >50% liquidity drain
+                        if liq_drop > 0.50 and prev_liq_drop > 0.50:
+                            to_close.append((
+                                pair_addr, pos, current,
+                                f"FastMonitor liquidity drain: -{liq_drop:.0%} from entry "
+                                f"(${entry_liq:.0f}→${cur_liq:.0f})"))
+                            continue
 
                 for pair_addr, pos, current, reason in to_close:
                     logger.info("FAST EXIT %s @ $%.8f | %s",
@@ -1210,8 +1230,6 @@ class AITrader:
                     "ts":     datetime.now(timezone.utc).isoformat(),
                     "equity": round(equity, 2),
                 })
-                if len(self._equity_curve) > 17_280:   # 24h at 5s cadence
-                    self._equity_curve = self._equity_curve[-17_280:]
 
                 # ── 4. Write live bot_state.json + Supabase persistence ──────
                 self._write_bot_state(equity, 0.0)
@@ -1574,6 +1592,10 @@ class AITrader:
             # Append the TIER threshold (not current pnl_pct) so the check
             # `threshold_pct not in already_taken` correctly marks it as done.
             pos["partial_profits_taken"].append(threshold_pct)
+
+            # Persist immediately — partial profits update remaining_fraction and
+            # partial_profits_taken, which must survive a crash or restart.
+            self._save_dex_positions()
 
             logger.info("PARTIAL TP %s: sold %.0f%% ($%.2f) | %s",
                          pos["symbol"], fraction * 100, proceeds, reason)
@@ -2046,7 +2068,9 @@ class AITrader:
 
     def _save_equity_curve(self):
         try:
-            self._atomic_json("equity_curve.json", self._equity_curve[-10_000:], indent=2)
+            # Convert deque to list before slicing (deque doesn't support slices)
+            curve_list = list(self._equity_curve)
+            self._atomic_json("equity_curve.json", curve_list[-10_000:], indent=2)
         except Exception:
             pass
 

@@ -312,10 +312,13 @@ class DexScreener:
                 scored.append(t)
         scored.sort(key=lambda t: t.score, reverse=True)
 
-        # Mark returned tokens as evaluated so they won't repeat immediately
+        # Mark returned tokens as evaluated so they won't repeat immediately.
+        # High-volatility tokens use a shorter block (180s) so that a crash-and-recover
+        # bounce is still caught within the same 3-minute window.
         now = time.time()
         for t in scored:
-            self._evaluated[t.pair_address] = now
+            block_secs = 180 if t.score >= 0.70 else self._EVAL_BLOCK_SECS
+            self._evaluated[t.pair_address] = now + block_secs - self._EVAL_BLOCK_SECS
 
         logger.info(
             "Trending scan: %d sources → %d raw → %d fresh (-%d blacklisted) → %d scored >= %.2f",

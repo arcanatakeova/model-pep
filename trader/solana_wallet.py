@@ -140,7 +140,8 @@ class SolanaWallet:
         self._pubkey    = None
         self._client    = None
         self._sol_price_cache: tuple[float, float] = (0.0, 0.0)  # (price, ts)
-        self._cached_lamports: int = 0  # last known-good lamport balance (fallback on RPC 429)
+        self._cached_lamports: int = 0       # last known-good lamport balance (fallback on RPC 429)
+        self._cached_lamports_ts: float = 0.0  # timestamp of last successful lamport fetch
 
         if private_key_b58:
             self._init_wallet()
@@ -338,17 +339,24 @@ class SolanaWallet:
             return 0.0
 
     def get_sol_balance_lamports(self) -> int:
-        """Get SOL balance in lamports. Returns cached value on RPC failure (avoids false-low on 429)."""
+        """Get SOL balance in lamports. Returns cached value on RPC failure (avoids false-low on 429).
+        Cached value is only trusted for 30 seconds; stale cache is NOT used (returns 0)
+        so trades are blocked rather than proceeding with insufficient SOL."""
         if not self.is_connected:
             return 0
         try:
             val = self._client.get_balance(self._keypair.pubkey()).value
-            self._cached_lamports = val  # update cache on success
+            self._cached_lamports = val
+            self._cached_lamports_ts = time.time()
             return val
         except Exception as e:
-            if self._cached_lamports > 0:
-                logger.debug("get_sol_balance_lamports RPC error (%s) — using cached %d", e, self._cached_lamports)
+            cache_age = time.time() - self._cached_lamports_ts
+            if self._cached_lamports > 0 and cache_age < 30:
+                logger.debug("get_sol_balance_lamports RPC error (%s) — using cached %d (age=%.0fs)",
+                             e, self._cached_lamports, cache_age)
                 return self._cached_lamports
+            if cache_age >= 30:
+                logger.warning("Lamport cache stale (%.0fs) — blocking trade until fresh balance obtained", cache_age)
             return 0
 
     def get_token_balance(self, mint_address: str) -> float:
