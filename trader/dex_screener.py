@@ -115,6 +115,8 @@ class DexToken:
     source: str = "dexscreener"     # Where this token was discovered
     holder_count: Optional[int] = None  # None=unknown, 0=verified empty
     unique_wallets_24h: int = 0     # Unique trading wallets last 24h (Birdeye)
+    ta_score: Optional[float] = None        # [-1, +1] technical analysis score
+    ta_confidence: Optional[float] = None   # 0-1 data quality confidence
 
     @property
     def buy_sell_ratio_h1(self) -> float:
@@ -156,6 +158,8 @@ class DexToken:
             "safety_score": self.safety_report.safety_score if self.safety_report else None,
             "risk_level": self.safety_report.risk_level if self.safety_report else None,
             "risk_flags": self.safety_report.risk_flags if self.safety_report else [],
+            "ta_score": round(self.ta_score, 3) if self.ta_score is not None else None,
+            "ta_confidence": round(self.ta_confidence, 3) if self.ta_confidence is not None else None,
         }
 
 
@@ -910,6 +914,24 @@ class DexScreener:
                 score *= mkt_mult
         except Exception:
             pass   # market intelligence is advisory — never block a trade
+
+        # ── Technical indicators enhancement (OHLCV-based) ────────────────
+        # Only run for tokens that already look promising (avoids excess API calls).
+        if config.TA_ENABLED and score >= config.TA_MIN_SCORE_THRESHOLD and token.chain_id == "solana":
+            try:
+                from ta_layer import fetch_ta_signals
+                be = _get_birdeye()
+                if be and be.enabled:
+                    ta_s, ta_conf, ta_labels = fetch_ta_signals(token.base_address, be)
+                    token.ta_score = ta_s
+                    token.ta_confidence = ta_conf
+                    if ta_conf > 0:
+                        ta_adjustment = ta_s * ta_conf * config.TA_MAX_ADJUSTMENT
+                        score += ta_adjustment
+                        if ta_labels:
+                            signals.extend(ta_labels[:2])
+            except Exception:
+                pass   # TA is advisory — never block a trade
 
         # ── Multi-timeframe pump-and-dump detection ────────────────────────
         # ALL timeframes red-hot simultaneously = likely distribution phase.

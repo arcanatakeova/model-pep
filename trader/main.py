@@ -993,6 +993,26 @@ class AITrader:
                     if prev > 0:
                         pos["price_change_m5"] = (current - prev) / prev * 100
 
+                    # Accumulate tick buffer for TA-based exit signals
+                    if config.TA_EXIT_ENABLED:
+                        vol_tick = getattr(bp, "volume_24h_usd", 0) or 0
+                        pos.setdefault("candle_buffer", []).append(
+                            (time.time(), current, vol_tick))
+                        buf = pos["candle_buffer"]
+                        if len(buf) > config.TA_CANDLE_BUFFER_SIZE:
+                            pos["candle_buffer"] = buf[-config.TA_CANDLE_BUFFER_SIZE:]
+                        # Recompute TA every TA_EXIT_COMPUTE_INTERVAL seconds
+                        if time.time() - pos.get("last_ta_compute", 0) > config.TA_EXIT_COMPUTE_INTERVAL:
+                            if len(pos["candle_buffer"]) >= 20:
+                                try:
+                                    from ta_layer import ticks_to_df, compute_ta_signals
+                                    df_buf = ticks_to_df(pos["candle_buffer"], resample="15s")
+                                    ta_sigs = compute_ta_signals(df_buf)
+                                    pos["ta_exit_signal"] = ta_sigs.get("composite", 0.0)
+                                except Exception:
+                                    pass
+                            pos["last_ta_compute"] = time.time()
+
                     # ── 0. PARTIAL PROFIT-TAKING (runs on 3s fast loop) ─────
                     # Must run BEFORE any full-close logic so partials fire first.
                     sell_frac, partial_reason, partial_threshold = \
@@ -1015,13 +1035,24 @@ class AITrader:
                                 f"FastMonitor spike: +{surge:.0%} in 3s (PnL +{pnl_pct:.0%})"))
                             continue
 
+                    # ── 1b. TA-driven trend reversal exit ─────────────────────
+                    if config.TA_EXIT_ENABLED:
+                        ta_sig = pos.get("ta_exit_signal", 0.0)
+                        if ta_sig <= config.TA_EXIT_BEARISH_THRESHOLD and pnl_pct > 0.03:
+                            to_close.append((
+                                pair_addr, pos, current,
+                                f"TA exit: composite={ta_sig:.2f} (PnL +{pnl_pct:.0%})"))
+                            continue
+
                     # ── 2. Reversal after peak: price dropped fast from ATH ───
                     peak = pos.get("peak_price", entry)
                     if peak > entry and pnl_pct > 0:
                         reversal = (peak - current) / peak
                         # Tighter for small profits, widens as gains increase.
                         # At +8% profit sell if -12% reversal; at +100% allow -28%.
-                        reversal_threshold = min(0.12 + pnl_pct * 0.08, 0.28)
+                        # TA: when trend is bullish, allow 5% more reversal before exit.
+                        ta_adj = max(pos.get("ta_exit_signal", 0.0), 0) * 0.05
+                        reversal_threshold = min(0.12 + pnl_pct * 0.08 + ta_adj, 0.32)
                         if reversal >= reversal_threshold and pnl_pct > 0.05:
                             to_close.append((
                                 pair_addr, pos, current,

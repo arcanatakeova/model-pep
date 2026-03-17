@@ -232,6 +232,39 @@ POLYMARKET_CROSS_PLATFORM_ENABLED = True
 POLYMARKET_SMART_MONEY_ENABLED = True
 POLYMARKET_SMART_MONEY_MIN_RANK = 20   # Track top 20 traders
 
+# ─── Technical Indicators (DEX Enhancement Layer) ────────────────────────────
+TA_ENABLED = True                    # Master switch for TA enhancement
+TA_MIN_SCORE_THRESHOLD = 0.35        # Only fetch OHLCV for tokens scoring above this
+TA_MAX_ADJUSTMENT = 0.15             # Max score adjustment from TA (+/-)
+TA_OHLCV_INTERVAL = "5m"             # Candle interval for entry scoring
+TA_OHLCV_LIMIT = 50                  # Number of candles to fetch (50 * 5m = ~4h)
+TA_MIN_CANDLES = 10                  # Minimum candles for any indicator
+TA_EXIT_ENABLED = True               # Use TA in fast price monitor exits
+TA_EXIT_COMPUTE_INTERVAL = 30        # Seconds between TA recomputation for held positions
+TA_EXIT_BEARISH_THRESHOLD = -0.6     # TA score below this triggers profit-taking exit
+TA_CANDLE_BUFFER_SIZE = 300          # Max ticks to buffer per position
+
+# Supertrend parameters
+SUPERTREND_PERIOD = 10
+SUPERTREND_MULTIPLIER = 3.0
+
+# Stochastic RSI parameters
+STOCH_RSI_PERIOD = 14
+STOCH_K_SMOOTH = 3
+STOCH_D_SMOOTH = 3
+
+# Memecoin TA weights (tuned for short-timeframe momentum patterns)
+MEMECOIN_TA_WEIGHTS = {
+    "rsi":        0.10,
+    "stoch_rsi":  0.15,
+    "momentum":   0.20,
+    "roc_accel":  0.10,
+    "supertrend": 0.15,
+    "vwap":       0.10,
+    "obv":        0.10,
+    "volume":     0.10,
+}
+
 # ─── Compounding ──────────────────────────────────────────────────────────────
 COMPOUND_ALL_PROFITS = True        # Always reinvest — never withdraw
 TARGET_DAILY_RETURN_PCT = 0.5     # 0.5%/day target = ~520% APY compounded
