@@ -210,7 +210,7 @@ PHANTOM_PRIVATE_KEY = os.getenv("PHANTOM_PRIVATE_KEY", "")
 #   https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 SOL_TRADE_SIZE_USD        = 50.0    # Default Solana trade size in USD
-SOL_MAX_SLIPPAGE_BPS      = 300     # 3% hard cap on slippage (dynamic calc stays under this)
+SOL_MAX_SLIPPAGE_BPS      = 500     # 5% hard cap on slippage (covers thin-liquidity tokens)
 SOL_PRIORITY_FEE_LAMPORTS = 100_000  # Fallback priority fee (lamports) when Helius unavailable
 
 # ─── Jito MEV Bundle Protection ───────────────────────────────────────────────
