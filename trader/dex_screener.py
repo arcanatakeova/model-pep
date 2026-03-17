@@ -113,7 +113,7 @@ class DexToken:
     buys_m5: int = 0
     sells_m5: int = 0
     source: str = "dexscreener"     # Where this token was discovered
-    holder_count: int = 0           # Unique holders (from Birdeye token_overview)
+    holder_count: Optional[int] = None  # None=unknown, 0=verified empty
     unique_wallets_24h: int = 0     # Unique trading wallets last 24h (Birdeye)
 
     @property
@@ -169,7 +169,7 @@ class DexScreener:
 
     def __init__(self):
         self._cache: dict = {}
-        self._cache_ttl = 25   # 25s — aggressive freshness for fast markets
+        self._cache_ttl = config.DATA_CACHE_TTL  # Use config (8s) — match scan frequency
         self._safety_checker = TokenSafetyChecker()
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=30, thread_name_prefix="dex-scanner")
@@ -540,6 +540,11 @@ class DexScreener:
                 token.market_cap / token.liquidity_usd > 200):
             token.score = 0.0
             return 0.0
+        # Hard-block tokens < 10 minutes old — highest rug risk window
+        if token.age_hours is not None and token.age_hours < 0.167:
+            token.score = 0.0
+            token.signals = [f"BLOCKED: too new ({token.age_hours*60:.0f}min old)"]
+            return 0.0
 
         # ── 5-minute momentum (25%) — best predictor for short trades ─────
         # If it's moving hard right now, that's the signal we care about most
@@ -617,9 +622,11 @@ class DexScreener:
             score -= 0.05   # Too big for memecoin alpha
 
         # ── Volume acceleration (20%) — is buying pressure building? ──────
-        if token.volume_h1 > 0 and token.volume_h24 > 0:
+        # Require minimum $1k h1 volume to avoid noise at low volumes
+        _MIN_H1_VOL = 1000.0
+        if token.volume_h1 > _MIN_H1_VOL and token.volume_h24 > 0:
             hourly_avg = token.volume_h24 / 24
-            if hourly_avg > 0:
+            if hourly_avg > _MIN_H1_VOL / 24:
                 vol_ratio = token.volume_h1 / hourly_avg
                 if vol_ratio > 10:
                     score += 0.20
@@ -647,9 +654,10 @@ class DexScreener:
             _vol_ratio = token.volume_h1 / _hourly_avg if _hourly_avg > 0 else 0
         _is_burst = (
             _vol_ratio > 5
+            and token.volume_h1 > _MIN_H1_VOL  # Absolute volume floor
             and token.price_change_h1 > 10
             and token.buys_h1 > 150           # raised from 100 — need real conviction
-            and token.price_change_m5 > -5    # not already reversing
+            and token.price_change_m5 > 2     # MUST be actively pumping (not flat/dumping)
         )
         if _is_burst:
             score += 0.15
@@ -722,7 +730,7 @@ class DexScreener:
                 score -= 0.05   # Stale — momentum probably dead
 
         # ── Holder concentration guard (Birdeye token_overview data) ─────
-        if token.holder_count > 0:
+        if token.holder_count is not None and token.holder_count > 0:
             if token.holder_count < 100:
                 # <100 holders = almost certainly a rug (hard block)
                 token.score = 0.0
@@ -747,7 +755,7 @@ class DexScreener:
             score -= 0.05   # Thin trading = manipulation risk
 
         # Holder growth velocity: if holders growing fast → accumulation phase
-        if token.holder_count > 0 and token.age_hours and token.age_hours > 0:
+        if token.holder_count is not None and token.holder_count > 0 and token.age_hours and token.age_hours > 0:
             holder_velocity = token.holder_count / token.age_hours  # holders/hour
             if holder_velocity > 200:
                 score += 0.06
@@ -890,7 +898,7 @@ class DexScreener:
             # Narrative boost: is this token's category currently outperforming?
             narr_boost, narr_label = _mi.get_narrative_boost(token.base_symbol or "")
             if narr_boost > 0.0:
-                score += narr_boost
+                score += min(narr_boost, 0.10)  # Cap narrative boost at 10%
                 signals.append(narr_label)
             # Market context multiplier: HOT/COLD adjusts the score slightly
             mkt_mult = _mi.get_market_context_multiplier()
@@ -898,6 +906,17 @@ class DexScreener:
                 score *= mkt_mult
         except Exception:
             pass   # market intelligence is advisory — never block a trade
+
+        # ── Multi-timeframe pump-and-dump detection ────────────────────────
+        # ALL timeframes red-hot simultaneously = likely distribution phase.
+        # Smart money dumps while retail chases the final leg up.
+        _m5_hot = token.price_change_m5 > 10
+        _h1_hot = token.price_change_h1 > 50
+        _h6_hot = h6 > 100 if h6 else False
+        _h24_hot = h24 > 200 if h24 else False
+        if _m5_hot and _h1_hot and (_h6_hot or _h24_hot):
+            score *= 0.60
+            signals.append("LATE ENTRY: all timeframes overheated")
 
         # ── Direction gate: NEVER buy tokens with negative short-term momentum ──
         # Volume spikes during dumps = classic pump-and-dump exit liquidity trap.

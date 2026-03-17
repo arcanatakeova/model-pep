@@ -387,15 +387,17 @@ class RiskManager:
             p.get("size_usd", 0) * p.get("remaining_fraction", 1.0)
             for p in dex_positions.values()
         )
-        # Enforce memecoin allocation cap — but don't block ALL new trades
-        # if a legacy position already exceeds the cap (it will exit on its own).
-        # Only block if adding one more per-slot allocation would exceed cap.
+        # Enforce memecoin allocation cap — but allow new trades when legacy
+        # positions already exceed the cap (they'll exit on their own via stops/TP).
+        # Only hard-block when BOTH: already way over cap AND new trade is large.
         equity = self.portfolio.equity()
         if equity > 0:
             cap_usd = equity * config.MAX_MEMECOIN_ALLOCATION_PCT
             free_slots = max(1, config.MAX_DEX_POSITIONS - len(dex_positions))
             next_trade_size = (self.portfolio.cash * 0.85) / free_slots
-            if total_dex_usd + next_trade_size > cap_usd and total_dex_usd > cap_usd * 0.90:
+            # Only block if we'd exceed 120% of the cap after adding the new trade
+            # (20% buffer prevents thrashing near the boundary)
+            if total_dex_usd + next_trade_size > cap_usd * 1.20:
                 return False, f"Memecoin allocation cap ({config.MAX_MEMECOIN_ALLOCATION_PCT:.0%} of equity)"
 
         if token_dex_id:
