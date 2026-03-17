@@ -62,6 +62,7 @@ class BirdeyeSecurity:
     creator_address: Optional[str] = None
     creator_balance_pct: float = 0.0        # % creator holds
     top10_holder_pct: float = 0.0           # % top 10 holders own
+    holder_count: Optional[int] = None      # total unique holders
     # Supply / lock
     total_supply: float = 0.0
     circulating_supply: float = 0.0
@@ -96,6 +97,7 @@ class BirdeyeClient:
     _SECURITY_TTL  = 600   # 10 minutes
     _OHLCV_TTL     = 30
     _TRENDING_TTL  = 60
+    _OVERVIEW_TTL  = 120   # 2 minutes — holder count doesn't change rapidly
 
     # Global rate limiter shared across ALL instances and threads (free tier = 1 req/s)
     _global_lock = threading.Lock()
@@ -114,6 +116,7 @@ class BirdeyeClient:
         self._security_cache: dict[str, tuple[BirdeyeSecurity, float]] = {}
         self._ohlcv_cache:    dict[str, tuple[list[BirdeyeOHLCV], float]] = {}
         self._trending_cache: tuple[list[dict], float] = ([], 0.0)
+        self._overview_cache: dict[str, tuple[dict, float]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -194,15 +197,24 @@ class BirdeyeClient:
 
     def get_token_overview(self, mint_address: str) -> Optional[dict]:
         """
-        Full token overview: price, volume, liquidity, market cap, holder count.
-        Richer than /defi/price — use for entry-point analysis.
+        Full token overview: price, volume, liquidity, market cap, holder count,
+        unique wallets 24h. Richer than /defi/price — use for entry-point analysis.
+        Results cached for 2 minutes (holder count doesn't change rapidly).
         """
         if not self.enabled:
             return None
+        now = time.time()
+        if mint_address in self._overview_cache:
+            d, ts = self._overview_cache[mint_address]
+            if now - ts < self._OVERVIEW_TTL:
+                return d
         data = self._get("/defi/token_overview", {"address": mint_address})
         if not data or not data.get("success"):
             return None
-        return data.get("data")
+        d = data.get("data") or {}
+        self._overview_cache[mint_address] = (d, now)
+        self._evict_cache(self._overview_cache, self._OVERVIEW_TTL)
+        return d
 
     # ─── Security ──────────────────────────────────────────────────────────────
 
@@ -243,6 +255,9 @@ class BirdeyeClient:
         if top10_pct > 0.70:
             flags.append(f"Top 10 holders own {top10_pct:.0%} (concentrated)")
 
+        raw_holders = d.get("holderCount") or d.get("holder")
+        holder_count = int(raw_holders) if raw_holders is not None else None
+
         sec = BirdeyeSecurity(
             address=mint_address,
             mint_authority=mint_auth,
@@ -250,6 +265,7 @@ class BirdeyeClient:
             creator_address=d.get("creatorAddress"),
             creator_balance_pct=creator_pct,
             top10_holder_pct=top10_pct,
+            holder_count=holder_count,
             total_supply=float(d.get("totalSupply", 0) or 0),
             circulating_supply=float(d.get("circulatingSupply", 0) or 0),
             is_token_2022=bool(d.get("isToken2022", False)),

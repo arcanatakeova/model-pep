@@ -966,17 +966,32 @@ class DexScreener:
         return token.score
 
     def _run_concurrent_safety_checks(self, tokens: list[DexToken]):
-        """Run safety checks for all tokens in parallel, update in-place."""
+        """Run safety checks + Birdeye overview (holder count) for all tokens in parallel."""
         sol_tokens = [t for t in tokens
                       if t.chain_id == "solana" and t.safety_report is None]
         if not sol_tokens:
             return
+
+        be = _get_birdeye()
 
         def _check(t: DexToken):
             try:
                 t.safety_report = self._safety_checker.check_token_safety(t.base_address)
             except Exception as e:
                 logger.debug("Safety check error %s: %s", t.base_symbol, e)
+            # Enrich with holder count + unique wallets from Birdeye overview
+            if be and be.enabled and t.holder_count is None:
+                try:
+                    ov = be.get_token_overview(t.base_address)
+                    if ov:
+                        raw_h = ov.get("holder") or ov.get("holderCount")
+                        if raw_h is not None:
+                            t.holder_count = int(raw_h)
+                        raw_w = ov.get("uniqueWallet24h") or ov.get("uniqueWallets24h")
+                        if raw_w is not None:
+                            t.unique_wallets_24h = int(raw_w)
+                except Exception as e:
+                    logger.debug("Overview fetch error %s: %s", t.base_symbol, e)
 
         futures = [self._executor.submit(_check, t) for t in sol_tokens]
         # Wait with a generous timeout — safety checks can be slow
