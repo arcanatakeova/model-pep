@@ -6,7 +6,7 @@ import os
 
 # ─── Trading Mode ─────────────────────────────────────────────────────────────
 PAPER_TRADING = False         # Live mode by default — real Solana DEX trades via Phantom
-INITIAL_CAPITAL = 100_000.0   # Starting capital in USD (overridden by wallet balance)
+INITIAL_CAPITAL = 0.0         # Synced from real wallet balance at startup — never hard-code
 
 # ─── Risk Management ──────────────────────────────────────────────────────────
 MAX_POSITION_PCT = 0.18       # Max 18% of portfolio per position (up from 15%)
@@ -98,6 +98,17 @@ EMA_SLOW = 21
 
 MOMENTUM_PERIOD = 10
 
+# Supertrend indicator (ATR-based trend filter)
+SUPERTREND_PERIOD     = 10
+SUPERTREND_MULTIPLIER = 3.0
+
+# Stochastic RSI
+STOCH_RSI_PERIOD      = 14
+STOCH_RSI_SMOOTH_K    = 3
+STOCH_RSI_SMOOTH_D    = 3
+STOCH_K_SMOOTH        = 3
+STOCH_D_SMOOTH        = 3
+
 # ─── API Endpoints (Free / No-Key Required) ───────────────────────────────────
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 COINCAP_BASE = "https://api.coincap.io/v2"
@@ -133,7 +144,7 @@ COINBASE_SECRET   = os.getenv("COINBASE_SECRET",   "")   # Private key or secret
 SCAN_INTERVAL_SEC = 5         # Scan markets every 5 seconds (short-trade focus)
 OHLCV_CANDLES = 100           # Number of candles to fetch for analysis
 CANDLE_INTERVAL = "1h"        # 1-hour candles for swing analysis
-DATA_CACHE_TTL = 8            # Cache market data for 8 seconds (shorter than 5s cycle × 2)
+DATA_CACHE_TTL = 4            # Cache market data for 4 seconds — matches 5s scan cycle (was 8: caused stale data)
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 LOG_LEVEL = "INFO"
@@ -150,6 +161,8 @@ NEW_PAIR_MAX_AGE_HOURS = 24        # Only tokens < 24h old (memecoins die after 
 NEW_PAIR_MIN_LIQUIDITY = 5_000     # $5k minimum liquidity (catch very early pumps)
 
 # ─── Token Safety / Rug Protection (Balanced Mode) ──────────────────────────
+REQUIRE_LOCKED_LP = True           # Hard-block tokens with explicitly unlocked liquidity
+TA_ENABLED        = True           # Enable technical analysis indicators in DEX scan
 MIN_SAFETY_SCORE = 0.28            # Lowered: high-conviction overrides, more trades
 SAFETY_SCORE_WEIGHT = 0.12         # Reduced weight (was 0.15): momentum > safety for memecoins
 ENABLE_SELL_SIMULATION = True      # Honeypot check via Jupiter round-trip quote

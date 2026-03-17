@@ -736,7 +736,7 @@ class AITrader:
             def _validate(args):
                 """
                 Returns (token, size_usd, safety) if validation passes, else None.
-                All network calls happen here so they run in parallel.
+                Runs concurrent network calls: Jupiter price confirmation + holder check.
                 """
                 tok, sz, sfty = args
 
@@ -745,6 +745,25 @@ class AITrader:
                     logger.warning("SKIP %s: only %d holders (rug risk)",
                                    tok.base_symbol, sfty.holder_count)
                     return None
+
+                # Jupiter price confirmation: reject if Jupiter price deviates >20%
+                # from DexScreener price (stale data or being manipulated).
+                if tok.base_address and tok.price_usd > 0:
+                    try:
+                        jup_price = self._get_jupiter_price(tok.base_address)
+                        if jup_price and jup_price > 0:
+                            spread = abs(jup_price - tok.price_usd) / tok.price_usd
+                            if spread > 0.20:
+                                logger.warning(
+                                    "SKIP %s: Jupiter price $%.8f vs DexScreener $%.8f "
+                                    "(%.0f%% spread — stale or manipulated data)",
+                                    tok.base_symbol, jup_price, tok.price_usd, spread * 100)
+                                return None
+                            # Update token price to the real Jupiter quote
+                            tok.price_usd = jup_price
+                    except Exception as e:
+                        logger.debug("Jupiter price check for %s failed: %s", tok.base_symbol, e)
+                        # Don't reject on API failure — just use DexScreener price
 
                 return (tok, sz, sfty)
 
@@ -944,17 +963,39 @@ class AITrader:
                 time.sleep(3)
                 if not self._dex_positions:
                     continue
-                be = _get_birdeye()
-                if not be or not be.enabled:
-                    continue
 
-                # Batch-fetch all held Solana token prices in one API call
                 mints = [pos["address"] for pos in self._dex_positions.values()
                          if pos.get("chain") == "solana"]
                 if not mints:
                     continue
 
-                prices = be.get_multi_price(mints)
+                # ── Tier 1: Birdeye batch (single API call, richest data) ────
+                be = _get_birdeye()
+                prices = {}
+                if be and be.enabled:
+                    try:
+                        prices = be.get_multi_price(mints)
+                    except Exception as _be_err:
+                        logger.debug("FastMonitor Birdeye error: %s", _be_err)
+
+                # ── Tier 2: Jupiter fallback for any mint Birdeye missed ──────
+                # Jupiter is free, works for every SPL token (including post-rug
+                # tokens that Birdeye may have de-listed), and is the price source
+                # stop-losses depend on when DexScreener also goes dark.
+                missing = [m for m in mints if m not in prices or not prices[m]
+                           or prices[m].price_usd <= 0]
+                if missing:
+                    for _mint in missing:
+                        try:
+                            jup_p = self._get_jupiter_price(_mint)
+                            if jup_p and jup_p > 0:
+                                # Use types.SimpleNamespace so each entry is
+                                # independent (class-level attrs share state).
+                                import types as _types
+                                prices[_mint] = _types.SimpleNamespace(
+                                    price_usd=jup_p, volume_24h_usd=0.0)
+                        except Exception:
+                            pass
 
                 to_close = []
                 for pair_addr, pos in list(self._dex_positions.items()):
@@ -969,6 +1010,15 @@ class AITrader:
                     pos["current_price"]   = current
                     pos["current_pnl_pct"] = pnl_pct
                     pos["peak_price"]      = max(pos.get("peak_price", entry), current)
+
+                    # Feed live prices into market intelligence outcome learning
+                    # This resolves 1h/4h outcome records so calibration actually works
+                    if mint:
+                        try:
+                            from market_intelligence import get_engine as _mi_engine
+                            _mi_engine().record_price_update(mint, current)
+                        except Exception:
+                            pass
 
                     prev = pos.get("fast_prev_price", entry)
                     pos["fast_prev_price"] = current
@@ -1160,19 +1210,47 @@ class AITrader:
 
                 token = self.dex_screener.get_token_info(pos["address"], pos["chain"])
                 if not token or token.price_usd <= 0:
+                    # ── Price-of-last-resort: Jupiter knows every SPL token ────
+                    # DexScreener drops tokens when liquidity goes to zero (exactly
+                    # when we most need a price). Jupiter still quotes them.
+                    jup_price = self._get_jupiter_price(pos.get("address", ""))
+                    if jup_price and jup_price > 0:
+                        entry    = pos["entry_price"]
+                        pnl_pct  = (jup_price - entry) / entry if entry > 0 else 0
+                        pos["current_price"]   = jup_price
+                        pos["current_pnl_pct"] = pnl_pct
+                        pos["_price_miss"]     = 0   # Jupiter counts as a valid price
+                        stop_pct = pos.get("stop_pct", 0.20)
+                        if pnl_pct <= -stop_pct:
+                            logger.warning(
+                                "JUPITER STOP %s @ $%.8f pnl=%.0f%% "
+                                "(DexScreener unavailable, Jupiter fallback)",
+                                pos.get("symbol", "?"), jup_price, pnl_pct * 100)
+                            self._try_close_dex_position(
+                                pair_addr, pos, jup_price,
+                                f"Stop loss {pnl_pct:.0%} (Jupiter price, DexScreener unavailable)")
+                        continue   # Skip full token-object path — we only have a price
+
                     miss = pos.get("_price_miss", 0) + 1
                     pos["_price_miss"] = miss
-                    if miss % 12 == 0:  # warn every ~60s
+                    if miss % 6 == 0:  # warn every ~30s
                         logger.warning(
-                            "Cannot fetch price for %s (%d consecutive misses) — "
-                            "position exits blocked", pos.get("symbol", "?"), miss)
-                    if miss >= 72:  # 6 min of no price → force exit at last known price
-                        last = pos.get("current_price", pos.get("entry_price", 0))
+                            "Cannot fetch price for %s (%d consecutive misses — "
+                            "DexScreener + Jupiter both unavailable)",
+                            pos.get("symbol", "?"), miss)
+                    # Force-exit after 12 misses (~60s) — not 72 (6min).
+                    # Use Jupiter as exit price; fall back to last cached only if
+                    # Jupiter also fails (token truly gone / no liquidity anywhere).
+                    if miss >= 12:
+                        exit_price = self._get_jupiter_price(pos.get("address", ""))
+                        if not exit_price or exit_price <= 0:
+                            exit_price = pos.get("current_price", pos.get("entry_price", 0))
                         logger.error(
-                            "Force-closing %s after %d price misses (last=$%.8f)",
-                            pos.get("symbol", "?"), miss, last)
+                            "Force-closing %s after %d price misses (exit=$%.8f)",
+                            pos.get("symbol", "?"), miss, exit_price)
                         self._try_close_dex_position(
-                            pair_addr, pos, last, f"No price data for {miss} cycles — force exit")
+                            pair_addr, pos, exit_price,
+                            f"No price data for {miss} cycles — force exit")
                     continue
                 pos["_price_miss"] = 0  # reset on successful fetch
 
@@ -1343,9 +1421,36 @@ class AITrader:
             self._dex_positions.pop(pair_addr)  # Claim ownership before releasing lock
         result = self._close_dex_position(pair_addr, pos, current_price, reason)
         if result is False:
-            # On-chain sell failed — re-insert so the next cycle can retry.
-            # Only re-insert if nothing else has taken that slot (shouldn't happen,
-            # but guard anyway to avoid overwriting a re-opened position).
+            # On-chain sell failed — increment failure counter.
+            sell_fails = pos.get("_sell_failures", 0) + 1
+            pos["_sell_failures"] = sell_fails
+
+            if sell_fails >= 5:
+                # 5 consecutive sell failures = token is unsellable (zero liquidity,
+                # pool drained, all routes dead). Force-remove and record 100% loss
+                # rather than retrying forever and blocking the position slot.
+                entry  = pos.get("entry_price", 0)
+                size   = pos.get("size_usd", 0) * pos.get("remaining_fraction", 1.0)
+                symbol = pos.get("symbol", "?")
+                logger.error(
+                    "ABANDONING %s after %d sell failures — token unsellable, "
+                    "recording 100%% loss of $%.2f", symbol, sell_fails, size)
+                self.portfolio.closed_trades.append({
+                    "asset_id":    pair_addr,
+                    "symbol":      symbol,
+                    "side":        "long",
+                    "entry_price": entry,
+                    "exit_price":  0.0,
+                    "pnl_usd":     round(-size, 4),
+                    "pnl_pct":     -100.0,
+                    "closed_at":   datetime.now(timezone.utc).isoformat(),
+                    "reason":      f"abandoned_unsellable ({sell_fails} sell failures)",
+                    "chain":       pos.get("chain", "solana"),
+                })
+                # Do NOT re-insert — position is gone
+                return False
+
+            # Re-insert for retry next cycle
             with self._dex_lock:
                 if pair_addr not in self._dex_positions:
                     self._dex_positions[pair_addr] = pos

@@ -104,6 +104,12 @@ class RiskManager:
         Check if a new position can be opened.
         Returns (allowed: bool, reason: str).
         """
+        # Circuit breakers — halt new positions on excessive losses
+        if self._daily_loss_triggered():
+            return False, "Daily loss circuit breaker active"
+        if self._max_drawdown_triggered():
+            return False, "Max drawdown circuit breaker active"
+
         # Already in this position
         if self.portfolio.has_position(asset_id):
             return False, f"Already holding position in {asset_id}"
@@ -177,10 +183,31 @@ class RiskManager:
         self._daily_loss_start_equity = self.portfolio.equity()
 
     def _daily_loss_triggered(self) -> bool:
-        return False  # Disabled — bot always trades
+        """Returns True if daily loss limit has been breached."""
+        if not self._daily_loss_start_equity or self._daily_loss_start_equity <= 0:
+            return False
+        current_equity = self.portfolio.equity()
+        daily_loss_pct = (self._daily_loss_start_equity - current_equity) / self._daily_loss_start_equity
+        if daily_loss_pct >= self._daily_loss_limit:
+            logger.warning(
+                "⛔ DAILY LOSS CIRCUIT BREAKER: %.1f%% loss today (limit %.1f%%) — halting new positions",
+                daily_loss_pct * 100, self._daily_loss_limit * 100)
+            return True
+        return False
 
     def _max_drawdown_triggered(self) -> bool:
-        return False  # Disabled — bot always trades
+        """Returns True if maximum drawdown from peak equity has been breached."""
+        peak = self.portfolio.peak_equity
+        if peak <= 0:
+            return False
+        current_equity = self.portfolio.equity()
+        drawdown_pct = (peak - current_equity) / peak
+        if drawdown_pct >= self._max_drawdown_limit:
+            logger.warning(
+                "⛔ MAX DRAWDOWN CIRCUIT BREAKER: %.1f%% drawdown from peak $%.0f — halting new positions",
+                drawdown_pct * 100, peak)
+            return True
+        return False
 
     # ─────────────────────────────────────────────────────────────────────────
     # Leverage / Futures Risk Controls
