@@ -356,7 +356,7 @@ class RiskManager:
         else:
             mult = 0.60    # unknown/risky — tightest stops, cut losses fast
 
-        stop = round(min(base * mult, 0.25), 3)
+        stop = round(min(base * mult, 0.15), 3)  # Cap at 15%: sell retries on failed routes can bleed 40%+
         logger.debug("Dynamic stop: h1=%.1f%% h6=%.1f%% h24=%.1f%% safety=%.2f → stop=%.1f%%",
                      h1_vol*100, h6_vol*100, h24_vol*100, safety_score, stop*100)
         return stop

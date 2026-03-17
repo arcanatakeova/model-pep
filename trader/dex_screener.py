@@ -412,10 +412,25 @@ class DexScreener:
         """
         Full scan combining trending + new pairs. Used by main trading cycle.
         """
+        # Dynamic min_score: lower threshold in quiet/dead markets to find more candidates.
+        # In a bull run, raise it to be selective.
+        min_score = config.DEX_MIN_SCORE  # default 0.50
+        try:
+            from market_intelligence import get_engine as _mi_eng
+            ms = _mi_eng().get_market_summary()
+            if ms.get("high_score_1h", 1) == 0 and ms.get("sentiment_score", 0.5) < 0.45:
+                # Dead market: zero high-scorers in last hour → open up
+                min_score = max(0.42, config.DEX_MIN_SCORE - 0.08)
+            elif ms.get("context_mult", 1.0) >= 1.30:
+                # Strong bull: be selective
+                min_score = min(0.60, config.DEX_MIN_SCORE + 0.05)
+        except Exception:
+            pass
+
         # Run both in parallel since they hit different API endpoints
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            f_trend = ex.submit(self.get_trending_tokens, config.DEX_MIN_SCORE)
-            f_new   = ex.submit(self.get_new_pairs, config.NEW_PAIR_MAX_AGE_HOURS, config.DEX_MIN_SCORE)
+            f_trend = ex.submit(self.get_trending_tokens, min_score)
+            f_new   = ex.submit(self.get_new_pairs, config.NEW_PAIR_MAX_AGE_HOURS, min_score)
             trending  = f_trend.result(timeout=120)
             new_pairs = f_new.result(timeout=120)
 
@@ -857,15 +872,12 @@ class DexScreener:
         elif token.source == "raydium":
             score += 0.02
 
-        # ── Birdeye price confirmation bonus/penalty ─────────────────────
-        # Birdeye-confirmed price = reliable real-time quote.
-        # No confirmation = DexScreener-only quote, possibly stale.
-        if token.chain_id == "solana":
-            if token.birdeye_price_confirmed:
-                score += 0.02  # small bonus — trusted price source
-            else:
-                score -= 0.04  # penalty — unverified price, higher manipulation risk
-                signals.append("Unconfirmed price")
+        # ── Birdeye price confirmation bonus ─────────────────────────────
+        # Small bonus for Birdeye-confirmed price — reliable real-time quote.
+        # No penalty for unconfirmed: new Pump.fun tokens often aren't indexed
+        # by Birdeye yet but are perfectly tradeable via PumpSwap direct.
+        if token.chain_id == "solana" and token.birdeye_price_confirmed:
+            score += 0.02
 
         # ── Solana chain preference ───────────────────────────────────────
         if token.chain_id == "solana":
@@ -1020,11 +1032,16 @@ class DexScreener:
 
         futures = [self._executor.submit(_check, t) for t in sol_tokens]
         # Wait with a generous timeout — safety checks can be slow
-        for f in concurrent.futures.as_completed(futures, timeout=90):
-            try:
-                f.result()
-            except Exception:
-                pass
+        try:
+            for f in concurrent.futures.as_completed(futures, timeout=90):
+                try:
+                    f.result()
+                except Exception:
+                    pass
+        except concurrent.futures.TimeoutError as e:
+            done = sum(1 for f in futures if f.done())
+            logger.warning("Safety checks partial timeout — %d/%d completed (%s). "
+                           "Proceeding with available data.", done, len(futures), e)
 
     # ─── Data Sources ─────────────────────────────────────────────────────────
 

@@ -184,6 +184,8 @@ class AITrader:
             self._load_equity_curve(), maxlen=17_280)  # 24h at 5s cadence; bounded automatically
         self._dex_positions: dict = {}  # addr → {buy_price, qty, chain, symbol}
         self._dex_lock = threading.Lock()  # Protects _dex_positions cross-thread (fast monitor + main)
+        # Tokens whose buy failed (e.g., PumpSwap overflow) → don't retry until TTL expires
+        self._buy_failed_cache: dict[str, float] = {}  # base_address → expiry timestamp
         self._dex_closed_count = 0         # Counts DEX closes; drives audit cadence
         self._cex_signals_cache = []    # Shared between CEX scan + futures swing scan
         self._cex_cache_lock = threading.Lock()  # Protects _cex_signals_cache cross-thread
@@ -823,6 +825,13 @@ class AITrader:
     def _open_dex_position(self, token, size_usd: float, safety=None):
         """Open a DEX position with safety verification and MEV protection."""
         try:
+            # ── Skip tokens that recently failed to buy (routing / overflow) ──
+            expiry = self._buy_failed_cache.get(token.base_address, 0)
+            if expiry and time.time() < expiry:
+                logger.debug("SKIP %s: in buy-fail cache (%.0fm remaining)",
+                             token.base_symbol, (expiry - time.time()) / 60)
+                return
+
             # ── Require a valid pair address as position key ─────────────────
             if not token.pair_address:
                 logger.warning("SKIP %s: missing pair_address — cannot track position",
@@ -923,6 +932,9 @@ class AITrader:
                     logger.warning("BUY skipped %s: safe_buy_token returned None "
                                    "(check BUY FAILED / BLOCKED logs above)",
                                    token.base_symbol)
+                    # Cache buy failure so scanner skips this token for 30 min.
+                    # Prevents wasting time on PumpSwap overflow / no-route tokens.
+                    self._buy_failed_cache[token.base_address] = time.time() + 1800
                 elif tx.startswith("paper_"):
                     logger.warning("BUY skipped %s: got paper tx in live mode — "
                                    "solana.is_connected may have flipped", token.base_symbol)
@@ -1473,10 +1485,44 @@ class AITrader:
         if result is False:
             # On-chain sell failed — re-insert so the next cycle can retry.
             # Track retry count so slippage widens on each attempt.
-            pos["_sell_retries"] = pos.get("_sell_retries", 0) + 1
+            retries = pos.get("_sell_retries", 0) + 1
+            pos["_sell_retries"] = retries
             with self._dex_lock:
                 if pair_addr not in self._dex_positions:
                     self._dex_positions[pair_addr] = pos
+
+            # ── Force-close after 5 consecutive sell failures ─────────────────
+            # If Jupiter/Raydium/PumpSwap all fail repeatedly, the tokens are
+            # effectively stuck (overflow pool, no route, etc.).  Accept the loss
+            # now rather than letting the position bleed further while retrying.
+            if retries >= 5:
+                logger.error(
+                    "FORCE-CLOSE %s after %d failed sell attempts — writing off "
+                    "at $%.8f. Tokens remain in wallet; reconciliation will re-add "
+                    "if still held.",
+                    pos.get("symbol", "?"), retries, current_price)
+                with self._dex_lock:
+                    self._dex_positions.pop(pair_addr, None)
+                # Record the loss so equity/PnL accounting is correct.
+                # Cash is NOT credited — we still hold the tokens.
+                entry = pos.get("entry_price", 0) or current_price
+                remaining = pos.get("remaining_fraction", 1.0)
+                size = pos["size_usd"] * remaining
+                loss_pct = (current_price - entry) / entry if entry > 0 else -1.0
+                loss_usd = size * loss_pct
+                pos["_forced_close"] = True
+                self.portfolio.closed_trades.append({
+                    "asset_id": pair_addr, "symbol": pos["symbol"],
+                    "market": "dex", "side": "buy",
+                    "entry_price": entry, "exit_price": current_price,
+                    "qty": pos.get("qty", 0), "pnl_usd": loss_usd,
+                    "pnl_pct": round(loss_pct * 100, 2),
+                    "reason": f"Force-close ({retries} sell failures)",
+                    "opened_at": pos.get("opened_at", ""),
+                    "closed_at": datetime.now(timezone.utc).isoformat(),
+                })
+                self.portfolio.save()
+                return False
         return result
 
     def _close_dex_position(self, pair_addr: str, pos: dict, current_price: float, reason: str) -> bool:
