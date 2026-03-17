@@ -1928,12 +1928,27 @@ class SolanaWallet:
     def _get_sol_price(self) -> float:
         """
         Get current SOL/USD price with 15s cache.
-        Sources tried in order: Birdeye → Jupiter Price API → CoinGecko.
+        Sources tried in order: Binance REST → Birdeye → Jupiter → CoinGecko.
         Returns last known price on failure; falls back to $150 only if never fetched.
         """
         price, ts = self._sol_price_cache
         if price > 0 and time.time() - ts < 15:
             return price
+
+        # 0. Binance REST — most reliable, no auth, geo-accessible via binance.us fallback
+        for binance_url in (
+            "https://api.binance.com/api/v3/ticker/price",
+            "https://api.binance.us/api/v3/ticker/price",
+        ):
+            try:
+                resp = _session.get(binance_url, params={"symbol": "SOLUSDT"}, timeout=4)
+                if resp.ok:
+                    p = float(resp.json().get("price", 0) or 0)
+                    if p > 0:
+                        self._sol_price_cache = (p, time.time())
+                        return p
+            except Exception:
+                continue
 
         # 1. Birdeye (real-time, most accurate when key available)
         if config.BIRDEYE_API_KEY:
@@ -1987,8 +2002,8 @@ class SolanaWallet:
         if price > 0:
             logger.debug("All SOL price sources failed — using stale cache $%.2f", price)
             return price
-        logger.warning("SOL price unavailable — using $150 fallback estimate")
-        return 150.0
+        logger.warning("SOL price unavailable — using $120 fallback estimate")
+        return 120.0
 
     # ─── Live wallet state (on-chain source of truth) ──────────────────────────
 
