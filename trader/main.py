@@ -1469,14 +1469,9 @@ class AITrader:
         proceeds = max(proceeds, 0.0)
 
         liq_usd = pos.get("liquidity_usd", 0.0)
-        # Escalate slippage on retries — previous attempt used the same tight value
-        # that triggered ExceededSlippage, so step up toward max on each retry.
-        sell_failures = pos.get("_sell_failures", 0)
-        retry_slippage = config.SOL_MAX_SLIPPAGE_BPS if sell_failures >= 1 else None
         if pos["chain"] == "solana" and self.solana.is_connected and "paper" not in pos.get("tx", ""):
             sell_result = self.solana.sell_token(pos["address"], proceeds,
                                                 liquidity_usd=liq_usd,
-                                                slippage_bps=retry_slippage,
                                                 pair_address=pair_addr if pos.get("dex_id") == "pumpswap" else None)
             if sell_result:
                 _sig, actual_usd = sell_result

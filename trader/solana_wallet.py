@@ -734,6 +734,10 @@ class SolanaWallet:
             "wrapAndUnwrapSol":          True,
             "prioritizationFeeLamports": priority_fee,
             "dynamicComputeUnitLimit":   True,
+            "dynamicSlippage":           {
+                "minBps": 50,
+                "maxBps": config.SOL_MAX_SLIPPAGE_BPS,
+            },
         }
         try:
             resp = None
@@ -1618,7 +1622,7 @@ class SolanaWallet:
             "inputMint":           input_mint,
             "outputMint":          output_mint,
             "amount":              str(amount),
-            "slippageBps":         str(slippage_bps),
+            "slippageBps":         str(config.SOL_MAX_SLIPPAGE_BPS),  # ceiling hint; swap uses dynamicSlippage
             "onlyDirectRoutes":    "false",
             "asLegacyTransaction": "false",
         }
@@ -1835,17 +1839,18 @@ class SolanaWallet:
     def _compute_slippage_bps(self, trade_usd: float,
                                liquidity_usd: float) -> int:
         """
-        Compute dynamic slippage in basis points:
+        Compute dynamic slippage in basis points for non-Jupiter routes (PumpSwap, Raydium).
+        Jupiter uses its own dynamicSlippage feature instead of this value.
+
         - Base: 100 bps (1%)
-        - Scale up as trade size approaches pool liquidity
-        - Cap at SOL_MAX_SLIPPAGE_BPS from config
+        - Scales up with price impact: trade_usd / liquidity_usd
+        - Hard minimum of 200 bps to absorb normal market micro-moves
+        - Capped at SOL_MAX_SLIPPAGE_BPS
         """
-        base_bps = 100
+        base_bps = 200  # 2% floor — avoids ExceededSlippage on thin markets
         if liquidity_usd > 0 and trade_usd > 0:
-            # Liquidity impact: trade_usd / liquidity_usd × 10000 bps
             impact_bps = int((trade_usd / liquidity_usd) * 10_000)
-            # Round up to nearest 50 bps, add to base
-            buffer = ((impact_bps + 49) // 50) * 50
+            buffer = ((impact_bps + 49) // 50) * 50  # round up to nearest 50 bps
             base_bps = max(base_bps, buffer)
         return min(base_bps, config.SOL_MAX_SLIPPAGE_BPS)
 
