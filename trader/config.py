@@ -106,6 +106,8 @@ SUPERTREND_MULTIPLIER = 3.0
 STOCH_RSI_PERIOD      = 14
 STOCH_RSI_SMOOTH_K    = 3
 STOCH_RSI_SMOOTH_D    = 3
+STOCH_K_SMOOTH        = 3
+STOCH_D_SMOOTH        = 3
 
 # ─── API Endpoints (Free / No-Key Required) ───────────────────────────────────
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
