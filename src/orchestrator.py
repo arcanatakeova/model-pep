@@ -36,6 +36,7 @@ from src.self_improve import SelfImprover
 from src.seo_engine import SEOEngine
 from src.services import ServiceEngine
 from src.trader_bridge import TraderBridge
+from src.opportunity_scanner import OpportunityScanner
 from src.ugc_engine import UGCEngine
 from src.x_client import XClient
 
@@ -74,6 +75,7 @@ class Orchestrator:
         self.services: ServiceEngine | None = None
         self.seo: SEOEngine | None = None
         self.ugc: UGCEngine | None = None
+        self.scanner: OpportunityScanner | None = None
         # State
         self._running = True
         self._last_mention_id: str | None = None
@@ -112,10 +114,11 @@ class Orchestrator:
             self.config.heygen_api_key,
             self.config.makeugc_api_key,
         )
+        self.scanner = OpportunityScanner(self.llm, self.memory, self.x, self.notifier)
         self.revenue = RevenueEngine(self.memory, self.products, self.trader)
 
-        self.memory.log("ARCANA AI initialized. All revenue channels online.", "System")
-        await self.notifier.send("ARCANA AI online. All revenue channels active. Let's get paid.")
+        self.memory.log("ARCANA AI initialized. All revenue channels online. Scanner armed.", "System")
+        await self.notifier.send("ARCANA AI online. Scanner armed. Hunting for revenue.")
         logger.info("Orchestrator initialized — all channels online")
 
     def _kill_switch_active(self) -> bool:
@@ -160,6 +163,10 @@ class Orchestrator:
         ugc_clients = self.ugc.get_ugc_clients()
         ugc_mrr = self.ugc.get_ugc_mrr()
 
+        # Scanner pipeline
+        scanner_report = self.scanner.format_scanner_report()
+        pipeline_summary = self.scanner.get_pipeline_summary()
+
         # Generate priorities with full context
         result = await self.llm.ask_json(
             f"Generate ARCANA AI's morning report. Target: $100K/month.\n\n"
@@ -168,6 +175,8 @@ class Orchestrator:
             f"SERVICES: {len(active_clients)} clients, ${services_mrr:,.2f} MRR\n"
             f"UGC: {len(ugc_clients)} clients, ${ugc_mrr:,.2f} MRR\n"
             f"NEWSLETTER: {nl_stats.get('subscribers', 0)} subscribers\n"
+            f"SCANNER PIPELINE: {pipeline_summary['total_opportunities']} opportunities, "
+            f"${pipeline_summary['estimated_pipeline_value_monthly']:,.0f}/mo est. value\n"
             f"OPEN LEADS: {', '.join(open_leads) or 'None'}\n\n"
             f"Yesterday:\n{yesterday[:800]}\n\n"
             f"Support (Iris): {iris_report}\n"
@@ -194,6 +203,7 @@ class Orchestrator:
             f"**UGC MRR:** ${ugc_mrr:,.2f} ({len(ugc_clients)} clients)\n"
             f"**Newsletter:** {nl_stats.get('subscribers', 0)} subscribers\n"
             f"**Open Leads:** {len(open_leads)}\n\n"
+            f"{scanner_report}\n\n"
             f"**Revenue Actions:**\n"
             + "\n".join(f"- {a}" for a in result.get("revenue_actions", []))
             + "\n\n**Waiting on Ian/Tan:**\n"
@@ -225,13 +235,24 @@ class Orchestrator:
         # 1. HIGHEST PRIORITY: Check mentions → qualify leads
         await self._process_mentions()
 
-        # 2. Post content (tweets, threads, trade receipts)
+        # 2. HUNT FOR MONEY: Scan X, Reddit, freelance, HN for opportunities
+        try:
+            scan_results = await self.scanner.scan_cycle()
+            if scan_results.get("total_found", 0) > 0:
+                self._completed_today.append(
+                    f"Scanner: {scan_results['total_found']} opportunities, "
+                    f"{scan_results['auto_responded']} responded"
+                )
+        except Exception as exc:
+            logger.error("Opportunity scan failed: %s", exc)
+
+        # 3. Post content (tweets, threads, trade receipts)
         await self._maybe_post_content()
 
-        # 3. Post trade receipts from trader bot
+        # 4. Post trade receipts from trader bot
         await self._maybe_post_trade_receipt()
 
-        # 4. Update heartbeat
+        # 5. Update heartbeat
         self.heartbeat.update(
             "Active",
             "Monitoring all channels",
@@ -415,7 +436,17 @@ class Orchestrator:
         except Exception as exc:
             logger.error("UGC production failed: %s", exc)
 
-        # 4. Follow up on warm leads
+        # 4. Nurture opportunity pipeline (generate proposals for top opportunities)
+        try:
+            nurture = await self.scanner.nurture_pipeline()
+            if nurture.get("proposals_generated", 0) > 0:
+                self._completed_today.append(
+                    f"Generated {nurture['proposals_generated']} proposals from pipeline"
+                )
+        except Exception as exc:
+            logger.error("Pipeline nurture failed: %s", exc)
+
+        # 5. Follow up on warm leads
         try:
             open_leads = [
                 n for n in self.memory.list_knowledge("projects")
@@ -456,6 +487,11 @@ class Orchestrator:
         if ugc_mrr > 0:
             self.revenue.update_channel_revenue("ugc", ugc_mrr)
 
+        # Scanner nightly analysis (what's working, what to change)
+        scanner_analysis = await self.scanner.nightly_analysis()
+        scanner_report = self.scanner.format_scanner_report()
+        self.memory.log(f"Scanner analysis: {scanner_analysis}", "Scanner")
+
         # Run self-improvement analysis
         analysis = await self.improver.run_nightly_review()
 
@@ -463,6 +499,7 @@ class Orchestrator:
         summary = (
             f"**Nightly Review Complete**\n\n"
             f"{rev_report}\n\n"
+            f"{scanner_report}\n\n"
             f"{analysis.get('summary', 'N/A')}\n"
             f"Wins: {len(analysis.get('wins', []))}\n"
             f"Bottlenecks: {len(analysis.get('bottlenecks', []))}\n"
@@ -557,6 +594,8 @@ class Orchestrator:
             await self.newsletter.close()
         if self.ugc:
             await self.ugc.close()
+        if self.scanner:
+            await self.scanner.close()
 
 
 def main() -> None:
