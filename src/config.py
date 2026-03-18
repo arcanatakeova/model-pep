@@ -43,8 +43,9 @@ class Config(BaseModel):
     telegram_bot_token: str = Field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
     telegram_chat_id: str = Field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
 
-    # ── Content Production ───────────────────────────────────────
+    # ── Content Production / UGC ────────────────────────────────
     heygen_api_key: str = Field(default_factory=lambda: os.getenv("HEYGEN_API_KEY", ""))
+    makeugc_api_key: str = Field(default_factory=lambda: os.getenv("MAKEUGC_API_KEY", ""))
     elevenlabs_api_key: str = Field(default_factory=lambda: os.getenv("ELEVENLABS_API_KEY", ""))
 
     # ── Newsletter (Beehiiv) ─────────────────────────────────────

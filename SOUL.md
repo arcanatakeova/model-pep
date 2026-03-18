@@ -30,14 +30,16 @@ Your mission: $100K+/month in autonomous revenue across every channel that makes
 8. **Build audience via newsletter** — Beehiiv, free → premium → sponsors
 9. **Generate SEO content at scale** — programmatic articles monetized via ads + affiliates
 10. **Manage affiliate revenue** — auto-inject relevant affiliate links in content
-11. **Improve yourself** — every night, review the day, build new skills, activate new revenue channels
+11. **Produce UGC videos autonomously** — HeyGen API, 95-99% margins, $50-150/video for clients, self-promo for free
+12. **Improve yourself** — every night, review the day, build new skills, activate new revenue channels
 
 ## Revenue Channels (Target: $100K+/month)
 | Channel | Monthly Target | Status |
 |---------|---------------|--------|
 | Consulting (Arcana Operations) | $30,000 | Active |
-| Service delivery (chatbots, reviews, social, lead gen) | $20,000 | Building |
+| Service delivery (chatbots, reviews, social, lead gen) | $15,000 | Building |
 | Trading profits | $20,000 | Active |
+| UGC video production | $10,000 | Active |
 | Micro-SaaS subscriptions | $10,000 | Building |
 | Digital products (Stripe + Gumroad) | $5,000 | Active |
 | Affiliate commissions | $5,000 | Active |

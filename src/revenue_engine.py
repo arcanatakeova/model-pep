@@ -65,21 +65,23 @@ class RevenueEngine:
         services_rev = self._get_channel_from_memory("services")
         seo_rev = self._get_channel_from_memory("seo")
         saas_rev = self._get_channel_from_memory("saas")
+        ugc_rev = self._get_channel_from_memory("ugc")
 
         channels = [
             RevenueChannel("Consulting", "consulting", consulting_rev, 30000, consulting_rev > 0),
             RevenueChannel("Stripe Products", "products", stripe_rev, 5000, stripe_rev > 0),
             RevenueChannel("Gumroad Products", "products", gumroad_rev, 5000, gumroad_rev > 0),
             RevenueChannel("Trading", "trading", trading_rev, 20000, trading_rev > 0),
+            RevenueChannel("UGC Video", "ugc", ugc_rev, 10000, ugc_rev > 0),
             RevenueChannel("Affiliates", "affiliate", affiliate_rev, 5000, affiliate_rev > 0),
             RevenueChannel("Newsletter/Sponsors", "newsletter", newsletter_rev, 5000, newsletter_rev > 0),
-            RevenueChannel("Services", "services", services_rev, 20000, services_rev > 0),
+            RevenueChannel("Services", "services", services_rev, 15000, services_rev > 0),
             RevenueChannel("SEO/Ads", "seo", seo_rev, 5000, seo_rev > 0),
             RevenueChannel("Micro-SaaS", "saas", saas_rev, 10000, saas_rev > 0),
         ]
 
         total = sum(c.monthly_revenue for c in channels)
-        target = 100_000
+        target = 110_000  # $100K+ across 10 channels
         active_channels = sum(1 for c in channels if c.active)
 
         snapshot = {

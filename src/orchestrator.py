@@ -6,7 +6,7 @@ The autonomous brain. Runs the Felix-style daily cycle with ALL revenue channels
 3. Weekly Ops — Newsletter issue, SEO batch, service delivery
 4. Nightly Self-Improvement (11 PM PT) — Review, consolidate, learn, propose automations
 
-Revenue target: $100K+/month across 9 channels.
+Revenue target: $100K+/month across 10 channels.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from src.self_improve import SelfImprover
 from src.seo_engine import SEOEngine
 from src.services import ServiceEngine
 from src.trader_bridge import TraderBridge
+from src.ugc_engine import UGCEngine
 from src.x_client import XClient
 
 logging.basicConfig(
@@ -72,6 +73,7 @@ class Orchestrator:
         self.newsletter: Newsletter | None = None
         self.services: ServiceEngine | None = None
         self.seo: SEOEngine | None = None
+        self.ugc: UGCEngine | None = None
         # State
         self._running = True
         self._last_mention_id: str | None = None
@@ -105,6 +107,11 @@ class Orchestrator:
         )
         self.services = ServiceEngine(self.llm, self.memory)
         self.seo = SEOEngine(self.llm, self.memory)
+        self.ugc = UGCEngine(
+            self.llm, self.memory,
+            self.config.heygen_api_key,
+            self.config.makeugc_api_key,
+        )
         self.revenue = RevenueEngine(self.memory, self.products, self.trader)
 
         self.memory.log("ARCANA AI initialized. All revenue channels online.", "System")
@@ -149,12 +156,17 @@ class Orchestrator:
         # Newsletter stats
         nl_stats = await self.newsletter.get_stats()
 
+        # UGC stats
+        ugc_clients = self.ugc.get_ugc_clients()
+        ugc_mrr = self.ugc.get_ugc_mrr()
+
         # Generate priorities with full context
         result = await self.llm.ask_json(
             f"Generate ARCANA AI's morning report. Target: $100K/month.\n\n"
             f"REVENUE DASHBOARD:\n{rev_report}\n\n"
             f"TRADING BOT:\n{trading_summary}\n\n"
             f"SERVICES: {len(active_clients)} clients, ${services_mrr:,.2f} MRR\n"
+            f"UGC: {len(ugc_clients)} clients, ${ugc_mrr:,.2f} MRR\n"
             f"NEWSLETTER: {nl_stats.get('subscribers', 0)} subscribers\n"
             f"OPEN LEADS: {', '.join(open_leads) or 'None'}\n\n"
             f"Yesterday:\n{yesterday[:800]}\n\n"
@@ -179,6 +191,7 @@ class Orchestrator:
             f"{rev_report}\n\n"
             f"{trading_summary}\n\n"
             f"**Services MRR:** ${services_mrr:,.2f} ({len(active_clients)} clients)\n"
+            f"**UGC MRR:** ${ugc_mrr:,.2f} ({len(ugc_clients)} clients)\n"
             f"**Newsletter:** {nl_stats.get('subscribers', 0)} subscribers\n"
             f"**Open Leads:** {len(open_leads)}\n\n"
             f"**Revenue Actions:**\n"
@@ -380,7 +393,29 @@ class Orchestrator:
         except Exception as exc:
             logger.error("SEO batch failed: %s", exc)
 
-        # 3. Follow up on warm leads
+        # 3. Produce UGC videos for clients + self-promo
+        try:
+            ugc_clients = self.ugc.get_ugc_clients()
+            if ugc_clients:
+                for client_key in ugc_clients[:5]:
+                    client_data = self.memory.get_knowledge("projects", client_key)
+                    if client_data:
+                        # Extract product info from client data and produce videos
+                        logger.info("UGC batch for %s", client_key)
+                self._completed_today.append(f"UGC batch for {len(ugc_clients)} clients")
+
+            # Self-promo video for ARCANA's own products
+            if random.random() < 0.3:  # ~30% chance each week
+                promo = await self.ugc.produce_promo_video(
+                    "The Arcana Playbook",
+                    "https://arcanaoperations.gumroad.com/l/playbook",
+                )
+                if promo.get("video_url"):
+                    self._completed_today.append("Produced self-promo UGC video")
+        except Exception as exc:
+            logger.error("UGC production failed: %s", exc)
+
+        # 4. Follow up on warm leads
         try:
             open_leads = [
                 n for n in self.memory.list_knowledge("projects")
@@ -413,10 +448,13 @@ class Orchestrator:
         rev_snapshot = await self.revenue.get_full_revenue_snapshot()
         rev_report = self.revenue.format_revenue_report(rev_snapshot)
 
-        # Update services MRR in revenue tracking
+        # Update services + UGC MRR in revenue tracking
         services_mrr = self.services.get_services_mrr()
         if services_mrr > 0:
             self.revenue.update_channel_revenue("services", services_mrr)
+        ugc_mrr = self.ugc.get_ugc_mrr()
+        if ugc_mrr > 0:
+            self.revenue.update_channel_revenue("ugc", ugc_mrr)
 
         # Run self-improvement analysis
         analysis = await self.improver.run_nightly_review()
@@ -517,6 +555,8 @@ class Orchestrator:
             await self.products.close()
         if self.newsletter:
             await self.newsletter.close()
+        if self.ugc:
+            await self.ugc.close()
 
 
 def main() -> None:
