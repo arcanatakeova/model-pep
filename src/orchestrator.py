@@ -7,6 +7,7 @@ The autonomous brain. Runs the Felix-style daily cycle with ALL revenue channels
 4. Nightly Self-Improvement (11 PM PT) — Review, consolidate, learn, propose automations
 
 Revenue target: $100K+/month across 10 channels.
+Full execution layer: find → qualify → propose → close → invoice → deliver → upsell.
 """
 
 from __future__ import annotations
@@ -22,21 +23,29 @@ from typing import Any
 from src.affiliates import AffiliateManager
 from src.agents.iris import Iris
 from src.agents.remy import Remy
+from src.analytics import Analytics
 from src.config import STOP_FILE, Config, get_config
 from src.content_engine import ContentEngine
+from src.crm import CRM
+from src.distribution import ContentDistributor
+from src.email_engine import EmailEngine
+from src.fulfillment import FulfillmentEngine
 from src.heartbeat import Heartbeat
 from src.leads import LeadPipeline
 from src.llm import LLM, Tier
 from src.memory import Memory
 from src.newsletter import Newsletter
 from src.notify import Notifier
-from src.products import ProductManager
+from src.opportunity_scanner import OpportunityScanner
+from src.outreach import OutreachEngine
+from src.payments import PaymentsEngine
+from src.product_factory import ProductFactory
 from src.revenue_engine import RevenueEngine
+from src.scheduler import TaskScheduler
 from src.self_improve import SelfImprover
 from src.seo_engine import SEOEngine
 from src.services import ServiceEngine
 from src.trader_bridge import TraderBridge
-from src.opportunity_scanner import OpportunityScanner
 from src.ugc_engine import UGCEngine
 from src.x_client import XClient
 
@@ -76,6 +85,16 @@ class Orchestrator:
         self.seo: SEOEngine | None = None
         self.ugc: UGCEngine | None = None
         self.scanner: OpportunityScanner | None = None
+        # Execution layer
+        self.email: EmailEngine | None = None
+        self.payments_engine: PaymentsEngine | None = None
+        self.crm: CRM | None = None
+        self.outreach: OutreachEngine | None = None
+        self.product_factory: ProductFactory | None = None
+        self.fulfillment: FulfillmentEngine | None = None
+        self.distributor: ContentDistributor | None = None
+        self.scheduler: TaskScheduler | None = None
+        self.analytics: Analytics | None = None
         # State
         self._running = True
         self._last_mention_id: str | None = None
@@ -115,11 +134,53 @@ class Orchestrator:
             self.config.makeugc_api_key,
         )
         self.scanner = OpportunityScanner(self.llm, self.memory, self.x, self.notifier)
+
+        # Execution layer — close deals, collect money, deliver services
+        self.email = EmailEngine(
+            self.llm, self.memory,
+            self.config.sendgrid_api_key, self.config.instantly_api_key,
+        )
+        self.payments_engine = PaymentsEngine(
+            self.memory, self.config.stripe_secret_key, self.config.gumroad_access_token,
+        )
+        self.crm = CRM(self.llm, self.memory)
+        self.outreach = OutreachEngine(
+            self.llm, self.memory, self.email, self.crm, self.config.apollo_api_key,
+        )
+        self.product_factory = ProductFactory(self.llm, self.memory, self.payments_engine)
+        self.fulfillment = FulfillmentEngine(
+            self.llm, self.memory, self.services,
+            self.config.buffer_api_key, self.config.google_business_token,
+        )
+        self.distributor = ContentDistributor(
+            self.llm, self.memory,
+            self.config.buffer_api_key, self.config.linkedin_token,
+        )
+        self.scheduler = TaskScheduler(self.memory)
+        self.analytics = Analytics(self.llm, self.memory)
         self.revenue = RevenueEngine(self.memory, self.products, self.trader)
 
-        self.memory.log("ARCANA AI initialized. All revenue channels online. Scanner armed.", "System")
-        await self.notifier.send("ARCANA AI online. Scanner armed. Hunting for revenue.")
+        # Register scheduler handlers
+        self._register_scheduler_handlers()
+
+        self.memory.log("ARCANA AI initialized. Full execution layer online.", "System")
+        await self.notifier.send(
+            "ARCANA AI online. Scanner armed. Execution layer active. "
+            "Finding opportunities, closing deals, delivering services, collecting payments."
+        )
         logger.info("Orchestrator initialized — all channels online")
+
+    def _register_scheduler_handlers(self) -> None:
+        """Register async handlers for all scheduled tasks."""
+        self.scheduler.register_handler("morning_report", self.morning_report)
+        self.scheduler.register_handler("nightly_review", self.nightly_review)
+        self.scheduler.register_handler("scan_opportunities", self.scanner.scan_cycle)
+        self.scheduler.register_handler("fulfill_services", self.fulfillment.run_daily_fulfillment)
+        self.scheduler.register_handler("weekly_newsletter", self.newsletter.generate_weekly_issue)
+        self.scheduler.register_handler("weekly_outreach", self.outreach.weekly_outreach_cycle)
+        self.scheduler.register_handler("weekly_pipeline_nurture", self.scanner.nurture_pipeline)
+        self.scheduler.register_handler("monthly_product_creation", self.product_factory.create_and_list_product)
+        self.scheduler.register_handler("monthly_analytics", self.analytics.generate_roi_report)
 
     def _kill_switch_active(self) -> bool:
         if STOP_FILE.exists():
@@ -167,6 +228,18 @@ class Orchestrator:
         scanner_report = self.scanner.format_scanner_report()
         pipeline_summary = self.scanner.get_pipeline_summary()
 
+        # CRM pipeline
+        crm_report = self.crm.format_pipeline_report()
+
+        # Analytics
+        analytics_report = self.analytics.format_analytics_report()
+
+        # Scheduler
+        scheduler_report = self.scheduler.format_schedule_report()
+
+        # Stripe MRR
+        stripe_mrr = self.payments_engine.get_mrr()
+
         # Generate priorities with full context
         result = await self.llm.ask_json(
             f"Generate ARCANA AI's morning report. Target: $100K/month.\n\n"
@@ -177,6 +250,7 @@ class Orchestrator:
             f"NEWSLETTER: {nl_stats.get('subscribers', 0)} subscribers\n"
             f"SCANNER PIPELINE: {pipeline_summary['total_opportunities']} opportunities, "
             f"${pipeline_summary['estimated_pipeline_value_monthly']:,.0f}/mo est. value\n"
+            f"STRIPE MRR: ${stripe_mrr:,.2f}\n"
             f"OPEN LEADS: {', '.join(open_leads) or 'None'}\n\n"
             f"Yesterday:\n{yesterday[:800]}\n\n"
             f"Support (Iris): {iris_report}\n"
@@ -204,6 +278,9 @@ class Orchestrator:
             f"**Newsletter:** {nl_stats.get('subscribers', 0)} subscribers\n"
             f"**Open Leads:** {len(open_leads)}\n\n"
             f"{scanner_report}\n\n"
+            f"{crm_report}\n\n"
+            f"{analytics_report}\n\n"
+            f"{scheduler_report}\n\n"
             f"**Revenue Actions:**\n"
             + "\n".join(f"- {a}" for a in result.get("revenue_actions", []))
             + "\n\n**Waiting on Ian/Tan:**\n"
@@ -252,7 +329,27 @@ class Orchestrator:
         # 4. Post trade receipts from trader bot
         await self._maybe_post_trade_receipt()
 
-        # 5. Update heartbeat
+        # 5. CRM pipeline automation (advance stale deals, follow up)
+        try:
+            crm_results = await self.crm.auto_advance_pipeline()
+            if crm_results.get("actions_taken", 0) > 0:
+                self._completed_today.append(
+                    f"CRM: {crm_results['actions_taken']} pipeline actions"
+                )
+        except Exception as exc:
+            logger.error("CRM automation failed: %s", exc)
+
+        # 6. Run scheduled fulfillment tasks
+        try:
+            sched_results = await self.scheduler.execute_due_tasks()
+            if sched_results.get("executed", 0) > 0:
+                self._completed_today.append(
+                    f"Scheduler: {sched_results['executed']} tasks executed"
+                )
+        except Exception as exc:
+            logger.error("Scheduler failed: %s", exc)
+
+        # 7. Update heartbeat
         self.heartbeat.update(
             "Active",
             "Monitoring all channels",
@@ -330,12 +427,19 @@ class Orchestrator:
                         await self.x.reply_to(tweet_id, aff["reply_text"])
                 self._completed_today.append("Posted analysis tweet")
 
-        # Case File (2x per week — Mon and Thu)
+        # Case File (2x per week — Mon and Thu) — distribute to all platforms
         elif now.weekday() in (0, 3) and hour == 18 and random.random() < 0.5:
             tweets = await self.content.case_file()
             if tweets:
                 await self.x.post_thread(tweets)
-                self._completed_today.append("Posted Case File thread")
+                # Distribute thread to LinkedIn, blog, newsletter
+                try:
+                    await self.distributor.distribute_content(
+                        "\n\n".join(tweets), "thread"
+                    )
+                except Exception:
+                    pass
+                self._completed_today.append("Posted + distributed Case File")
 
         # Behind-the-scenes (2-3x per week)
         elif now.weekday() in (1, 3, 5) and hour == 20 and random.random() < 0.4:
@@ -436,7 +540,7 @@ class Orchestrator:
         except Exception as exc:
             logger.error("UGC production failed: %s", exc)
 
-        # 4. Nurture opportunity pipeline (generate proposals for top opportunities)
+        # 4. Nurture opportunity pipeline
         try:
             nurture = await self.scanner.nurture_pipeline()
             if nurture.get("proposals_generated", 0) > 0:
@@ -446,7 +550,28 @@ class Orchestrator:
         except Exception as exc:
             logger.error("Pipeline nurture failed: %s", exc)
 
-        # 5. Follow up on warm leads
+        # 5. Launch cold outreach campaign
+        try:
+            outreach = await self.outreach.weekly_outreach_cycle()
+            if outreach.get("status") == "launched":
+                self._completed_today.append(
+                    f"Outreach campaign: {outreach.get('campaign_name', 'N/A')} "
+                    f"({outreach.get('prospects', 0)} prospects)"
+                )
+        except Exception as exc:
+            logger.error("Outreach campaign failed: %s", exc)
+
+        # 6. Run daily fulfillment for all service clients
+        try:
+            fulfillment = await self.fulfillment.run_daily_fulfillment()
+            if fulfillment.get("clients_served", 0) > 0:
+                self._completed_today.append(
+                    f"Fulfilled services for {fulfillment['clients_served']} clients"
+                )
+        except Exception as exc:
+            logger.error("Fulfillment failed: %s", exc)
+
+        # 7. Follow up on warm leads
         try:
             open_leads = [
                 n for n in self.memory.list_knowledge("projects")
@@ -596,6 +721,16 @@ class Orchestrator:
             await self.ugc.close()
         if self.scanner:
             await self.scanner.close()
+        if self.email:
+            await self.email.close()
+        if self.payments_engine:
+            await self.payments_engine.close()
+        if self.outreach:
+            await self.outreach.close()
+        if self.fulfillment:
+            await self.fulfillment.close()
+        if self.distributor:
+            await self.distributor.close()
 
 
 def main() -> None:

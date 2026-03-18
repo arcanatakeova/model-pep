@@ -56,9 +56,15 @@ class Config(BaseModel):
     vercel_token: str = Field(default_factory=lambda: os.getenv("VERCEL_TOKEN", ""))
     google_adsense_id: str = Field(default_factory=lambda: os.getenv("GOOGLE_ADSENSE_ID", ""))
 
+    # ── Email (SendGrid) ────────────────────────────────────────
+    sendgrid_api_key: str = Field(default_factory=lambda: os.getenv("SENDGRID_API_KEY", ""))
+
     # ── Lead Gen / Outreach ──────────────────────────────────────
     apollo_api_key: str = Field(default_factory=lambda: os.getenv("APOLLO_API_KEY", ""))
     instantly_api_key: str = Field(default_factory=lambda: os.getenv("INSTANTLY_API_KEY", ""))
+
+    # ── LinkedIn ─────────────────────────────────────────────────
+    linkedin_token: str = Field(default_factory=lambda: os.getenv("LINKEDIN_TOKEN", ""))
 
     # ── Social Media Management ──────────────────────────────────
     buffer_api_key: str = Field(default_factory=lambda: os.getenv("BUFFER_API_KEY", ""))
