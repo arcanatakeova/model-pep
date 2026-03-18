@@ -1,45 +1,41 @@
-# AI Trader — Python Dependencies
-# Install: pip install -r requirements.txt
+# ARCANA AI — Dependencies
+# Python 3.11+
 
-# ── Core ──────────────────────────────────────────────────────────────────────
-requests>=2.31.0            # HTTP client for all API calls
-pandas>=2.0.0               # Data manipulation and time series analysis
-numpy>=1.24.0               # Numerical computations for indicators
-python-dotenv>=1.0.0        # Load API keys from .env file
-websocket-client>=1.6.0     # Binance WebSocket feed (replaces manual socket impl)
+# ── Core ─────────────────────────────────────────────────────────────────────
+httpx>=0.27                 # Async HTTP client for all API calls
+pydantic>=2.0               # Data validation and settings
+python-dotenv>=1.0          # Load API keys from .env
 
-# ── Supabase (secrets vault + trade/state persistence) ────────────────────────
-supabase>=2.3.0             # Supabase Python client (secrets, trades, equity curve)
+# ── LLM & Agent Framework ───────────────────────────────────────────────────
+langchain>=0.3              # LLM framework
+langgraph>=0.2              # Agent graph orchestration
+openai>=1.0                 # OpenAI SDK (used via OpenRouter)
 
-# ── Stock & ETF Data ─────────────────────────────────────────────────────────
-yfinance>=0.2.18            # Yahoo Finance (stocks, ETFs, indices)
+# ── Database ─────────────────────────────────────────────────────────────────
+supabase>=2.0               # Supabase client (PostgreSQL + pgvector)
 
-# ── Solana / Phantom Wallet ───────────────────────────────────────────────────
-# Required for live Solana trading via Phantom wallet + Jupiter DEX
-solana>=0.30.2              # Solana Python SDK (RPC client)
-solders>=0.18.1             # Rust-based Solana types (Keypair, Pubkey, etc.)
+# ── Scheduling ───────────────────────────────────────────────────────────────
+apscheduler>=3.10           # Job scheduling for periodic tasks
 
-# ── Polymarket ────────────────────────────────────────────────────────────────
-# Optional: only available on Linux x86_64. macOS users: skip or install manually.
-# pip3 install py-clob-client  (Linux only — not on PyPI for macOS/arm64)
-# py-clob-client>=0.12.0
+# ── Trading — Solana ─────────────────────────────────────────────────────────
+solders>=0.21               # Rust-based Solana types (Keypair, Pubkey)
+solana>=0.34                # Solana Python SDK (RPC client)
+base58>=2.1                 # Base58 encoding for Solana keys
 
-# ── Polymarket Enhanced (LLM probability, news, cross-platform) ─────────────
-anthropic>=0.39.0           # Claude API for LLM probability estimation
-openai>=1.50.0              # OpenAI fallback for probability estimation
-feedparser>=6.0.0           # Google News RSS parsing for news sentiment
+# ── Trading — Polymarket ─────────────────────────────────────────────────────
+# py-clob-client>=0.17     # Polymarket CLOB client (Linux x86_64 only)
 
-# ── CEX Live Trading (optional) ───────────────────────────────────────────────
-# Uncomment to enable live trading on Binance, Coinbase, etc.
-# ccxt>=4.0.0               # Unified crypto exchange API (Binance spot + futures)
+# ── Social Media ─────────────────────────────────────────────────────────────
+tweepy>=4.14                # X/Twitter API client
 
-# ── Dashboard ─────────────────────────────────────────────────────────────────
-streamlit>=1.30.0           # Real-time web dashboard (streamlit run trader/dashboard.py)
-plotly>=5.0.0               # Interactive charts in dashboard
+# ── Payments ─────────────────────────────────────────────────────────────────
+stripe>=8.0                 # Stripe payment processing
 
-# ── Backtest ──────────────────────────────────────────────────────────────────
-matplotlib>=3.7.0           # Equity curve plots (python backtest.py --plot)
+# ── Notifications ────────────────────────────────────────────────────────────
+discord-webhook>=1.3        # Discord webhook notifications
+python-telegram-bot>=21.0   # Telegram Bot API
 
-# ── Development ───────────────────────────────────────────────────────────────
-# pytest>=7.0.0
-# pytest-mock>=3.0.0
+# ── Legacy (existing trader) ─────────────────────────────────────────────────
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.24.0
