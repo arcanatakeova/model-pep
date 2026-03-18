@@ -1,14 +1,12 @@
 """ARCANA AI — Orchestrator.
 
-The autonomous brain. Runs the Felix-style daily cycle:
-1. Morning Report (7 AM PT) — Check revenue, compile priorities, ping Ian/Tan
-2. Daily Ops (all day) — X posting, mention monitoring, lead qualification, support
-3. Nightly Self-Improvement (11 PM PT) — Review day, consolidate memory, build new skills
+The autonomous brain. Runs the Felix-style daily cycle with ALL revenue channels:
+1. Morning Report (7 AM PT) — Full revenue dashboard, priorities, Ian/Tan review
+2. Daily Ops (every 15 min) — X posting, mentions, leads, affiliates, trade receipts
+3. Weekly Ops — Newsletter issue, SEO batch, service delivery
+4. Nightly Self-Improvement (11 PM PT) — Review, consolidate, learn, propose automations
 
-Also handles:
-- Kill switch (STOP file)
-- Heartbeat updates
-- Error recovery
+Revenue target: $100K+/month across 9 channels.
 """
 
 from __future__ import annotations
@@ -19,9 +17,9 @@ import os
 import random
 import signal
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
+from src.affiliates import AffiliateManager
 from src.agents.iris import Iris
 from src.agents.remy import Remy
 from src.config import STOP_FILE, Config, get_config
@@ -30,9 +28,14 @@ from src.heartbeat import Heartbeat
 from src.leads import LeadPipeline
 from src.llm import LLM, Tier
 from src.memory import Memory
+from src.newsletter import Newsletter
 from src.notify import Notifier
 from src.products import ProductManager
+from src.revenue_engine import RevenueEngine
 from src.self_improve import SelfImprover
+from src.seo_engine import SEOEngine
+from src.services import ServiceEngine
+from src.trader_bridge import TraderBridge
 from src.x_client import XClient
 
 logging.basicConfig(
@@ -47,7 +50,7 @@ logger = logging.getLogger("arcana")
 
 
 class Orchestrator:
-    """The autonomous brain of ARCANA AI."""
+    """The autonomous brain of ARCANA AI — every revenue channel, one loop."""
 
     def __init__(self) -> None:
         self.config: Config | None = None
@@ -62,18 +65,28 @@ class Orchestrator:
         self.iris: Iris | None = None
         self.remy: Remy | None = None
         self.improver: SelfImprover | None = None
+        # Revenue expansion
+        self.trader: TraderBridge | None = None
+        self.revenue: RevenueEngine | None = None
+        self.affiliates: AffiliateManager | None = None
+        self.newsletter: Newsletter | None = None
+        self.services: ServiceEngine | None = None
+        self.seo: SEOEngine | None = None
+        # State
         self._running = True
         self._last_mention_id: str | None = None
         self._completed_today: list[str] = []
         self._priorities: list[str] = []
 
     async def initialize(self) -> None:
-        """Boot up all components."""
+        """Boot up all components — every revenue channel online."""
         self.config = get_config()
         self.llm = LLM(self.config)
         self.memory = Memory()
         self.notifier = Notifier(self.config)
         self.heartbeat = Heartbeat()
+
+        # Core ops
         self.x = XClient(self.config, self.memory)
         self.content = ContentEngine(self.llm, self.memory)
         self.products = ProductManager(self.config, self.memory)
@@ -82,9 +95,21 @@ class Orchestrator:
         self.remy = Remy(self.llm, self.memory)
         self.improver = SelfImprover(self.llm, self.memory)
 
-        self.memory.log("ARCANA AI initialized. Beginning operations.", "System")
-        await self.notifier.send("ARCANA AI online. Beginning daily operations.")
-        logger.info("Orchestrator initialized")
+        # Revenue channels
+        self.trader = TraderBridge(self.llm, self.memory)
+        self.affiliates = AffiliateManager(self.llm, self.memory)
+        self.newsletter = Newsletter(
+            self.llm, self.memory,
+            self.config.beehiiv_api_key,
+            self.config.beehiiv_publication_id,
+        )
+        self.services = ServiceEngine(self.llm, self.memory)
+        self.seo = SEOEngine(self.llm, self.memory)
+        self.revenue = RevenueEngine(self.memory, self.products, self.trader)
+
+        self.memory.log("ARCANA AI initialized. All revenue channels online.", "System")
+        await self.notifier.send("ARCANA AI online. All revenue channels active. Let's get paid.")
+        logger.info("Orchestrator initialized — all channels online")
 
     def _kill_switch_active(self) -> bool:
         if STOP_FILE.exists():
@@ -95,65 +120,84 @@ class Orchestrator:
     # ── Morning Report ──────────────────────────────────────────────
 
     async def morning_report(self) -> str:
-        """Generate and send morning report. Ian reviews in 5 minutes."""
+        """Full revenue dashboard + priorities. Ian reviews in 5 minutes."""
         logger.info("=== MORNING REPORT ===")
-        self.heartbeat.update("Running morning report", "Compiling stats and priorities")
+        self.heartbeat.update("Running morning report", "Compiling revenue dashboard")
 
-        # Check revenue
-        revenue = await self.products.get_revenue_summary()
+        # Full revenue snapshot across ALL channels
+        rev_snapshot = await self.revenue.get_full_revenue_snapshot()
+        rev_report = self.revenue.format_revenue_report(rev_snapshot)
+
+        # Trading bot status
+        trading_summary = self.trader.get_trading_summary_for_report()
 
         # Get yesterday's notes
         recent = self.memory.get_recent_days(2)
         yesterday = recent[1][1] if len(recent) > 1 else "No data from yesterday."
 
-        # Get sub-agent reports
+        # Sub-agent reports
         iris_report = await self.iris.nightly_report()
         remy_report = await self.remy.nightly_report()
 
         # Open leads
         open_leads = [n for n in self.memory.list_knowledge("projects") if n.startswith("lead-")]
 
-        # Generate priorities with LLM
+        # Service clients
+        active_clients = self.services.get_active_clients()
+        services_mrr = self.services.get_services_mrr()
+
+        # Newsletter stats
+        nl_stats = await self.newsletter.get_stats()
+
+        # Generate priorities with full context
         result = await self.llm.ask_json(
-            f"Generate ARCANA AI's morning report.\n\n"
-            f"Revenue (recent): ${revenue.get('total_revenue', 0):.2f}\n"
-            f"  Stripe: ${revenue.get('stripe', {}).get('revenue', 0):.2f}\n"
-            f"  Gumroad: ${revenue.get('gumroad', {}).get('revenue', 0):.2f}\n\n"
-            f"Yesterday's notes:\n{yesterday[:1000]}\n\n"
+            f"Generate ARCANA AI's morning report. Target: $100K/month.\n\n"
+            f"REVENUE DASHBOARD:\n{rev_report}\n\n"
+            f"TRADING BOT:\n{trading_summary}\n\n"
+            f"SERVICES: {len(active_clients)} clients, ${services_mrr:,.2f} MRR\n"
+            f"NEWSLETTER: {nl_stats.get('subscribers', 0)} subscribers\n"
+            f"OPEN LEADS: {', '.join(open_leads) or 'None'}\n\n"
+            f"Yesterday:\n{yesterday[:800]}\n\n"
             f"Support (Iris): {iris_report}\n"
-            f"Sales (Remy): {remy_report}\n"
-            f"Open leads: {', '.join(open_leads) or 'None'}\n\n"
+            f"Sales (Remy): {remy_report}\n\n"
+            f"Revenue channels to activate or grow:\n"
+            f"- Consulting, digital products, trading, affiliates, newsletter, services, SEO, micro-SaaS\n\n"
             f"Return JSON: {{"
-            f'"report_summary": str (3-4 sentences), '
+            f'"report_summary": str (3-4 sentences, revenue-focused), '
+            f'"revenue_actions": [str] (specific actions to grow revenue TODAY), '
             f'"open_items_for_ian": [str] (things needing human input), '
-            f'"priorities": [str, str, str, str, str] (today\'s top 5 tasks)}}',
+            f'"priorities": [str, str, str, str, str] (today\'s top 5, revenue-first)}}',
             tier=Tier.SONNET,
         )
 
         self._priorities = result.get("priorities", [])
 
-        # Format report
+        # Format full report
         report = (
-            f"**Morning Report — {datetime.now(timezone.utc).strftime('%B %d, %Y')}**\n\n"
+            f"**ARCANA AI — Morning Report — {datetime.now(timezone.utc).strftime('%B %d, %Y')}**\n\n"
             f"{result.get('report_summary', 'Report generation failed.')}\n\n"
-            f"**Revenue:** ${revenue.get('total_revenue', 0):.2f}\n"
+            f"{rev_report}\n\n"
+            f"{trading_summary}\n\n"
+            f"**Services MRR:** ${services_mrr:,.2f} ({len(active_clients)} clients)\n"
+            f"**Newsletter:** {nl_stats.get('subscribers', 0)} subscribers\n"
             f"**Open Leads:** {len(open_leads)}\n\n"
-            f"**Waiting on Ian/Tan:**\n"
+            f"**Revenue Actions:**\n"
+            + "\n".join(f"- {a}" for a in result.get("revenue_actions", []))
+            + "\n\n**Waiting on Ian/Tan:**\n"
             + "\n".join(f"- {item}" for item in result.get("open_items_for_ian", ["Nothing"]))
             + "\n\n**Today's Priorities:**\n"
             + "\n".join(f"{i+1}. {p}" for i, p in enumerate(self._priorities))
         )
 
-        # Send to Discord/Telegram
         await self.notifier.morning_report(report)
-
-        # Log to memory
         self.memory.log(report, "Morning Report")
+        self.heartbeat.update(
+            "Active",
+            self._priorities[0] if self._priorities else "Awaiting tasks",
+            upcoming=self._priorities,
+        )
 
-        # Update heartbeat
-        self.heartbeat.update("Active", self._priorities[0] if self._priorities else "Awaiting tasks", upcoming=self._priorities)
-
-        logger.info("Morning report sent")
+        logger.info("Morning report sent with full revenue dashboard")
         return report
 
     # ── Daily Operations ────────────────────────────────────────────
@@ -165,19 +209,19 @@ class Orchestrator:
 
         logger.info("--- Daily ops cycle ---")
 
-        # 1. Check mentions and qualify leads (HIGHEST PRIORITY)
+        # 1. HIGHEST PRIORITY: Check mentions → qualify leads
         await self._process_mentions()
 
-        # 2. Post content (if it's time)
+        # 2. Post content (tweets, threads, trade receipts)
         await self._maybe_post_content()
 
-        # 3. Check revenue
-        await self.products.get_revenue_summary()
+        # 3. Post trade receipts from trader bot
+        await self._maybe_post_trade_receipt()
 
         # 4. Update heartbeat
         self.heartbeat.update(
             "Active",
-            "Monitoring",
+            "Monitoring all channels",
             completed=self._completed_today,
             upcoming=[p for p in self._priorities if p not in self._completed_today],
         )
@@ -209,13 +253,20 @@ class Orchestrator:
             reply_decision = await self.content.reply_to_mention(text)
 
             if reply_decision.get("should_reply") and reply_decision.get("reply"):
-                await self.x.reply_to(mention["id"], reply_decision["reply"])
+                tweet_id = await self.x.reply_to(mention["id"], reply_decision["reply"])
+
+                # Check for affiliate opportunity on the reply
+                if tweet_id:
+                    aff = await self.affiliates.find_relevant_affiliate(reply_decision["reply"])
+                    if aff:
+                        await self.x.reply_to(tweet_id, aff["reply_text"])
+
                 await asyncio.sleep(random.uniform(5, 30))
 
         if mentions:
             self.memory.log(
                 f"Processed {len(mentions)} mentions: "
-                f"{lead_results.get('leads_found', 0)} leads found, "
+                f"{lead_results.get('leads_found', 0)} leads, "
                 f"{len(lead_results.get('qualified', []))} qualified",
                 "X Mentions",
             )
@@ -233,11 +284,16 @@ class Orchestrator:
                 await self.x.post_thread(tweets)
                 self._completed_today.append("Posted Morning Briefing")
 
-        # Analysis tweets (spread throughout the day with jitter)
-        elif random.random() < 0.3:  # ~30% chance each cycle = 3-5 tweets/day
+        # Analysis tweets (spread throughout the day)
+        elif random.random() < 0.3:
             tweet = await self.content.analysis_tweet()
             if tweet:
-                await self.x.post_with_self_reply(tweet)
+                tweet_id = await self.x.post_with_self_reply(tweet)
+                # Inject affiliate link in self-reply if relevant
+                if tweet_id:
+                    aff = await self.affiliates.find_relevant_affiliate(tweet)
+                    if aff:
+                        await self.x.reply_to(tweet_id, aff["reply_text"])
                 self._completed_today.append("Posted analysis tweet")
 
         # Case File (2x per week — Mon and Thu)
@@ -254,34 +310,129 @@ class Orchestrator:
                 await self.x.post_with_self_reply(tweet)
                 self._completed_today.append("Posted BTS tweet")
 
+        # Newsletter CTA (1x per week — Wednesday)
+        elif now.weekday() == 2 and hour == 17 and random.random() < 0.5:
+            cta = await self.newsletter.generate_x_to_newsletter_cta()
+            if cta:
+                await self.x.post_with_self_reply(cta)
+                self._completed_today.append("Posted newsletter CTA")
+
+        # Product promotion (1x per week — Friday)
+        elif now.weekday() == 4 and hour == 19 and random.random() < 0.4:
+            tweets = await self.content.product_launch_thread("Arcana Playbook", "AI automation guide")
+            if tweets:
+                await self.x.post_thread(tweets)
+                self._completed_today.append("Posted product promotion")
+
+    async def _maybe_post_trade_receipt(self) -> None:
+        """Post trade receipts from the trading bot to X."""
+        winners = self.trader.get_recent_winners(3)
+        if not winners:
+            return
+
+        # Only post 1 trade receipt per cycle, randomly
+        if random.random() > 0.15:  # ~15% chance = 1-2 per day
+            return
+
+        trade = random.choice(winners)
+        trade_key = f"receipt-{trade.get('symbol', '')}-{trade.get('timestamp', '')}"
+
+        # Check if we already posted this one
+        if self.memory.get_knowledge("resources", trade_key):
+            return
+
+        receipt = await self.trader.generate_trade_receipt(trade)
+        if receipt:
+            await self.x.post_with_self_reply(receipt)
+            self.memory.save_knowledge("resources", trade_key, "posted")
+            self._completed_today.append(f"Posted trade receipt: {trade.get('symbol', '?')}")
+
+    # ── Weekly Operations ───────────────────────────────────────────
+
+    async def weekly_ops(self) -> None:
+        """Weekly operations: newsletter, SEO batch, lead follow-ups."""
+        logger.info("=== WEEKLY OPS ===")
+
+        # 1. Generate and schedule weekly newsletter
+        try:
+            issue = await self.newsletter.generate_weekly_issue()
+            self.memory.log(
+                f"Weekly newsletter: {issue.get('subject', 'N/A')} "
+                f"({issue.get('sections', 0)} sections)",
+                "Newsletter",
+            )
+            self._completed_today.append("Generated weekly newsletter")
+        except Exception as exc:
+            logger.error("Newsletter generation failed: %s", exc)
+
+        # 2. Generate SEO articles batch
+        try:
+            cluster = await self.seo.generate_keyword_cluster(
+                "AI business automation", "AI consulting"
+            )
+            # Pick top 3 keywords to write articles for
+            keywords = cluster.get("keywords", [])[:3]
+            for kw_data in keywords:
+                kw = kw_data.get("keyword", "")
+                if kw:
+                    await self.seo.generate_article(kw)
+            self._completed_today.append(f"Generated {len(keywords)} SEO articles")
+        except Exception as exc:
+            logger.error("SEO batch failed: %s", exc)
+
+        # 3. Follow up on warm leads
+        try:
+            open_leads = [
+                n for n in self.memory.list_knowledge("projects")
+                if n.startswith("lead-")
+            ]
+            for lead_key in open_leads[:5]:  # Max 5 follow-ups per week
+                handle = lead_key.replace("lead-", "")
+                context = self.memory.get_knowledge("projects", lead_key)
+                if context:
+                    await self.remy.follow_up(handle, context[:300])
+            if open_leads:
+                self._completed_today.append(f"Followed up on {min(len(open_leads), 5)} leads")
+        except Exception as exc:
+            logger.error("Lead follow-up failed: %s", exc)
+
     # ── Nightly Self-Improvement ────────────────────────────────────
 
     async def nightly_review(self) -> dict[str, Any]:
-        """Run the nightly self-improvement cycle."""
+        """Run the nightly self-improvement cycle with revenue focus."""
         logger.info("=== NIGHTLY SELF-IMPROVEMENT ===")
-        self.heartbeat.update("Running nightly review", "Self-improvement cycle")
+        self.heartbeat.update("Running nightly review", "Self-improvement + revenue analysis")
 
-        # Get sub-agent reports
+        # Sub-agent reports
         iris_report = await self.iris.nightly_report()
         remy_report = await self.remy.nightly_report()
         self.memory.log(f"Iris report: {iris_report}", "Sub-Agent Reports")
         self.memory.log(f"Remy report: {remy_report}", "Sub-Agent Reports")
 
-        # Run the self-improvement analysis
+        # Full revenue snapshot
+        rev_snapshot = await self.revenue.get_full_revenue_snapshot()
+        rev_report = self.revenue.format_revenue_report(rev_snapshot)
+
+        # Update services MRR in revenue tracking
+        services_mrr = self.services.get_services_mrr()
+        if services_mrr > 0:
+            self.revenue.update_channel_revenue("services", services_mrr)
+
+        # Run self-improvement analysis
         analysis = await self.improver.run_nightly_review()
 
-        # Send summary to Ian/Tan
+        # Send comprehensive summary
         summary = (
-            f"**Nightly Review Complete**\n"
+            f"**Nightly Review Complete**\n\n"
+            f"{rev_report}\n\n"
             f"{analysis.get('summary', 'N/A')}\n"
             f"Wins: {len(analysis.get('wins', []))}\n"
             f"Bottlenecks: {len(analysis.get('bottlenecks', []))}\n"
-            f"New lessons: {len(analysis.get('lessons_learned', []))}\n"
+            f"Lessons: {len(analysis.get('lessons_learned', []))}\n"
             f"Tomorrow: {', '.join(analysis.get('tomorrow_priorities', [])[:3])}"
         )
         await self.notifier.send(summary, "report")
 
-        # Clear heartbeat for the day
         self.heartbeat.clear()
         self._completed_today = []
 
@@ -291,12 +442,13 @@ class Orchestrator:
     # ── Main Loop ───────────────────────────────────────────────────
 
     async def run_forever(self) -> None:
-        """Main loop: morning report → daily ops every 15 min → nightly review."""
+        """Main loop: morning → 15-min ops → weekly ops → nightly review."""
         await self.initialize()
         interval = 15 * 60  # 15 minutes
 
         did_morning = False
         did_nightly = False
+        did_weekly = False
 
         while self._running:
             if self._kill_switch_active():
@@ -306,7 +458,7 @@ class Orchestrator:
 
             now = datetime.now(timezone.utc)
 
-            # Morning report (once per day, at morning_report_hour)
+            # Morning report (once per day)
             if now.hour == self.config.morning_report_hour and not did_morning:
                 try:
                     await self.morning_report()
@@ -315,7 +467,16 @@ class Orchestrator:
                     logger.error("Morning report failed: %s", exc)
                     await self.notifier.error_alert("morning_report", str(exc))
 
-            # Nightly review (once per day, at nightly_review_hour)
+            # Weekly ops (Sunday at 16 UTC / 8 AM PT)
+            if now.weekday() == 6 and now.hour == 16 and not did_weekly:
+                try:
+                    await self.weekly_ops()
+                    did_weekly = True
+                except Exception as exc:
+                    logger.error("Weekly ops failed: %s", exc)
+                    await self.notifier.error_alert("weekly_ops", str(exc))
+
+            # Nightly review (once per day)
             if now.hour == self.config.nightly_review_hour and not did_nightly:
                 try:
                     await self.nightly_review()
@@ -328,6 +489,8 @@ class Orchestrator:
             if now.hour == 0:
                 did_morning = False
                 did_nightly = False
+                if now.weekday() == 0:  # Reset weekly on Monday
+                    did_weekly = False
 
             # Regular daily ops cycle
             try:
@@ -352,6 +515,8 @@ class Orchestrator:
             await self.llm.close()
         if self.products:
             await self.products.close()
+        if self.newsletter:
+            await self.newsletter.close()
 
 
 def main() -> None:

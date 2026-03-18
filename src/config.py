@@ -1,4 +1,7 @@
-"""ARCANA AI — Configuration from environment variables."""
+"""ARCANA AI — Configuration from environment variables.
+
+Every revenue channel gets its keys. Unlimited access, unlimited channels.
+"""
 
 from __future__ import annotations
 
@@ -19,35 +22,61 @@ STOP_FILE = ROOT_DIR / "STOP"
 
 
 class Config(BaseModel):
-    # LLM
+    # ── LLM (OpenRouter) ─────────────────────────────────────────
     openrouter_api_key: str = Field(default_factory=lambda: os.getenv("OPENROUTER_API_KEY", ""))
     haiku_model: str = "anthropic/claude-3.5-haiku"
     sonnet_model: str = "anthropic/claude-sonnet-4-20250514"
     opus_model: str = "anthropic/claude-opus-4-20250514"
 
-    # X / Twitter
+    # ── X / Twitter ──────────────────────────────────────────────
     x_api_key: str = Field(default_factory=lambda: os.getenv("X_API_KEY", ""))
     x_api_secret: str = Field(default_factory=lambda: os.getenv("X_API_SECRET", ""))
     x_access_token: str = Field(default_factory=lambda: os.getenv("X_ACCESS_TOKEN", ""))
     x_access_secret: str = Field(default_factory=lambda: os.getenv("X_ACCESS_SECRET", ""))
 
-    # Payments
+    # ── Payments ─────────────────────────────────────────────────
     stripe_secret_key: str = Field(default_factory=lambda: os.getenv("STRIPE_SECRET_KEY", ""))
     gumroad_access_token: str = Field(default_factory=lambda: os.getenv("GUMROAD_ACCESS_TOKEN", ""))
 
-    # Notifications
+    # ── Notifications ────────────────────────────────────────────
     discord_webhook_url: str = Field(default_factory=lambda: os.getenv("DISCORD_WEBHOOK_URL", ""))
     telegram_bot_token: str = Field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
     telegram_chat_id: str = Field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
 
-    # Content
+    # ── Content Production ───────────────────────────────────────
     heygen_api_key: str = Field(default_factory=lambda: os.getenv("HEYGEN_API_KEY", ""))
     elevenlabs_api_key: str = Field(default_factory=lambda: os.getenv("ELEVENLABS_API_KEY", ""))
 
-    # Operational
+    # ── Newsletter (Beehiiv) ─────────────────────────────────────
+    beehiiv_api_key: str = Field(default_factory=lambda: os.getenv("BEEHIIV_API_KEY", ""))
+    beehiiv_publication_id: str = Field(default_factory=lambda: os.getenv("BEEHIIV_PUBLICATION_ID", ""))
+
+    # ── SEO / Publishing ─────────────────────────────────────────
+    vercel_token: str = Field(default_factory=lambda: os.getenv("VERCEL_TOKEN", ""))
+    google_adsense_id: str = Field(default_factory=lambda: os.getenv("GOOGLE_ADSENSE_ID", ""))
+
+    # ── Lead Gen / Outreach ──────────────────────────────────────
+    apollo_api_key: str = Field(default_factory=lambda: os.getenv("APOLLO_API_KEY", ""))
+    instantly_api_key: str = Field(default_factory=lambda: os.getenv("INSTANTLY_API_KEY", ""))
+
+    # ── Social Media Management ──────────────────────────────────
+    buffer_api_key: str = Field(default_factory=lambda: os.getenv("BUFFER_API_KEY", ""))
+
+    # ── Review Platforms ─────────────────────────────────────────
+    google_business_token: str = Field(default_factory=lambda: os.getenv("GOOGLE_BUSINESS_TOKEN", ""))
+
+    # ── Deal Monitoring ──────────────────────────────────────────
+    keepa_api_key: str = Field(default_factory=lambda: os.getenv("KEEPA_API_KEY", ""))
+    amazon_pa_key: str = Field(default_factory=lambda: os.getenv("AMAZON_PA_KEY", ""))
+    amazon_pa_secret: str = Field(default_factory=lambda: os.getenv("AMAZON_PA_SECRET", ""))
+
+    # ── Translation ──────────────────────────────────────────────
+    deepl_api_key: str = Field(default_factory=lambda: os.getenv("DEEPL_API_KEY", ""))
+
+    # ── Operational ──────────────────────────────────────────────
     dry_run: bool = Field(default_factory=lambda: os.getenv("DRY_RUN", "true").lower() == "true")
-    morning_report_hour: int = 15  # 7 AM PT = 15:00 UTC
-    nightly_review_hour: int = 7   # 11 PM PT = 07:00 UTC next day
+    morning_report_hour: int = 15   # 7 AM PT = 15:00 UTC
+    nightly_review_hour: int = 7    # 11 PM PT = 07:00 UTC next day
 
     def load_soul(self) -> str:
         if SOUL_PATH.exists():
