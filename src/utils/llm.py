@@ -9,9 +9,9 @@ from enum import Enum
 from typing import Optional
 
 class ModelTier(str, Enum):
-    CHEAP = "anthropic/claude-3.5-haiku-20241022"       # ~$0.001/call
-    STANDARD = "anthropic/claude-sonnet-4-20250514"      # ~$0.015/call
-    PREMIUM = "anthropic/claude-opus-4-20250514"         # ~$0.075/call
+    CHEAP = "anthropic/claude-haiku-4-5-20251001"        # ~$0.001/call
+    STANDARD = "anthropic/claude-sonnet-4-6"              # ~$0.015/call
+    PREMIUM = "anthropic/claude-opus-4-6"                 # ~$0.075/call
     FAST = "openai/gpt-4o-mini"                          # ~$0.0003/call
     ENSEMBLE = "google/gemini-2.0-flash-001"             # ~$0.001/call
 

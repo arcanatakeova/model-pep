@@ -144,6 +144,7 @@ CREATE TABLE signals (
 );
 CREATE INDEX idx_signals_created ON signals(created_at DESC);
 CREATE INDEX idx_signals_source ON signals(source, created_at DESC);
+CREATE INDEX idx_signals_unacted ON signals(acted_on) WHERE acted_on = false;
 
 -- Revenue tracking (aggregated daily)
 CREATE TABLE daily_revenue (
@@ -181,29 +182,6 @@ CREATE TABLE agent_log (
     error TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
-
--- Market signals (Scanner agent writes, Trader agent reads)
-CREATE TABLE signals (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source TEXT NOT NULL,
-    signal_type TEXT NOT NULL,
-    asset TEXT,
-    data JSONB NOT NULL,
-    confidence NUMERIC DEFAULT 0.5,
-    acted_on BOOLEAN DEFAULT false,
-    trade_id UUID REFERENCES trades(id),
-    created_at TIMESTAMPTZ DEFAULT now()
-);
-
--- Performance indexes
-CREATE INDEX idx_trades_created ON trades(created_at DESC);
-CREATE INDEX idx_trades_status ON trades(status);
-CREATE INDEX idx_signals_created ON signals(created_at DESC);
-CREATE INDEX idx_signals_acted ON signals(acted_on) WHERE acted_on = false;
-CREATE INDEX idx_leads_status ON leads(status);
-CREATE INDEX idx_content_posted ON content_posts(posted_at DESC);
-CREATE INDEX idx_agent_log_created ON agent_log(created_at DESC);
-CREATE INDEX idx_agent_log_agent ON agent_log(agent);
 
 -- Vector similarity search function
 CREATE OR REPLACE FUNCTION match_memories(

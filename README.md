@@ -18,14 +18,34 @@
 
 ## Docs
 - `CLAUDE.md` — Build instructions for Claude Code (read automatically)
-- `SOUL.md` — Agent personality configuration
+- `SOUL.md` — Agent personality configuration + 10 example tweets
+
+### Core Reference
 - `docs/ARCHITECTURE.md` — Technical architecture deep dive
 - `docs/TRADING.md` — Trading engine, APIs, risk management
-- `docs/SOCIAL_MEDIA.md` — X algorithm, content strategy, templates
-- `docs/UGC.md` — Video production pipeline
-- `docs/REVENUE_CHANNELS.md` — 50+ revenue channels with deployment order
+- `docs/SOCIAL_MEDIA.md` — X algorithm, content strategy, 5 templates
+- `docs/UGC.md` — Video production pipeline (HeyGen + MakeUGC)
+- `docs/REVENUE_CHANNELS.md` — 50 revenue channels with deployment order
 - `docs/COMPETITIVE_INTEL.md` — Felix, AIXBT, Polystrat, Truth Terminal analysis
-- `docs/API_REFERENCE.md` — All 23+ API integrations
+- `docs/API_REFERENCE.md` — All 23+ API integrations with auth + rate limits
+
+### Strategy & Planning
+- `docs/FINANCIAL_PROJECTIONS.md` — 12-month revenue model
+- `docs/RISK_MANAGEMENT.md` — Trading limits, kill switch, compliance
+- `docs/SUPABASE_SCHEMA.md` — Full database schema documentation
+- `docs/playbooks/LAUNCH_120_DAY.md` — Day-by-day launch plan
+
+### Deep Research
+- `docs/research/DEEP_RESEARCH_COMPENDIUM.md` — 20-topic research with hard numbers
+- `docs/research/X_ALGORITHM_DEEP_DIVE.md` — X engagement multipliers and strategies
+- `docs/research/FRAMEWORK_COMPARISON.md` — ElizaOS vs LangGraph vs CrewAI vs n8n
+
+### Code Examples (Reference Patterns for Claude Code)
+- `docs/examples/llm_client_example.py` — OpenRouter client with SOUL.md injection
+- `docs/examples/memory_system_example.py` — pgvector memory embed/store/recall
+- `docs/examples/trading_patterns_example.py` — Jupiter swap + Polymarket + risk gate
+- `docs/examples/x_posting_example.py` — Tweet, thread, self-reply, templates
+- `docs/examples/orchestrator_example.py` — LangGraph decision loop pattern
 
 ## Kill Switch
 ```bash

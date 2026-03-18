@@ -21,14 +21,23 @@ ARCANA AI is a fully autonomous AI economic entity that makes money 24/7 through
 
 ## READ THESE DOCS BEFORE BUILDING SPECIFIC MODULES
 Before working on ANY module, read the relevant doc file first:
-- Building the orchestrator → read `docs/ARCHITECTURE.md`
-- Building trading agents → read `docs/TRADING.md`
-- Building content/X agent → read `docs/SOCIAL_MEDIA.md`
+- Building the orchestrator → read `docs/ARCHITECTURE.md` + `docs/examples/orchestrator_example.py`
+- Building trading agents → read `docs/TRADING.md` + `docs/examples/trading_patterns_example.py`
+- Building content/X agent → read `docs/SOCIAL_MEDIA.md` + `docs/examples/x_posting_example.py`
 - Building UGC production → read `docs/UGC.md`
 - Building revenue channels → read `docs/REVENUE_CHANNELS.md`
 - Understanding competitors → read `docs/COMPETITIVE_INTEL.md`
 - API integrations → read `docs/API_REFERENCE.md`
 - Agent personality → read `SOUL.md`
+- Database schema → read `docs/SUPABASE_SCHEMA.md`
+- Risk limits → read `docs/RISK_MANAGEMENT.md`
+- Financial targets → read `docs/FINANCIAL_PROJECTIONS.md`
+- Launch timeline → read `docs/playbooks/LAUNCH_120_DAY.md`
+- LLM client pattern → read `docs/examples/llm_client_example.py`
+- Memory system pattern → read `docs/examples/memory_system_example.py`
+- Framework decisions → read `docs/research/FRAMEWORK_COMPARISON.md`
+- Deep research data → read `docs/research/DEEP_RESEARCH_COMPENDIUM.md`
+- X algorithm data → read `docs/research/X_ALGORITHM_DEEP_DIVE.md`
 
 ## BUILD ORDER (Follow this exactly)
 
