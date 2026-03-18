@@ -1,96 +1,125 @@
-# ARCANA AI — Claude Code Build Instructions
+# ARCANA AI — Build Instructions
 
 ## WHAT THIS IS
-ARCANA AI is a fully autonomous AI economic entity that makes money 24/7 through ANY legal means. It runs on Docker on a NAS, trades crypto, posts content to X, produces UGC videos, generates consulting leads, and operates 50+ revenue channels. All profits flow to Arcana Operations (Ian & Tan's AI consulting business in Portland, OR).
+ARCANA AI is the autonomous AI CEO of Arcana Operations LLC (Ian & Tan's AI consulting business in Portland, OR). Modeled after Felix Craft AI — it runs 24/7, sells digital products, markets on X, qualifies consulting leads, and gets a little more autonomous every day.
 
-**One directive: Make money. Every day. However you can.**
+**ARCANA AI is not a trading bot.** It's an autonomous business operator that:
+1. Posts content on X to build an audience and generate leads
+2. Creates and sells digital products (guides, templates, service packages)
+3. Qualifies consulting leads and routes them to Ian & Tan
+4. Handles customer support and sales conversations
+5. Improves itself every night by reviewing where humans had to intervene
 
-## READ THESE DOCS BEFORE BUILDING SPECIFIC MODULES
-Before working on ANY module, read the relevant doc file first:
-- Building the orchestrator → read `docs/ARCHITECTURE.md`
-- Building trading agents → read `docs/TRADING.md`
-- Building content/X agent → read `docs/SOCIAL_MEDIA.md`
-- Building UGC production → read `docs/UGC.md`
-- Building revenue channels → read `docs/REVENUE_CHANNELS.md`
-- Understanding competitors → read `docs/COMPETITIVE_INTEL.md`
-- API integrations → read `docs/API_REFERENCE.md`
-- Agent personality → read `SOUL.md`
+All revenue flows to Arcana Operations. Every cost is self-funded from ARCANA's Stripe revenue.
 
-## BUILD ORDER (Follow this exactly)
+## ARCHITECTURE (Felix Model)
 
-### Phase 1: Foundation (Build First)
-1. `src/utils/llm.py` — OpenRouter client with model routing + SOUL.md injection
-2. `src/utils/memory.py` — Supabase pgvector memory (embed, store, recall)
-3. `src/utils/notify.py` — Discord/Telegram alerting
-4. `src/orchestrator.py` — LangGraph decision loop (SCAN→EVALUATE→PRIORITIZE→EXECUTE→LEARN)
-5. Run Supabase migrations from `supabase/migrations/`
+### Daily Cycle — Three Phases
+1. **Morning Report** (7 AM PT): Check Stripe/site stats, compile priorities, propose 5 tasks. Ian reviews in 5 minutes via Discord/Telegram.
+2. **Daily Ops**: X replies (autonomous), content scheduling, email triage, error monitoring, lead qualification, product order fulfillment.
+3. **Nightly Self-Improvement** (11 PM PT): Review all conversations from the day. Identify where Ian/Tan had to intervene. Build new skills/automations to handle those classes of problems autonomously next time.
 
-### Phase 2: Get Posting (Revenue Day 1)
-6. `src/agents/communicator.py` — X API client: post tweets, threads, reply to mentions, monitor DMs
-7. Content templates: Morning Briefing, Trade Receipt, Weekly Postmortem
-8. Schedule: Morning Briefing at 7 AM PT daily, 3-5 tweets throughout the day
+### Memory System — Markdown Files (Not Databases)
+Everything is a file on disk — transparent, editable, version-controllable with Git.
+- `memory/life/` — PARA system (projects, areas, resources, archives). Durable facts about people, clients, products.
+- `memory/daily/` — One dated markdown per day. What happened, what was decided, what was learned.
+- `memory/tacit/` — Communication preferences, workflow habits, hard rules, lessons learned.
+- `SOUL.md` — Personality, voice, values. Loaded into every LLM call.
+- `HEARTBEAT.md` — Intra-day progress tracking against planned tasks.
 
-### Phase 3: Get Trading (Proof of Capability)
-9. `src/agents/scanner.py` — Aggregate signals from DexScreener, Birdeye, Unusual Whales, Finnhub, Rugcheck
-10. `src/agents/trader.py` — Execute trades on Jupiter (Solana), Polymarket, Coinbase
-11. Risk management gate (ALL trades must pass — see docs/TRADING.md)
-12. Trade receipts auto-posted to X after every trade
+### Sub-Agents
+- **ARCANA** (this agent) — CEO. Handles strategy, content, complex decisions. Escalates only truly intractable issues to Ian/Tan.
+- **Iris** — Customer support. Handles refunds, inquiries, troubleshooting. Reports to ARCANA nightly.
+- **Remy** — Sales. Qualifies inbound leads, follows up, routes hot leads to Ian/Tan. Reports to ARCANA nightly.
 
-### Phase 4: Get Paid (Multiple Revenue Streams)
-13. `src/agents/creator.py` — UGC video production via MakeUGC/HeyGen API
-14. `src/agents/automator.py` — Builds micro-SaaS tools, manages digital products, handles Stripe payments
-15. Lead qualification pipeline: X DMs → Supabase CRM → Discord notification to Ian/Tan
+### Communication Channels
+- **Discord** — Primary "office" with isolated channels (general, support, sales, dev, alerts)
+- **Telegram** — Ian/Tan send voice notes and quick instructions
+- **X/Twitter** — Autonomous replies, scheduled original posts, content marketing
+- **Email** — Customer support, lead follow-up, product delivery
 
-### Phase 5: Scale
-16. Programmatic SEO content site
-17. AI newsletter via Beehiiv
-18. Prompt library / digital products on Gumroad
-19. Chrome extensions
-20. AI podcast factory via ElevenLabs
+## BUILD ORDER
 
-## PRIORITY FUNCTION (The Autonomous Brain)
-Every 15 minutes, evaluate all available actions using:
-```
-Priority = (Revenue × Probability) / (Time × Risk)
-```
-- Revenue: Expected dollar value
-- Probability: Likelihood of success (0-1), informed by memory
-- Time: Hours required to execute
-- Risk: Potential downside (1 = no risk, 10 = high risk)
+### Phase 1: Foundation
+1. `src/config.py` — Centralized config from .env
+2. `src/llm.py` — OpenRouter LLM client with SOUL.md injection
+3. `src/memory.py` — Markdown memory system (read/write/search/consolidate)
+4. `src/notify.py` — Discord/Telegram notifications to Ian/Tan
+5. Initialize `memory/` directory structure
 
-**Consulting lead DMs ALWAYS score highest** — even at 10% probability, a $5K contract in 15 min response time = priority score of 2,000. Lead gen is ALWAYS top priority.
+### Phase 2: Daily Operations Cycle
+6. `src/orchestrator.py` — Morning report → daily ops → nightly self-improvement
+7. `src/heartbeat.py` — Intra-day progress tracking (HEARTBEAT.md)
+8. Kill switch: STOP file halts everything within 60 seconds
+
+### Phase 3: Get Posting (Revenue Day 1)
+9. `src/x_client.py` — X API v2: post tweets, threads, reply to mentions, search
+10. `src/content_engine.py` — Content generation: Morning Briefings, Case Files, industry analysis
+11. Schedule: Morning Briefing at 7 AM PT, 3-5 tweets/day, 2 threads/week
+
+### Phase 4: Get Paid
+12. `src/products.py` — Digital product management (Stripe + Gumroad)
+13. `src/leads.py` — Lead qualification pipeline (X → score → route to Ian/Tan → Discord alert)
+14. `src/agents/iris.py` — Customer support sub-agent
+15. `src/agents/remy.py` — Sales sub-agent
+
+### Phase 5: Self-Improvement
+16. `src/self_improve.py` — Nightly review loop: read transcripts, identify bottlenecks, build new automations
+17. `src/skills.py` — Skill/cron job system that ARCANA teaches itself over time
+
+## REVENUE STREAMS (Priority Order)
+
+### Immediate (Week 1)
+1. **"How to Work with AI" Playbook** — PDF guide ($29-49) on Gumroad. ARCANA's own architecture as the product.
+2. **X Content → Consulting Leads** — Every post is a pitch for Arcana Operations. Morning Briefings, Case Files, behind-the-scenes.
+3. **Affiliate Links** — Tools mentioned in analysis (embedded in reply, not main post per X algorithm).
+
+### Short-Term (Week 2-4)
+4. **Service Packages on Stripe** — AI agent setup ($2K + $500/mo), SEO audit ($1.5K), marketing strategy ($2K).
+5. **Template Marketplace** — Sell ARCANA's prompts, workflows, and automations as markdown files.
+6. **Email Support** — Purchasers of the guide get email support from ARCANA.
+
+### Medium-Term (Month 2-3)
+7. **Custom AI Agent Builds** — Clawcommerce-style: build and deploy AI agents for businesses ($2-5K setup + $500/mo maintenance).
+8. **Premium Discord** — Free community tier, paid ($29-49/mo) for alerts + priority access.
+9. **AI Newsletter** — Beehiiv. Free tier builds audience, sponsors at 5K+ subs.
+
+## CONTENT STRATEGY (The Four Suits)
+| Suit | Type | Purpose | Frequency |
+|------|------|---------|-----------|
+| Wands | Industry Analysis | Build authority, attract followers | 3-5x daily |
+| Cups | Behind-the-Scenes | Show AI capabilities, humanize ARCANA | 2-3x weekly |
+| Swords | Case Files | Demonstrate expertise, generate leads | 2x weekly |
+| Pentacles | Product Launches | Drive sales, announce new offerings | As needed |
+
+## X ALGORITHM RULES
+- Self-reply to own posts: **150x** weight of a like (ALWAYS do this)
+- Post natively (no external links in main tweet — add in reply)
+- First 30-60 min = make or break. Engagement velocity is everything.
+- X Premium REQUIRED ($8/mo, 2-4x visibility)
+- Add random 1-15 min jitter to posting intervals (anti-bot)
+- Replies are autonomous. Original posts: autonomous after initial training period.
 
 ## CODE STYLE
-- Python 3.11+, type hints everywhere
-- async/await for all I/O operations
-- Pydantic models for all data structures
-- Every function that calls an external API must have try/except with retry logic
-- Log every action to Supabase agent_log table
-- Use OpenRouter for ALL LLM calls (never direct API calls to Anthropic/OpenAI)
-- Load SOUL.md into every LLM system prompt
-
-## ENVIRONMENT VARIABLES (see config/.env.example)
-Never hardcode API keys. All secrets in .env file. See config/.env.example for the full list.
+- Python 3.11+, type hints, async/await
+- Pydantic models for data structures
+- try/except with retry on all external API calls
+- Log every action to `memory/daily/` markdown files
+- Use OpenRouter for ALL LLM calls
+- SOUL.md injected as system prompt in every call
 
 ## KEY CONSTRAINTS
-- Trading: Max 5% per position, -15% stop-loss, -10% daily drawdown circuit breaker
-- Content: Must match SOUL.md personality, no hype language, no price predictions
-- Kill switch: If file named STOP exists in project root, halt ALL activity within 60 seconds
-- Wallet: Use ONLY a dedicated burner Solana wallet funded with trading capital only
+- Content must match SOUL.md personality
+- Never make specific price predictions
+- Never pretend to be human
+- Kill switch: STOP file halts all activity within 60 seconds
+- Lead qualification DMs ALWAYS highest priority
+- Self-fund: All costs paid from ARCANA's own revenue
 
 ## ARCANA OPERATIONS CONTEXT
-Ian & Tan run three businesses:
-- **Arcana Operations** — AI consulting ($2-10K/mo contracts): strategy, SEO, fulfillment, marketing, agents
-- **Navigate Peptides** — Research-grade peptide e-commerce (Shopify headless)
+Ian & Tan run:
+- **Arcana Operations** — AI consulting ($2-10K/mo): strategy, SEO, fulfillment, marketing, agents
+- **Navigate Peptides** — Research peptide e-commerce (Shopify headless)
 - **Autobahn Collective** — Used OEM BMW parts (Shopify + eBay + FB Marketplace)
 
-ARCANA AI's content should reference real industry experience from these businesses when creating Case File threads. The agent IS the pitch for Arcana Operations' consulting services.
-
-## REFERENCE REPOS (Study these for patterns)
-- github.com/elizaOS/eliza — 17.5K stars, TypeScript agent framework, best for crypto+social
-- github.com/sendaifun/solana-agent-kit — 60+ Solana actions via natural language
-- github.com/sendaifun/solana-mcp — MCP server for Solana Agent Kit
-- github.com/georgezouq/awesome-ai-in-finance — Curated AI finance tools
-- github.com/virattt/ai-hedge-fund — LLM trading decisions
-- github.com/TradingAgents — Multi-agent financial trading
-- github.com/AI4Finance-Foundation/FinRL — Deep RL for trading
+ARCANA references real experience from these businesses in Case File content. The agent IS the pitch.

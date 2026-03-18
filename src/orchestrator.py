@@ -1,7 +1,14 @@
-"""ARCANA AI — Main Orchestrator
-LangGraph decision loop: SCAN → EVALUATE → PRIORITIZE → EXECUTE → LEARN
-Priority = (Revenue × Probability) / (Time × Risk)
-Runs every 15 minutes. Checks for STOP file (kill switch) every cycle.
+"""ARCANA AI — Orchestrator.
+
+The autonomous brain. Runs the Felix-style daily cycle:
+1. Morning Report (7 AM PT) — Check revenue, compile priorities, ping Ian/Tan
+2. Daily Ops (all day) — X posting, mention monitoring, lead qualification, support
+3. Nightly Self-Improvement (11 PM PT) — Review day, consolidate memory, build new skills
+
+Also handles:
+- Kill switch (STOP file)
+- Heartbeat updates
+- Error recovery
 """
 
 from __future__ import annotations
@@ -9,25 +16,24 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import signal
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
-from langgraph.graph import END, StateGraph
-from pydantic import BaseModel
-
-from src.agents.communicator import Communicator
-from src.agents.creator import Creator
-from src.agents.automator import Automator
-from src.agents.scanner import Scanner
-from src.agents.trader import Trader
-from src.config import ArcanaConfig, get_config
-from src.utils.db import create_supabase_client, get_daily_stats, log_action
-from src.utils.llm import LLMClient, ModelTier
-from src.utils.memory import MemorySystem
-from src.utils.notify import AlertLevel, Notifier
+from src.agents.iris import Iris
+from src.agents.remy import Remy
+from src.config import STOP_FILE, Config, get_config
+from src.content_engine import ContentEngine
+from src.heartbeat import Heartbeat
+from src.leads import LeadPipeline
+from src.llm import LLM, Tier
+from src.memory import Memory
+from src.notify import Notifier
+from src.products import ProductManager
+from src.self_improve import SelfImprover
+from src.x_client import XClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,334 +43,300 @@ logging.basicConfig(
         logging.FileHandler("logs/arcana.log", mode="a"),
     ],
 )
-logger = logging.getLogger("arcana.orchestrator")
-
-STOP_FILE = Path(__file__).resolve().parent.parent / "STOP"
-
-
-class Action(BaseModel):
-    """A candidate action from a sub-agent."""
-    agent: str
-    name: str
-    description: str
-    expected_revenue: float = 0.0
-    probability: float = 0.5
-    time_hours: float = 0.25
-    risk: float = 1.0
-    priority_score: float = 0.0
-    params: dict[str, Any] = {}
-
-    def calculate_priority(self) -> float:
-        """Priority = (Revenue × Probability) / (Time × Risk)"""
-        denominator = max(self.time_hours, 0.01) * max(self.risk, 0.1)
-        self.priority_score = (self.expected_revenue * self.probability) / denominator
-        return self.priority_score
-
-
-class OrchestratorState(TypedDict):
-    """State flowing through the LangGraph decision loop."""
-    actions: list[dict[str, Any]]
-    selected_action: dict[str, Any] | None
-    execution_result: dict[str, Any] | None
-    cycle_count: int
-    error: str | None
+logger = logging.getLogger("arcana")
 
 
 class Orchestrator:
     """The autonomous brain of ARCANA AI."""
 
     def __init__(self) -> None:
-        self.config: ArcanaConfig | None = None
-        self.llm: LLMClient | None = None
-        self.memory: MemorySystem | None = None
+        self.config: Config | None = None
+        self.llm: LLM | None = None
+        self.memory: Memory | None = None
         self.notifier: Notifier | None = None
-        self.db = None
-        self.agents: dict[str, Any] = {}
+        self.heartbeat: Heartbeat | None = None
+        self.x: XClient | None = None
+        self.content: ContentEngine | None = None
+        self.products: ProductManager | None = None
+        self.leads: LeadPipeline | None = None
+        self.iris: Iris | None = None
+        self.remy: Remy | None = None
+        self.improver: SelfImprover | None = None
         self._running = True
-        self._graph = None
+        self._last_mention_id: str | None = None
+        self._completed_today: list[str] = []
+        self._priorities: list[str] = []
 
     async def initialize(self) -> None:
-        """Initialize all components and sub-agents."""
+        """Boot up all components."""
         self.config = get_config()
-        self.llm = LLMClient(self.config)
-        self.db = await create_supabase_client(self.config)
-        self.memory = MemorySystem(self.db, self.llm)
+        self.llm = LLM(self.config)
+        self.memory = Memory()
         self.notifier = Notifier(self.config)
+        self.heartbeat = Heartbeat()
+        self.x = XClient(self.config, self.memory)
+        self.content = ContentEngine(self.llm, self.memory)
+        self.products = ProductManager(self.config, self.memory)
+        self.leads = LeadPipeline(self.llm, self.memory, self.notifier)
+        self.iris = Iris(self.llm, self.memory)
+        self.remy = Remy(self.llm, self.memory)
+        self.improver = SelfImprover(self.llm, self.memory)
 
-        # Initialize sub-agents
-        self.agents = {
-            "scanner": Scanner(self.config, self.llm, self.db, self.memory),
-            "trader": Trader(self.config, self.llm, self.db, self.memory, self.notifier),
-            "communicator": Communicator(self.config, self.llm, self.db, self.memory),
-            "creator": Creator(self.config, self.llm, self.db, self.memory),
-            "automator": Automator(self.config, self.llm, self.db, self.memory),
-        }
+        self.memory.log("ARCANA AI initialized. Beginning operations.", "System")
+        await self.notifier.send("ARCANA AI online. Beginning daily operations.")
+        logger.info("Orchestrator initialized")
 
-        # Build the LangGraph
-        self._graph = self._build_graph()
-
-        await self.notifier.send("ARCANA AI initialized. Beginning operations.", AlertLevel.INFO)
-        logger.info("Orchestrator initialized with %d agents", len(self.agents))
-
-    def _build_graph(self) -> Any:
-        """Build the LangGraph decision loop."""
-        graph = StateGraph(OrchestratorState)
-
-        graph.add_node("scan", self._scan_node)
-        graph.add_node("evaluate", self._evaluate_node)
-        graph.add_node("prioritize", self._prioritize_node)
-        graph.add_node("execute", self._execute_node)
-        graph.add_node("learn", self._learn_node)
-
-        graph.set_entry_point("scan")
-        graph.add_edge("scan", "evaluate")
-        graph.add_edge("evaluate", "prioritize")
-        graph.add_edge("prioritize", "execute")
-        graph.add_edge("execute", "learn")
-        graph.add_edge("learn", END)
-
-        return graph.compile()
-
-    async def _scan_node(self, state: OrchestratorState) -> OrchestratorState:
-        """SCAN: Query all sub-agents for available actions."""
-        logger.info("SCAN — Gathering available actions from all agents")
-        all_actions: list[dict[str, Any]] = []
-
-        for name, agent in self.agents.items():
-            try:
-                actions = await agent.get_available_actions()
-                all_actions.extend([a.model_dump() for a in actions])
-                logger.info("  %s: %d actions available", name, len(actions))
-            except Exception as exc:
-                logger.error("  %s: failed to get actions: %s", name, exc)
-                await self.notifier.error_alert(name, "get_available_actions", str(exc))
-
-        state["actions"] = all_actions
-        return state
-
-    async def _evaluate_node(self, state: OrchestratorState) -> OrchestratorState:
-        """EVALUATE: Enrich actions with memory context."""
-        logger.info("EVALUATE — Enriching %d actions with memory", len(state["actions"]))
-
-        for action_data in state["actions"]:
-            action = Action(**action_data)
-            try:
-                context = await self.memory.recall_context(
-                    f"{action.agent}: {action.name} - {action.description}"
-                )
-                # Adjust probability based on past experience
-                if "No relevant memories" not in context:
-                    prompt = (
-                        f"Based on this past experience:\n{context}\n\n"
-                        f"What is the adjusted probability of success (0.0-1.0) for this action?\n"
-                        f"Action: {action.description}\n"
-                        f"Current probability estimate: {action.probability}\n"
-                        f"Respond with ONLY a number."
-                    )
-                    raw = await self.llm.complete(prompt, tier=ModelTier.HAIKU, temperature=0.1, max_tokens=10)
-                    try:
-                        action.probability = max(0.01, min(1.0, float(raw.strip())))
-                    except ValueError:
-                        pass
-                action_data.update(action.model_dump())
-            except Exception as exc:
-                logger.warning("Failed to evaluate action %s: %s", action.name, exc)
-
-        return state
-
-    async def _prioritize_node(self, state: OrchestratorState) -> OrchestratorState:
-        """PRIORITIZE: Score and rank all actions."""
-        logger.info("PRIORITIZE — Scoring actions")
-
-        scored_actions = []
-        for action_data in state["actions"]:
-            action = Action(**action_data)
-            action.calculate_priority()
-            scored_actions.append(action.model_dump())
-            logger.info(
-                "  [%.1f] %s.%s — $%.0f × %.0f%% / (%.2fh × %.1f risk)",
-                action.priority_score,
-                action.agent,
-                action.name,
-                action.expected_revenue,
-                action.probability * 100,
-                action.time_hours,
-                action.risk,
-            )
-
-        scored_actions.sort(key=lambda a: a["priority_score"], reverse=True)
-        state["actions"] = scored_actions
-
-        if scored_actions:
-            state["selected_action"] = scored_actions[0]
-            logger.info(
-                "Selected: %s.%s (priority: %.1f)",
-                scored_actions[0]["agent"],
-                scored_actions[0]["name"],
-                scored_actions[0]["priority_score"],
-            )
-        else:
-            state["selected_action"] = None
-            logger.info("No actions available this cycle")
-
-        return state
-
-    async def _execute_node(self, state: OrchestratorState) -> OrchestratorState:
-        """EXECUTE: Run the highest-priority action."""
-        selected = state.get("selected_action")
-        if not selected:
-            state["execution_result"] = {"status": "idle", "message": "No actions to execute"}
-            return state
-
-        action = Action(**selected)
-        agent = self.agents.get(action.agent)
-        if not agent:
-            state["execution_result"] = {"status": "error", "message": f"Unknown agent: {action.agent}"}
-            return state
-
-        logger.info("EXECUTE — Running %s.%s", action.agent, action.name)
-
-        try:
-            result = await agent.execute_action(action)
-            state["execution_result"] = {
-                "status": "success",
-                "action": action.name,
-                "agent": action.agent,
-                "result": result,
-            }
-            await log_action(
-                self.db,
-                action.agent,
-                action.name,
-                details=result,
-                revenue_usd=result.get("revenue_usd", 0),
-                cost_usd=result.get("cost_usd", 0),
-            )
-        except Exception as exc:
-            logger.error("Execution failed: %s", exc)
-            state["execution_result"] = {"status": "error", "message": str(exc)}
-            await log_action(
-                self.db, action.agent, action.name, status="error", error=str(exc)
-            )
-            await self.notifier.error_alert(action.agent, action.name, str(exc))
-
-        return state
-
-    async def _learn_node(self, state: OrchestratorState) -> OrchestratorState:
-        """LEARN: Store the outcome in memory for future recall."""
-        result = state.get("execution_result", {})
-        selected = state.get("selected_action")
-
-        if not selected or result.get("status") == "idle":
-            return state
-
-        action = Action(**selected)
-        outcome_text = (
-            f"Action: {action.agent}.{action.name}\n"
-            f"Description: {action.description}\n"
-            f"Expected revenue: ${action.expected_revenue:.2f}\n"
-            f"Result: {result.get('status')}\n"
-            f"Details: {result.get('result', result.get('message', 'N/A'))}"
-        )
-
-        importance = await self.memory.calculate_importance(
-            outcome_text,
-            predicted_outcome=f"Expected ${action.expected_revenue:.2f} with {action.probability:.0%} probability",
-        )
-
-        category = "strategy_adjustment"
-        if action.agent == "trader":
-            category = "trade_outcome"
-        elif action.agent == "communicator":
-            category = "content_performance"
-        elif action.agent == "scanner":
-            category = "market_pattern"
-
-        await self.memory.store(
-            outcome_text,
-            category=category,
-            importance_score=importance,
-            metadata={"action": action.model_dump(), "result": result},
-        )
-
-        logger.info("LEARN — Stored outcome (importance: %.2f, category: %s)", importance, category)
-        return state
-
-    def _check_kill_switch(self) -> bool:
-        """Check if the STOP file exists."""
+    def _kill_switch_active(self) -> bool:
         if STOP_FILE.exists():
-            logger.warning("KILL SWITCH ACTIVE — STOP file detected. Halting all operations.")
+            logger.warning("KILL SWITCH ACTIVE — STOP file detected")
             return True
         return False
 
-    async def run_cycle(self) -> None:
-        """Run one complete decision cycle."""
-        if self._check_kill_switch():
+    # ── Morning Report ──────────────────────────────────────────────
+
+    async def morning_report(self) -> str:
+        """Generate and send morning report. Ian reviews in 5 minutes."""
+        logger.info("=== MORNING REPORT ===")
+        self.heartbeat.update("Running morning report", "Compiling stats and priorities")
+
+        # Check revenue
+        revenue = await self.products.get_revenue_summary()
+
+        # Get yesterday's notes
+        recent = self.memory.get_recent_days(2)
+        yesterday = recent[1][1] if len(recent) > 1 else "No data from yesterday."
+
+        # Get sub-agent reports
+        iris_report = await self.iris.nightly_report()
+        remy_report = await self.remy.nightly_report()
+
+        # Open leads
+        open_leads = [n for n in self.memory.list_knowledge("projects") if n.startswith("lead-")]
+
+        # Generate priorities with LLM
+        result = await self.llm.ask_json(
+            f"Generate ARCANA AI's morning report.\n\n"
+            f"Revenue (recent): ${revenue.get('total_revenue', 0):.2f}\n"
+            f"  Stripe: ${revenue.get('stripe', {}).get('revenue', 0):.2f}\n"
+            f"  Gumroad: ${revenue.get('gumroad', {}).get('revenue', 0):.2f}\n\n"
+            f"Yesterday's notes:\n{yesterday[:1000]}\n\n"
+            f"Support (Iris): {iris_report}\n"
+            f"Sales (Remy): {remy_report}\n"
+            f"Open leads: {', '.join(open_leads) or 'None'}\n\n"
+            f"Return JSON: {{"
+            f'"report_summary": str (3-4 sentences), '
+            f'"open_items_for_ian": [str] (things needing human input), '
+            f'"priorities": [str, str, str, str, str] (today\'s top 5 tasks)}}',
+            tier=Tier.SONNET,
+        )
+
+        self._priorities = result.get("priorities", [])
+
+        # Format report
+        report = (
+            f"**Morning Report — {datetime.now(timezone.utc).strftime('%B %d, %Y')}**\n\n"
+            f"{result.get('report_summary', 'Report generation failed.')}\n\n"
+            f"**Revenue:** ${revenue.get('total_revenue', 0):.2f}\n"
+            f"**Open Leads:** {len(open_leads)}\n\n"
+            f"**Waiting on Ian/Tan:**\n"
+            + "\n".join(f"- {item}" for item in result.get("open_items_for_ian", ["Nothing"]))
+            + "\n\n**Today's Priorities:**\n"
+            + "\n".join(f"{i+1}. {p}" for i, p in enumerate(self._priorities))
+        )
+
+        # Send to Discord/Telegram
+        await self.notifier.morning_report(report)
+
+        # Log to memory
+        self.memory.log(report, "Morning Report")
+
+        # Update heartbeat
+        self.heartbeat.update("Active", self._priorities[0] if self._priorities else "Awaiting tasks", upcoming=self._priorities)
+
+        logger.info("Morning report sent")
+        return report
+
+    # ── Daily Operations ────────────────────────────────────────────
+
+    async def daily_ops_cycle(self) -> None:
+        """One cycle of daily operations. Runs every 15 minutes."""
+        if self._kill_switch_active():
             return
 
-        logger.info("=" * 60)
-        logger.info("CYCLE START — %s", datetime.now(timezone.utc).isoformat())
-        logger.info("=" * 60)
+        logger.info("--- Daily ops cycle ---")
 
-        initial_state: OrchestratorState = {
-            "actions": [],
-            "selected_action": None,
-            "execution_result": None,
-            "cycle_count": 0,
-            "error": None,
-        }
+        # 1. Check mentions and qualify leads (HIGHEST PRIORITY)
+        await self._process_mentions()
 
-        try:
-            result = await self._graph.ainvoke(initial_state)
-            logger.info("Cycle complete. Result: %s", result.get("execution_result", {}).get("status", "unknown"))
-        except Exception as exc:
-            logger.error("Cycle failed: %s", exc)
-            await self.notifier.error_alert("orchestrator", "run_cycle", str(exc))
+        # 2. Post content (if it's time)
+        await self._maybe_post_content()
 
-        # Heartbeat
-        try:
-            await log_action(self.db, "orchestrator", "heartbeat")
-        except Exception:
-            pass
+        # 3. Check revenue
+        await self.products.get_revenue_summary()
 
-    async def run_daily_summary(self) -> None:
-        """Send the daily summary to Ian & Tan."""
-        try:
-            stats = await get_daily_stats(self.db)
-            await self.notifier.daily_summary(
-                total_revenue=stats["total_revenue"],
-                total_cost=stats["total_cost"],
-                trades=stats["trades"],
-                posts=stats["posts"],
-                leads=stats["leads"],
+        # 4. Update heartbeat
+        self.heartbeat.update(
+            "Active",
+            "Monitoring",
+            completed=self._completed_today,
+            upcoming=[p for p in self._priorities if p not in self._completed_today],
+        )
+
+    async def _process_mentions(self) -> None:
+        """Check X mentions for leads and engagement opportunities."""
+        mentions = await self.x.get_mentions(since_id=self._last_mention_id)
+        if not mentions:
+            return
+
+        self._last_mention_id = mentions[0].get("id")
+
+        # Process for leads
+        lead_results = await self.leads.process_mentions(mentions)
+
+        # Reply to qualified leads immediately
+        for lead in lead_results.get("qualified", []):
+            if lead.get("suggested_reply"):
+                mention_id = next(
+                    (m["id"] for m in mentions if m.get("author_id") == lead["handle"]),
+                    None,
+                )
+                if mention_id:
+                    await self.x.reply_to(mention_id, lead["suggested_reply"])
+
+        # Generate replies for non-lead mentions
+        for mention in mentions:
+            text = mention.get("text", "")
+            reply_decision = await self.content.reply_to_mention(text)
+
+            if reply_decision.get("should_reply") and reply_decision.get("reply"):
+                await self.x.reply_to(mention["id"], reply_decision["reply"])
+                await asyncio.sleep(random.uniform(5, 30))
+
+        if mentions:
+            self.memory.log(
+                f"Processed {len(mentions)} mentions: "
+                f"{lead_results.get('leads_found', 0)} leads found, "
+                f"{len(lead_results.get('qualified', []))} qualified",
+                "X Mentions",
             )
-        except Exception as exc:
-            logger.error("Failed to send daily summary: %s", exc)
+            self._completed_today.append(f"Processed {len(mentions)} X mentions")
+
+    async def _maybe_post_content(self) -> None:
+        """Decide what content to post based on time and schedule."""
+        now = datetime.now(timezone.utc)
+        hour = now.hour
+
+        # Morning briefing (7 AM PT = 15 UTC)
+        if hour == self.config.morning_report_hour:
+            tweets = await self.content.morning_briefing()
+            if tweets:
+                await self.x.post_thread(tweets)
+                self._completed_today.append("Posted Morning Briefing")
+
+        # Analysis tweets (spread throughout the day with jitter)
+        elif random.random() < 0.3:  # ~30% chance each cycle = 3-5 tweets/day
+            tweet = await self.content.analysis_tweet()
+            if tweet:
+                await self.x.post_with_self_reply(tweet)
+                self._completed_today.append("Posted analysis tweet")
+
+        # Case File (2x per week — Mon and Thu)
+        elif now.weekday() in (0, 3) and hour == 18 and random.random() < 0.5:
+            tweets = await self.content.case_file()
+            if tweets:
+                await self.x.post_thread(tweets)
+                self._completed_today.append("Posted Case File thread")
+
+        # Behind-the-scenes (2-3x per week)
+        elif now.weekday() in (1, 3, 5) and hour == 20 and random.random() < 0.4:
+            tweet = await self.content.bts_tweet()
+            if tweet:
+                await self.x.post_with_self_reply(tweet)
+                self._completed_today.append("Posted BTS tweet")
+
+    # ── Nightly Self-Improvement ────────────────────────────────────
+
+    async def nightly_review(self) -> dict[str, Any]:
+        """Run the nightly self-improvement cycle."""
+        logger.info("=== NIGHTLY SELF-IMPROVEMENT ===")
+        self.heartbeat.update("Running nightly review", "Self-improvement cycle")
+
+        # Get sub-agent reports
+        iris_report = await self.iris.nightly_report()
+        remy_report = await self.remy.nightly_report()
+        self.memory.log(f"Iris report: {iris_report}", "Sub-Agent Reports")
+        self.memory.log(f"Remy report: {remy_report}", "Sub-Agent Reports")
+
+        # Run the self-improvement analysis
+        analysis = await self.improver.run_nightly_review()
+
+        # Send summary to Ian/Tan
+        summary = (
+            f"**Nightly Review Complete**\n"
+            f"{analysis.get('summary', 'N/A')}\n"
+            f"Wins: {len(analysis.get('wins', []))}\n"
+            f"Bottlenecks: {len(analysis.get('bottlenecks', []))}\n"
+            f"New lessons: {len(analysis.get('lessons_learned', []))}\n"
+            f"Tomorrow: {', '.join(analysis.get('tomorrow_priorities', [])[:3])}"
+        )
+        await self.notifier.send(summary, "report")
+
+        # Clear heartbeat for the day
+        self.heartbeat.clear()
+        self._completed_today = []
+
+        logger.info("Nightly review complete")
+        return analysis
+
+    # ── Main Loop ───────────────────────────────────────────────────
 
     async def run_forever(self) -> None:
-        """Main loop — run cycles every N minutes."""
+        """Main loop: morning report → daily ops every 15 min → nightly review."""
         await self.initialize()
-        interval = self.config.orchestrator_interval_minutes * 60
-        last_summary = datetime.now(timezone.utc).date()
+        interval = 15 * 60  # 15 minutes
 
-        logger.info("Starting main loop — interval: %d minutes", self.config.orchestrator_interval_minutes)
+        did_morning = False
+        did_nightly = False
 
         while self._running:
-            if self._check_kill_switch():
-                logger.info("Kill switch active. Sleeping 60s before recheck...")
+            if self._kill_switch_active():
+                logger.info("Kill switch active. Sleeping 60s...")
                 await asyncio.sleep(60)
                 continue
 
-            await self.run_cycle()
-
-            # Daily summary at end of day
             now = datetime.now(timezone.utc)
-            if now.date() > last_summary and now.hour >= 23:
-                await self.run_daily_summary()
-                last_summary = now.date()
 
-            # Sleep with jitter (anti-bot detection)
-            import random
+            # Morning report (once per day, at morning_report_hour)
+            if now.hour == self.config.morning_report_hour and not did_morning:
+                try:
+                    await self.morning_report()
+                    did_morning = True
+                except Exception as exc:
+                    logger.error("Morning report failed: %s", exc)
+                    await self.notifier.error_alert("morning_report", str(exc))
+
+            # Nightly review (once per day, at nightly_review_hour)
+            if now.hour == self.config.nightly_review_hour and not did_nightly:
+                try:
+                    await self.nightly_review()
+                    did_nightly = True
+                except Exception as exc:
+                    logger.error("Nightly review failed: %s", exc)
+                    await self.notifier.error_alert("nightly_review", str(exc))
+
+            # Reset flags at midnight UTC
+            if now.hour == 0:
+                did_morning = False
+                did_nightly = False
+
+            # Regular daily ops cycle
+            try:
+                await self.daily_ops_cycle()
+            except Exception as exc:
+                logger.error("Daily ops cycle failed: %s", exc)
+                await self.notifier.error_alert("daily_ops", str(exc))
+
+            # Sleep with jitter (anti-bot)
             jitter = random.randint(0, 60)
             await asyncio.sleep(interval + jitter)
 
@@ -372,17 +344,18 @@ class Orchestrator:
         """Graceful shutdown."""
         logger.info("Shutting down ARCANA AI...")
         self._running = False
+        self.memory.log("ARCANA AI shutting down.", "System")
+        if self.notifier:
+            await self.notifier.send("ARCANA AI shutting down.")
+            await self.notifier.close()
         if self.llm:
             await self.llm.close()
-        if self.notifier:
-            await self.notifier.send("ARCANA AI shutting down.", AlertLevel.INFO)
-            await self.notifier.close()
+        if self.products:
+            await self.products.close()
 
 
 def main() -> None:
-    """Entry point."""
     os.makedirs("logs", exist_ok=True)
-
     orchestrator = Orchestrator()
 
     def handle_signal(signum, frame):

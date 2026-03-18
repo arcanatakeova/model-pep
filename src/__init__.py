@@ -1,1 +1,1 @@
-# ARCANA AI — Autonomous Economic Entity
+# ARCANA AI — Autonomous Business Operator
