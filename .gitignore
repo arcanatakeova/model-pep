@@ -1,63 +1,8 @@
-# ══════════════════════════════════════════════════════════════════
-#  NEVER COMMIT — Private keys, secrets, wallets
-# ══════════════════════════════════════════════════════════════════
-.env
-.env.*
-!.env.example        # The example template IS safe to commit
-*.pem
-*.key
-*.p12
-*.pfx
-secrets/
-wallets/
-keystore/
-
-# ══════════════════════════════════════════════════════════════════
-#  Bot state files (live trade data — private, machine-local)
-# ══════════════════════════════════════════════════════════════════
-trader/trades.json
-trader/equity_curve.json
-trader/dex_positions.json
-trader/allocation_state.json
-trader/bot_state.json
-trader/settings.json
-trader/arb_state.json
-trader/grid_state.json
-trader/heartbeat.json
-trader/*.log
-trades.json
-equity_curve.json
-dex_positions.json
-allocation_state.json
-*.log
-
-# ══════════════════════════════════════════════════════════════════
-#  Python
-# ══════════════════════════════════════════════════════════════════
+config/.env
+*.pyc
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-dist/
-*.egg-info/
-.eggs/
-*.egg
-
-# Virtual environments
 .venv/
-venv/
-env/
-ENV/
-.env/
-
-# ══════════════════════════════════════════════════════════════════
-#  OS / Editor
-# ══════════════════════════════════════════════════════════════════
+logs/
+STOP
+node_modules/
 .DS_Store
-Thumbs.db
-.idea/
-.vscode/
-*.swp
-*.swo

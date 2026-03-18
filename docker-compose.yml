@@ -4,7 +4,8 @@ services:
     build: .
     env_file: config/.env
     volumes:
-      - ./SOUL.md:/app/SOUL.md
+      - ./SOUL.md:/app/SOUL.md:ro
+      - ./docs:/app/docs:ro
       - ./logs:/app/logs
     restart: always
     depends_on:
@@ -14,18 +15,35 @@ services:
     image: supabase/postgres:15.6.1.143
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arcana_local}
+      POSTGRES_DB: arcana
     volumes:
       - db_data:/var/lib/postgresql/data
-      - ./supabase/migrations:/docker-entrypoint-initdb.d
+      - ./supabase/migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
     restart: always
 
   n8n:
     image: n8nio/n8n
     ports:
       - "5678:5678"
+    environment:
+      - GENERIC_TIMEZONE=America/Los_Angeles
     volumes:
       - n8n_data:/home/node/.n8n
     restart: always
+
+  # Optional: Langfuse for LLM observability (costs, latency, quality tracking)
+  # Uncomment when ready for production monitoring
+  # langfuse:
+  #   image: langfuse/langfuse
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-arcana_local}@db:5432/arcana
+  #   depends_on:
+  #     - db
+  #   restart: always
 
 volumes:
   db_data:
