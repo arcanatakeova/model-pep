@@ -1,0 +1,32 @@
+version: '3.8'
+services:
+  arcana:
+    build: .
+    env_file: config/.env
+    volumes:
+      - ./SOUL.md:/app/SOUL.md
+      - ./logs:/app/logs
+    restart: always
+    depends_on:
+      - db
+
+  db:
+    image: supabase/postgres:15.6.1.143
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arcana_local}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./supabase/migrations:/docker-entrypoint-initdb.d
+    restart: always
+
+  n8n:
+    image: n8nio/n8n
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    restart: always
+
+volumes:
+  db_data:
+  n8n_data:
