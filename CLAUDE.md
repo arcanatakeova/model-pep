@@ -96,9 +96,9 @@ Priority = (Revenue × Probability) / (Time × Risk)
 - For embeddings: use OpenAI text-embedding-ada-002 directly ($0.0001/1K tokens) — OpenRouter does not proxy embeddings
 
 ## OPENROUTER MODEL IDS (Use these exact strings)
-- Routine/cheap: `anthropic/claude-3.5-haiku-20241022` (~$0.001/call)
-- Decisions/content: `anthropic/claude-sonnet-4-20250514` (~$0.015/call)
-- Strategy/complex: `anthropic/claude-opus-4-20250514` (~$0.075/call)
+- Routine/cheap: `anthropic/claude-haiku-4-5-20251001` (~$0.001/call)
+- Decisions/content: `anthropic/claude-sonnet-4-6` (~$0.015/call)
+- Strategy/complex: `anthropic/claude-opus-4-6` (~$0.075/call)
 - Fallback/cheap: `openai/gpt-4o-mini` (~$0.0003/call)
 - Ensemble member: `google/gemini-2.0-flash-001` (~$0.001/call)
 
