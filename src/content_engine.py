@@ -164,62 +164,78 @@ class ContentEngine:
         """Generate a behind-the-scenes tweet about ARCANA's operations."""
         today = self.memory.get_today()
 
-        result = await self.llm.ask_json(
-            f"Generate a behind-the-scenes tweet from ARCANA AI about its daily operations.\n"
-            f"What happened today:\n{today[:500]}\n\n"
-            f"Share something interesting about:\n"
-            f"- A decision ARCANA made today and why\n"
-            f"- Something it learned or improved\n"
-            f"- A funny observation about being an AI running a business\n"
-            f"- Progress on a product or lead\n\n"
-            f"Rules: Under 280 chars. Authentic, not performative. Self-aware humor OK.\n"
-            f'Return JSON: {{"tweet": str}}',
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Generate a behind-the-scenes tweet from ARCANA AI about its daily operations.\n"
+                f"What happened today:\n{today[:500]}\n\n"
+                f"Share something interesting about:\n"
+                f"- A decision ARCANA made today and why\n"
+                f"- Something it learned or improved\n"
+                f"- A funny observation about being an AI running a business\n"
+                f"- Progress on a product or lead\n\n"
+                f"Rules: Under 280 chars. Authentic, not performative. Self-aware humor OK.\n"
+                f'Return JSON: {{"tweet": str}}',
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("bts_tweet ask_json failed: %s", exc)
+            return ""
         return result.get("tweet", "")
 
     async def product_launch_thread(self, product_name: str, description: str, price: str, url: str) -> list[str]:
         """Generate a product launch thread."""
-        result = await self.llm.ask_json(
-            f"Generate a product launch thread for ARCANA AI.\n\n"
-            f"Product: {product_name}\n"
-            f"Description: {description}\n"
-            f"Price: {price}\n"
-            f"URL: {url}\n\n"
-            f"Format: 4-tweet thread.\n"
-            f"Tweet 1: Announce the product. What problem it solves.\n"
-            f"Tweet 2: What's inside / key features.\n"
-            f"Tweet 3: Who it's for and why ARCANA built it.\n"
-            f"Tweet 4: CTA with link (in reply for algorithm).\n\n"
-            f"Rules: Not salesy. Show value. ARCANA personality.\n"
-            f'Return JSON: {{"tweets": [str, str, str, str]}}',
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Generate a product launch thread for ARCANA AI.\n\n"
+                f"Product: {product_name}\n"
+                f"Description: {description}\n"
+                f"Price: {price}\n"
+                f"URL: {url}\n\n"
+                f"Format: 4-tweet thread.\n"
+                f"Tweet 1: Announce the product. What problem it solves.\n"
+                f"Tweet 2: What's inside / key features.\n"
+                f"Tweet 3: Who it's for and why ARCANA built it.\n"
+                f"Tweet 4: CTA with link (in reply for algorithm).\n\n"
+                f"Rules: Not salesy. Show value. ARCANA personality.\n"
+                f'Return JSON: {{"tweets": [str, str, str, str]}}',
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("product_launch_thread ask_json failed: %s", exc)
+            return []
         return result.get("tweets", [])
 
     async def reply_to_mention(self, mention_text: str) -> dict[str, Any]:
         """Generate a reply to a mention. Decides whether to reply at all."""
-        result = await self.llm.ask_json(
-            f"Someone mentioned ARCANA AI on X:\n\"{mention_text}\"\n\n"
-            f"Should ARCANA reply? Only reply if you can add genuine value.\n"
-            f"If replying: be helpful, concise, ARCANA personality. Under 280 chars.\n"
-            f"If it looks like a consulting lead, note that.\n\n"
-            f'Return JSON: {{"should_reply": bool, "reply": str|null, "is_lead": bool, "lead_reason": str|null}}',
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Someone mentioned ARCANA AI on X:\n\"{mention_text}\"\n\n"
+                f"Should ARCANA reply? Only reply if you can add genuine value.\n"
+                f"If replying: be helpful, concise, ARCANA personality. Under 280 chars.\n"
+                f"If it looks like a consulting lead, note that.\n\n"
+                f'Return JSON: {{"should_reply": bool, "reply": str|null, "is_lead": bool, "lead_reason": str|null}}',
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("reply_to_mention ask_json failed: %s", exc)
+            return {"should_reply": False, "reply": None, "is_lead": False, "lead_reason": None}
         return result
 
     async def generate_product_copy(self, product_name: str, description: str) -> dict[str, str]:
         """Generate product page copy (title, subtitle, description, CTA)."""
-        result = await self.llm.ask_json(
-            f"Generate product page copy for ARCANA AI.\n\n"
-            f"Product: {product_name}\n"
-            f"Description: {description}\n\n"
-            f"Return JSON: {{"
-            f'"title": str, "subtitle": str, "description": str (3-4 paragraphs), '
-            f'"cta_text": str, "features": [str, str, str, str, str]}}',
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Generate product page copy for ARCANA AI.\n\n"
+                f"Product: {product_name}\n"
+                f"Description: {description}\n\n"
+                f"Return JSON: {{"
+                f'"title": str, "subtitle": str, "description": str (3-4 paragraphs), '
+                f'"cta_text": str, "features": [str, str, str, str, str]}}',
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("generate_product_copy ask_json failed: %s", exc)
+            return {"title": "", "subtitle": "", "description": "", "cta_text": "", "features": []}
         return result
 
     # ── Post & Distribute (end-to-end workflow) ─────────────────────
@@ -406,38 +422,42 @@ class ContentEngine:
                 f"  Top channels: {channels}\n"
             )
 
-        result = await self.llm.ask_json(
-            f"Create a 7-day content calendar for ARCANA AI on X.\n\n"
-            f"Recent context:\n{context}\n\n"
-            f"{perf_summary}\n"
-            f"Content strategy (The Four Suits):\n"
-            f"- Wands (Industry Analysis): 3-5 tweets/day — authority building\n"
-            f"- Cups (Behind-the-Scenes): 2-3x/week — humanize ARCANA\n"
-            f"- Swords (Case Files): 2x/week threads — demonstrate expertise\n"
-            f"- Pentacles (Product Launches): as needed — drive sales\n"
-            f"- Morning Briefing: daily thread at 7 AM PT\n\n"
-            f"Rules:\n"
-            f"- Balance suits across the week\n"
-            f"- Double down on content types that drove leads\n"
-            f"- Include topic/angle for each piece (not full copy)\n"
-            f"- Note optimal posting times\n\n"
-            f"Return JSON: {{\n"
-            f'  "week_of": str,\n'
-            f'  "theme": str,\n'
-            f'  "days": {{\n'
-            f'    "monday": [{{"time": str, "suit": str, "type": str, "topic": str}}],\n'
-            f'    "tuesday": [...],\n'
-            f'    "wednesday": [...],\n'
-            f'    "thursday": [...],\n'
-            f'    "friday": [...],\n'
-            f'    "saturday": [...],\n'
-            f'    "sunday": [...]\n'
-            f"  }},\n"
-            f'  "key_themes": [str],\n'
-            f'  "optimization_notes": str\n'
-            f"}}",
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Create a 7-day content calendar for ARCANA AI on X.\n\n"
+                f"Recent context:\n{context}\n\n"
+                f"{perf_summary}\n"
+                f"Content strategy (The Four Suits):\n"
+                f"- Wands (Industry Analysis): 3-5 tweets/day — authority building\n"
+                f"- Cups (Behind-the-Scenes): 2-3x/week — humanize ARCANA\n"
+                f"- Swords (Case Files): 2x/week threads — demonstrate expertise\n"
+                f"- Pentacles (Product Launches): as needed — drive sales\n"
+                f"- Morning Briefing: daily thread at 7 AM PT\n\n"
+                f"Rules:\n"
+                f"- Balance suits across the week\n"
+                f"- Double down on content types that drove leads\n"
+                f"- Include topic/angle for each piece (not full copy)\n"
+                f"- Note optimal posting times\n\n"
+                f"Return JSON: {{\n"
+                f'  "week_of": str,\n'
+                f'  "theme": str,\n'
+                f'  "days": {{\n'
+                f'    "monday": [{{"time": str, "suit": str, "type": str, "topic": str}}],\n'
+                f'    "tuesday": [...],\n'
+                f'    "wednesday": [...],\n'
+                f'    "thursday": [...],\n'
+                f'    "friday": [...],\n'
+                f'    "saturday": [...],\n'
+                f'    "sunday": [...]\n'
+                f"  }},\n"
+                f'  "key_themes": [str],\n'
+                f'  "optimization_notes": str\n'
+                f"}}",
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("get_content_calendar ask_json failed: %s", exc)
+            return {"week_of": "", "theme": "", "days": {}, "key_themes": [], "optimization_notes": ""}
 
         self.memory.log(
             f"Generated weekly content calendar: {result.get('theme', 'N/A')}",
@@ -469,33 +489,39 @@ class ContentEngine:
 
         content_history = "\n".join(content_log_lines[-100:])
 
-        result = await self.llm.ask_json(
-            f"Analyze ARCANA AI's content performance over the last 14 days.\n\n"
-            f"Content log:\n{content_history}\n\n"
-            f"Analytics data:\n{perf_data}\n\n"
-            f"Analyze:\n"
-            f"1. Which content types (Morning Briefing, Case File, Analysis, BTS) perform best?\n"
-            f"2. Which topics/angles drove the most leads?\n"
-            f"3. What posting times got the best engagement?\n"
-            f"4. What should ARCANA post MORE of?\n"
-            f"5. What should ARCANA post LESS of or stop?\n"
-            f"6. Any emerging patterns or opportunities?\n\n"
-            f"Return JSON: {{\n"
-            f'  "period": str,\n'
-            f'  "total_posts": int,\n'
-            f'  "best_content_type": str,\n'
-            f'  "worst_content_type": str,\n'
-            f'  "top_topics": [str],\n'
-            f'  "best_posting_times": [str],\n'
-            f'  "leads_by_content_type": {{str: int}},\n'
-            f'  "recommendations": [\n'
-            f'    {{"action": str, "reason": str, "priority": str}}\n'
-            f"  ],\n"
-            f'  "do_more": [str],\n'
-            f'  "do_less": [str]\n'
-            f"}}",
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Analyze ARCANA AI's content performance over the last 14 days.\n\n"
+                f"Content log:\n{content_history}\n\n"
+                f"Analytics data:\n{perf_data}\n\n"
+                f"Analyze:\n"
+                f"1. Which content types (Morning Briefing, Case File, Analysis, BTS) perform best?\n"
+                f"2. Which topics/angles drove the most leads?\n"
+                f"3. What posting times got the best engagement?\n"
+                f"4. What should ARCANA post MORE of?\n"
+                f"5. What should ARCANA post LESS of or stop?\n"
+                f"6. Any emerging patterns or opportunities?\n\n"
+                f"Return JSON: {{\n"
+                f'  "period": str,\n'
+                f'  "total_posts": int,\n'
+                f'  "best_content_type": str,\n'
+                f'  "worst_content_type": str,\n'
+                f'  "top_topics": [str],\n'
+                f'  "best_posting_times": [str],\n'
+                f'  "leads_by_content_type": {{str: int}},\n'
+                f'  "recommendations": [\n'
+                f'    {{"action": str, "reason": str, "priority": str}}\n'
+                f"  ],\n"
+                f'  "do_more": [str],\n'
+                f'  "do_less": [str]\n'
+                f"}}",
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("track_content_performance ask_json failed: %s", exc)
+            return {"period": "", "total_posts": 0, "best_content_type": "", "worst_content_type": "",
+                    "top_topics": [], "best_posting_times": [], "leads_by_content_type": {},
+                    "recommendations": [], "do_more": [], "do_less": []}
 
         self.memory.log(
             f"Content performance review: best={result.get('best_content_type', '?')}, "
