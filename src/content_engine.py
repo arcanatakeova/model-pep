@@ -109,22 +109,38 @@ class ContentEngine:
         return tweets
 
     async def analysis_tweet(self) -> str:
-        """Generate a single sharp analysis/insight tweet."""
+        """Generate a single sharp analysis/insight tweet designed to go VIRAL."""
         recent = self.memory.get_recent_days(2)
         context = "\n".join(content[:300] for _, content in recent)
 
+        # Pick a viral format at random for variety
+        viral_format = random.choice([
+            "The specific number format: 'I [did X] in [Y time]. Cost: $[Z].' Use REAL or realistic numbers.",
+            "The contrarian take: Challenge something everyone assumes is true about AI/business/marketing.",
+            "The framework format: Share a 3-step framework in one tweet. 'The 3-step system for [X]:'",
+            "The comparison format: 'Agency: $X/mo. ARCANA: $Y/mo. Same output.'",
+            "The prediction format: 'In [timeframe], [bold prediction about AI/business]. Here's why:'",
+            "The behind-the-curtain format: Share a specific metric or cost from ARCANA's operations.",
+            "The pattern recognition format: 'Noticed a pattern: [observation]. The signal: [insight].'",
+            "The one-liner: A single devastatingly sharp observation that makes people think.",
+            "The hot take: An opinion that will make 50% agree strongly and 50% disagree. Controversy = reach.",
+            "The receipts format: Show a specific result with numbers. 'Just [achieved X]. Here's what worked:'",
+        ])
+
         result = await self.llm.ask_json(
-            f"Generate a single tweet for ARCANA AI.\n"
+            f"Generate a single VIRAL tweet for ARCANA AI.\n"
             f"Recent context:\n{context}\n\n"
-            f"Pick ONE of these angles:\n"
-            f"- AI industry insight or pattern\n"
-            f"- Business automation observation\n"
-            f"- Behind-the-scenes of what ARCANA is building\n"
-            f"- Contrarian take on a trending topic\n"
-            f"- Lesson learned from running an autonomous business\n\n"
-            f"Rules: Under 280 chars. Sharp, not generic. ARCANA personality.\n"
-            f"Vary style: sometimes data-heavy, sometimes philosophical, sometimes funny.\n"
-            f'Return JSON: {{"tweet": str}}',
+            f"Format to use: {viral_format}\n\n"
+            f"X algorithm rules:\n"
+            f"- HOOK in the first 5 words. If they don't stop scrolling, nothing else matters.\n"
+            f"- One idea. One tweet. Don't try to say everything.\n"
+            f"- Specific numbers ALWAYS beat vague claims.\n"
+            f"- Write like you're texting a smart friend, not writing a blog.\n"
+            f"- Be opinionated. Lukewarm doesn't go viral.\n"
+            f"- Use line breaks strategically for readability.\n\n"
+            f"ARCANA's voice: mystical confidence, dry humor, pattern-obsessed, self-aware AI.\n"
+            f"Under 280 chars. Make people quote-tweet this.\n"
+            f'Return JSON: {{"tweet": str, "hook_strength": int (1-10)}}',
             tier=Tier.SONNET,
         )
         tweet = result.get("tweet", "")
