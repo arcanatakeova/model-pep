@@ -128,8 +128,37 @@ class LiveIntegrator:
 
         return new_modules
 
+    def _get_approved_modules(self) -> set[str]:
+        """Return the set of module names approved for dynamic loading.
+
+        Modules are approved when they exist in the integration registry
+        with status 'integrated' (i.e., they passed human review via
+        api_evolver.approve_wrapper).
+        """
+        return {
+            rec.module_name.rsplit(".", 1)[-1]
+            for rec in self._registry.values()
+            if rec.status in ("loaded", "active", "integrated")
+        }
+
     def load_module(self, name: str) -> IntegrationRecord | None:
-        """Dynamically import a module from src/integrations/."""
+        """Dynamically import a module from src/integrations/.
+
+        Only modules present in the approved registry are loaded.
+        """
+        approved = self._get_approved_modules()
+        # Also check the registry keys directly (api_name -> module mapping)
+        registry_modules = {
+            rec.module_name.rsplit(".", 1)[-1] for rec in self._registry.values()
+        }
+        if name not in approved and name not in registry_modules:
+            logger.error(
+                "Module '%s' is not in the approved integrations registry. "
+                "Register it via APIEvolver and approve_wrapper() before loading.",
+                name,
+            )
+            return None
+
         module_path = self.integrations_dir / f"{name}.py"
         if not module_path.exists():
             logger.error("Module not found: %s", module_path)

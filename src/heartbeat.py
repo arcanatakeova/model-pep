@@ -10,12 +10,15 @@ Production features:
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from src.config import HEARTBEAT_PATH
+
+logger = logging.getLogger("arcana.heartbeat")
 
 
 class Heartbeat:
@@ -69,9 +72,9 @@ class Heartbeat:
 
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(content)
-        except OSError:
-            pass
+            self.path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            logger.error("Failed to write heartbeat to %s: %s", self.path, exc)
 
     def record_error(self) -> None:
         """Increment error counter."""
@@ -84,7 +87,7 @@ class Heartbeat:
     def get(self) -> str:
         """Read current heartbeat."""
         if self.path.exists():
-            return self.path.read_text()
+            return self.path.read_text(encoding="utf-8")
         return "No heartbeat yet."
 
     def is_stale(self, max_seconds: int = 1800) -> bool:

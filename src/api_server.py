@@ -12,6 +12,7 @@ Rate limited: 100 requests/minute per IP.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
 import time
@@ -113,7 +114,7 @@ async def auth_middleware(request: web.Request, handler):
         return _error("API key not configured on server", status=503)
 
     provided_key = request.headers.get("X-API-Key", "")
-    if provided_key != expected_key:
+    if not hmac.compare_digest(provided_key, expected_key):
         return _error("Invalid or missing API key", status=401)
 
     return await handler(request)

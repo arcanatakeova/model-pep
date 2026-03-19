@@ -190,7 +190,7 @@ class ConversationMemory:
     ) -> str:
         """Start a new conversation thread. Returns conversation ID."""
         conv_id = f"conv_{uuid.uuid4().hex[:12]}"
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         conn = self.db._get_conn()
 
         conn.execute(
@@ -227,7 +227,7 @@ class ConversationMemory:
     ) -> int:
         """Add a message to an existing conversation. Returns message ID."""
         conn = self.db._get_conn()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
         # Get conversation for channel fallback
         conv_row = conn.execute(

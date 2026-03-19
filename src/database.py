@@ -664,14 +664,15 @@ class Database:
     def log_revenue(self, channel: str, amount: float, type_: str = "income",
                     description: str = "", **kwargs: Any) -> int:
         conn = self._get_conn()
-        cur = conn.execute(
-            "INSERT INTO revenue (channel, amount, type, description, "
-            "contact_id, deal_id, stripe_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (channel, amount, type_, description,
-             kwargs.get("contact_id"), kwargs.get("deal_id"),
-             kwargs.get("stripe_id"), json.dumps(kwargs.get("metadata", {}))),
-        )
-        conn.commit()
+        with self._lock:
+            cur = conn.execute(
+                "INSERT INTO revenue (channel, amount, type, description, "
+                "contact_id, deal_id, stripe_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (channel, amount, type_, description,
+                 kwargs.get("contact_id"), kwargs.get("deal_id"),
+                 kwargs.get("stripe_id"), json.dumps(kwargs.get("metadata", {}))),
+            )
+            conn.commit()
         return cur.lastrowid
 
     def get_revenue_summary(self, days: int = 30) -> dict[str, Any]:
@@ -703,11 +704,12 @@ class Database:
 
     def record_metric(self, name: str, value: float, dimension: str = "") -> None:
         conn = self._get_conn()
-        conn.execute(
-            "INSERT INTO metrics (name, value, dimension) VALUES (?, ?, ?)",
-            (name, value, dimension or None),
-        )
-        conn.commit()
+        with self._lock:
+            conn.execute(
+                "INSERT INTO metrics (name, value, dimension) VALUES (?, ?, ?)",
+                (name, value, dimension or None),
+            )
+            conn.commit()
 
     def get_metric_history(self, name: str, days: int = 30, dimension: str = "") -> list[dict[str, Any]]:
         conn = self._get_conn()
@@ -757,11 +759,12 @@ class Database:
 
     def log_event(self, event_type: str, category: str = "system", data: dict[str, Any] | None = None) -> int:
         conn = self._get_conn()
-        cur = conn.execute(
-            "INSERT INTO events (event_type, category, data) VALUES (?, ?, ?)",
-            (event_type, category, json.dumps(data or {})),
-        )
-        conn.commit()
+        with self._lock:
+            cur = conn.execute(
+                "INSERT INTO events (event_type, category, data) VALUES (?, ?, ?)",
+                (event_type, category, json.dumps(data or {})),
+            )
+            conn.commit()
         return cur.lastrowid
 
     def get_events(self, event_type: str | None = None, category: str | None = None,
@@ -794,27 +797,28 @@ class Database:
             "FROM query_performance WHERE query_text = ? AND platform = ?",
             (query_text, platform),
         ).fetchone()
-        if existing:
-            conn.execute(
-                "UPDATE query_performance SET "
-                "times_used = times_used + 1, "
-                "opportunities_found = opportunities_found + ?, "
-                "responses_sent = responses_sent + ?, "
-                "conversions = conversions + ?, "
-                "last_used = datetime('now'), "
-                "score = CAST((conversions + ?) AS REAL) / (times_used + 1) "
-                "WHERE id = ?",
-                (found, responded, converted, converted, existing["id"]),
-            )
-        else:
-            score = converted / 1.0 if converted else found / 10.0
-            conn.execute(
-                "INSERT INTO query_performance (query_text, platform, category, "
-                "times_used, opportunities_found, responses_sent, conversions, "
-                "last_used, score) VALUES (?, ?, ?, 1, ?, ?, ?, datetime('now'), ?)",
-                (query_text, platform, category, found, responded, converted, score),
-            )
-        conn.commit()
+        with self._lock:
+            if existing:
+                conn.execute(
+                    "UPDATE query_performance SET "
+                    "times_used = times_used + 1, "
+                    "opportunities_found = opportunities_found + ?, "
+                    "responses_sent = responses_sent + ?, "
+                    "conversions = conversions + ?, "
+                    "last_used = datetime('now'), "
+                    "score = CAST((conversions + ?) AS REAL) / (times_used + 1) "
+                    "WHERE id = ?",
+                    (found, responded, converted, converted, existing["id"]),
+                )
+            else:
+                score = converted / 1.0 if converted else found / 10.0
+                conn.execute(
+                    "INSERT INTO query_performance (query_text, platform, category, "
+                    "times_used, opportunities_found, responses_sent, conversions, "
+                    "last_used, score) VALUES (?, ?, ?, 1, ?, ?, ?, datetime('now'), ?)",
+                    (query_text, platform, category, found, responded, converted, score),
+                )
+            conn.commit()
 
     def get_top_queries(self, limit: int = 20) -> list[dict[str, Any]]:
         conn = self._get_conn()
@@ -839,11 +843,12 @@ class Database:
     def _index_fts(self, source: str, source_id: int, text: str) -> None:
         """Add text to the full-text search index."""
         conn = self._get_conn()
-        conn.execute(
-            "INSERT INTO fts_memory (source, source_id, text) VALUES (?, ?, ?)",
-            (source, str(source_id), text),
-        )
-        conn.commit()
+        with self._lock:
+            conn.execute(
+                "INSERT INTO fts_memory (source, source_id, text) VALUES (?, ?, ?)",
+                (source, str(source_id), text),
+            )
+            conn.commit()
 
     def search(self, query: str, source: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         """Full-text search across all stored text."""

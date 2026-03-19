@@ -631,7 +631,7 @@ class SelfImprover:
         result = await self.llm.ask_json(
             f"You are ARCANA AI learning from failures to avoid repeating them.\n\n"
             f"Lost/churned deals:\n{'---'.join(lost_deals[-5:]) if lost_deals else 'None'}\n\n"
-            f"Failed skill executions:\n{'chr(10)'.join(failures[-10:]) if failures else 'None'}\n\n"
+            f"Failed skill executions:\n{chr(10).join(failures[-10:]) if failures else 'None'}\n\n"
             f"Existing anti-patterns (avoid duplicates):\n{(existing_anti or 'None yet.')[-1500:]}\n\n"
             f"For each failure, trace the failure path and extract anti-patterns.\n"
             f"Return JSON: {{\n"

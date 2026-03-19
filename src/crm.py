@@ -297,7 +297,6 @@ class CRM:
                 f'"action": str, "message": str|null, '
                 f'"new_stage": str|null, "escalate": bool}}',
                 tier=Tier.HAIKU,
-                max_tokens=150,
             )
 
             if action.get("new_stage"):
@@ -330,7 +329,6 @@ class CRM:
             f'"estimated_setup_days": int, '
             f'"first_deliverable": str}}',
             tier=Tier.HAIKU,
-            max_tokens=400,
         )
         return result
 

@@ -57,19 +57,23 @@ class ContentEngine:
         recent = self.memory.get_recent_days(3)
         context = "\n".join(content[:500] for _, content in recent)
 
-        result = await self.llm.ask_json(
-            f"Generate a Morning Briefing thread for ARCANA AI to post on X.\n\n"
-            f"Today: {datetime.now(timezone.utc).strftime('%B %d, %Y')}\n"
-            f"Recent context from memory:\n{context}\n\n"
-            f"Format: 4-5 tweets as a thread.\n"
-            f"Tweet 1: ☀️ ARCANA MORNING BRIEFING — [date]. Overview of what's happening.\n"
-            f"Tweet 2-3: Key insights, observations, or things ARCANA is working on today.\n"
-            f"Tweet 4: What ARCANA is building/shipping today.\n"
-            f"Tweet 5: Closing with personality. Mention arcanaoperations.com\n\n"
-            f"Rules: Under 280 chars each. No hype. No price predictions. ARCANA personality.\n"
-            f'Return JSON: {{"tweets": [str, str, str, str, str]}}',
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Generate a Morning Briefing thread for ARCANA AI to post on X.\n\n"
+                f"Today: {datetime.now(timezone.utc).strftime('%B %d, %Y')}\n"
+                f"Recent context from memory:\n{context}\n\n"
+                f"Format: 4-5 tweets as a thread.\n"
+                f"Tweet 1: ☀️ ARCANA MORNING BRIEFING — [date]. Overview of what's happening.\n"
+                f"Tweet 2-3: Key insights, observations, or things ARCANA is working on today.\n"
+                f"Tweet 4: What ARCANA is building/shipping today.\n"
+                f"Tweet 5: Closing with personality. Mention arcanaoperations.com\n\n"
+                f"Rules: Under 280 chars each. No hype. No price predictions. ARCANA personality.\n"
+                f'Return JSON: {{"tweets": [str, str, str, str, str]}}',
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("morning_briefing ask_json failed: %s", exc)
+            return []
         tweets = result.get("tweets", [])
         self.memory.log(f"Generated Morning Briefing: {len(tweets)} tweets", "Content")
         return tweets
@@ -89,21 +93,25 @@ class ContentEngine:
         biz = random.choice(businesses)
         num = random.randint(1, 99)
 
-        result = await self.llm.ask_json(
-            f"Generate a Case File thread for ARCANA AI's X account.\n\n"
-            f"Business: {biz['name']} ({biz['type']})\n"
-            f"Topics: {biz['topics']}\n"
-            f"Case File #{num}\n\n"
-            f"Format: 5-tweet thread.\n"
-            f"Tweet 1: 🗂️ CASE FILE #{num} — [catchy title]\n"
-            f"Tweet 2: The problem the client faced\n"
-            f"Tweet 3: What Arcana Operations built/implemented\n"
-            f"Tweet 4: The results (use realistic metrics)\n"
-            f"Tweet 5: How we can do this for your business. arcanaoperations.com\n\n"
-            f"Rules: Specific, data-driven, not salesy. Show expertise through detail.\n"
-            f'Return JSON: {{"tweets": [str, str, str, str, str]}}',
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Generate a Case File thread for ARCANA AI's X account.\n\n"
+                f"Business: {biz['name']} ({biz['type']})\n"
+                f"Topics: {biz['topics']}\n"
+                f"Case File #{num}\n\n"
+                f"Format: 5-tweet thread.\n"
+                f"Tweet 1: 🗂️ CASE FILE #{num} — [catchy title]\n"
+                f"Tweet 2: The problem the client faced\n"
+                f"Tweet 3: What Arcana Operations built/implemented\n"
+                f"Tweet 4: The results (use realistic metrics)\n"
+                f"Tweet 5: How we can do this for your business. arcanaoperations.com\n\n"
+                f"Rules: Specific, data-driven, not salesy. Show expertise through detail.\n"
+                f'Return JSON: {{"tweets": [str, str, str, str, str]}}',
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("case_file ask_json failed: %s", exc)
+            return []
         tweets = result.get("tweets", [])
         self.memory.log(f"Generated Case File #{num}: {biz['name']}", "Content")
         return tweets
@@ -127,22 +135,26 @@ class ContentEngine:
             "The receipts format: Show a specific result with numbers. 'Just [achieved X]. Here's what worked:'",
         ])
 
-        result = await self.llm.ask_json(
-            f"Generate a single VIRAL tweet for ARCANA AI.\n"
-            f"Recent context:\n{context}\n\n"
-            f"Format to use: {viral_format}\n\n"
-            f"X algorithm rules:\n"
-            f"- HOOK in the first 5 words. If they don't stop scrolling, nothing else matters.\n"
-            f"- One idea. One tweet. Don't try to say everything.\n"
-            f"- Specific numbers ALWAYS beat vague claims.\n"
-            f"- Write like you're texting a smart friend, not writing a blog.\n"
-            f"- Be opinionated. Lukewarm doesn't go viral.\n"
-            f"- Use line breaks strategically for readability.\n\n"
-            f"ARCANA's voice: mystical confidence, dry humor, pattern-obsessed, self-aware AI.\n"
-            f"Under 280 chars. Make people quote-tweet this.\n"
-            f'Return JSON: {{"tweet": str, "hook_strength": int (1-10)}}',
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Generate a single VIRAL tweet for ARCANA AI.\n"
+                f"Recent context:\n{context}\n\n"
+                f"Format to use: {viral_format}\n\n"
+                f"X algorithm rules:\n"
+                f"- HOOK in the first 5 words. If they don't stop scrolling, nothing else matters.\n"
+                f"- One idea. One tweet. Don't try to say everything.\n"
+                f"- Specific numbers ALWAYS beat vague claims.\n"
+                f"- Write like you're texting a smart friend, not writing a blog.\n"
+                f"- Be opinionated. Lukewarm doesn't go viral.\n"
+                f"- Use line breaks strategically for readability.\n\n"
+                f"ARCANA's voice: mystical confidence, dry humor, pattern-obsessed, self-aware AI.\n"
+                f"Under 280 chars. Make people quote-tweet this.\n"
+                f'Return JSON: {{"tweet": str, "hook_strength": int (1-10)}}',
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("analysis_tweet ask_json failed: %s", exc)
+            return ""
         tweet = result.get("tweet", "")
         if tweet:
             self.memory.log(f"Generated analysis tweet: {tweet[:100]}", "Content")

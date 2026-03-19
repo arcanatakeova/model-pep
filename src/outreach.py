@@ -270,7 +270,6 @@ class OutreachEngine:
             f'"service": str, "target_role": str, "target_industry": str, '
             f'"pain_point": str, "competitive_angle": str, "reasoning": str}}',
             tier=Tier.HAIKU,
-            max_tokens=200,
         )
 
         if not result:

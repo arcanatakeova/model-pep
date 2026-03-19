@@ -179,14 +179,29 @@ class ScannerOrchestrator:
             results["total_found"] = scan_results.get("total_found", 0)
             results["total_responded"] = scan_results.get("auto_responded", 0)
 
-            # Record per-platform if available
-            for platform_result in scan_results.get("platform_results", []):
-                platform = platform_result.get("platform", "unknown")
-                self.record_result(
-                    platform,
-                    found=platform_result.get("found", 0),
-                    responded=platform_result.get("responded", 0),
-                )
+            # Record per-platform from flat scan_cycle keys
+            platform_keys = {
+                "x_inbound": "x",
+                "x_pain": "x",
+                "x_displacement": "x",
+                "x_triggers": "x",
+                "x_watering_holes": "x",
+                "reddit": "reddit",
+                "freelance": "freelance",
+                "hn": "hn",
+                "product_hunt": "product_hunt",
+                "indie_hackers": "indie_hackers",
+                "job_boards": "job_boards",
+                "google_alerts": "google_alerts",
+            }
+            platform_totals: dict[str, int] = {}
+            for key, platform in platform_keys.items():
+                count = scan_results.get(key, 0)
+                if count:
+                    platform_totals[platform] = platform_totals.get(platform, 0) + count
+
+            for platform, found in platform_totals.items():
+                self.record_result(platform, found=found, responded=0)
                 results["platforms_scanned"].append(platform)
 
         except Exception as exc:

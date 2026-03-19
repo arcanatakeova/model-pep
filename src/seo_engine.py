@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
+from xml.sax.saxutils import escape
 
 from src.llm import LLM, Tier
 from src.memory import Memory
@@ -254,8 +255,8 @@ class SEOEngine:
             loc = article.get("url") or f"{base_url.rstrip('/')}/articles/{slug}"
             urls_xml.append(
                 f"  <url>\n"
-                f"    <loc>{loc}</loc>\n"
-                f"    <lastmod>{published_at[:10]}</lastmod>\n"
+                f"    <loc>{escape(loc)}</loc>\n"
+                f"    <lastmod>{escape(published_at[:10])}</lastmod>\n"
                 f"    <changefreq>monthly</changefreq>\n"
                 f"    <priority>0.7</priority>\n"
                 f"  </url>"

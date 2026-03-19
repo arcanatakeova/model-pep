@@ -108,7 +108,7 @@ class LLM:
             if wait > 0:
                 logger.warning("LLM rate limit reached (%d/hr), waiting %.0fs",
                                self._max_per_hour, wait)
-                await asyncio.sleep(min(wait, 60))  # Cap wait at 60s
+                await asyncio.sleep(wait)
 
         self._call_timestamps.append(time.monotonic())
 
@@ -152,7 +152,7 @@ class LLM:
         """Single-turn completion with SOUL.md as system prompt + response cache."""
         # Check cache for identical prompts (saves API cost)
         from src.toolkit import fast_hash
-        cache_key = fast_hash(f"{tier.value}:{prompt[:500]}")
+        cache_key = fast_hash(f"{tier.value}:{prompt}")
         cached = self._response_cache.get(cache_key)
         if cached and temperature <= 0.3:  # Only cache deterministic calls
             logger.debug("LLM cache hit for %s", cache_key[:8])
@@ -283,7 +283,7 @@ class LLM:
                 else:
                     raise
 
-            except (httpx.RequestError, KeyError) as exc:
+            except (httpx.RequestError, KeyError, IndexError) as exc:
                 last_err = exc
                 logger.warning("LLM attempt %d failed: %s", attempt + 1, exc)
                 await asyncio.sleep(2 ** (attempt + 1))

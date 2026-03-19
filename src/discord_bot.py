@@ -144,7 +144,8 @@ class ArcanaBot(discord.Client):
             return
 
         # Only process messages from known operators
-        if OPERATOR_IDS and message.author.id not in OPERATOR_IDS:
+        # When OPERATOR_IDS is empty, reject all — never treat everyone as operator
+        if not OPERATOR_IDS or message.author.id not in OPERATOR_IDS:
             return
 
         # Skip if the message is a slash command invocation (starts with /)

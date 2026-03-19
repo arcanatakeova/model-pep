@@ -359,28 +359,70 @@ class APIEvolver:
         if not code:
             return {"error": "Failed to generate wrapper code"}
 
-        # Write the wrapper module
-        module_path = self.integrations_dir / f"{module_name}.py"
-        module_path.write_text(code)
+        # Write to a .pending.py file for human review — NOT the final path
+        pending_path = self.integrations_dir / f"{module_name}.pending.py"
+        pending_path.write_text(code)
 
         api.wrapper_module = f"src.integrations.{module_name}"
-        api.status = "integrated"
+        api.status = "pending_review"
         self._save_apis()
 
+        logger.warning(
+            "LLM-generated wrapper written to %s — manual review required before use. "
+            "Call approve_wrapper('%s') to promote to live.",
+            pending_path, api_name,
+        )
         self.memory.log(
-            f"Generated API wrapper: {module_name} ({api.name})\n"
+            f"Generated API wrapper (PENDING REVIEW): {module_name} ({api.name})\n"
             f"Class: {result.get('class_name', 'N/A')}\n"
-            f"Path: {module_path}\n"
-            f"Env var: {result.get('env_var', 'N/A')}",
+            f"Pending path: {pending_path}\n"
+            f"Env var: {result.get('env_var', 'N/A')}\n"
+            f"⚠ Run approve_wrapper('{api_name}') after manual review to activate.",
             "API Evolution",
         )
 
         return {
             "module_name": module_name,
             "class_name": result.get("class_name", ""),
-            "path": str(module_path),
+            "path": str(pending_path),
+            "status": "pending_review",
             "env_var": result.get("env_var", ""),
             "usage_example": result.get("usage_example", ""),
+        }
+
+    def approve_wrapper(self, api_name: str) -> dict[str, Any]:
+        """Approve a pending wrapper after manual review, promoting it to live.
+
+        Moves the .pending.py file to .py and sets the API status to 'integrated'.
+        """
+        api = self.apis.get(api_name)
+        if not api:
+            return {"error": f"Unknown API: {api_name}"}
+        if api.status != "pending_review":
+            return {"error": f"API '{api_name}' is not pending review (status: {api.status})"}
+
+        module_name = api.wrapper_module.rsplit(".", 1)[-1] if api.wrapper_module else api_name.lower().replace(" ", "_").replace("-", "_")
+        pending_path = self.integrations_dir / f"{module_name}.pending.py"
+        final_path = self.integrations_dir / f"{module_name}.py"
+
+        if not pending_path.exists():
+            return {"error": f"Pending file not found: {pending_path}"}
+
+        pending_path.rename(final_path)
+        api.status = "integrated"
+        self._save_apis()
+
+        self.memory.log(
+            f"Approved API wrapper: {module_name} ({api.name})\n"
+            f"Path: {final_path}",
+            "API Evolution",
+        )
+        logger.info("Wrapper approved and promoted: %s -> %s", pending_path, final_path)
+
+        return {
+            "module_name": module_name,
+            "path": str(final_path),
+            "status": "integrated",
         }
 
     # ── MONITOR ────────────────────────────────────────────────────

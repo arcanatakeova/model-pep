@@ -248,7 +248,17 @@ class EvolutionTracker:
             verdict = ev.get("verdict", "inconclusive").upper()
             hyp_text = ev.get("hypothesis", "")[:50]
             if hyp_text and verdict in ("CONFIRMED", "REFUTED"):
-                hypotheses = hypotheses.replace("Status: TESTING", f"Status: {verdict}", 1)
+                # Find the hypothesis block that contains hyp_text and replace
+                # its specific "Status: TESTING" rather than the first occurrence
+                hyp_pos = hypotheses.find(hyp_text)
+                if hyp_pos != -1:
+                    status_pos = hypotheses.find("Status: TESTING", hyp_pos)
+                    if status_pos != -1:
+                        hypotheses = (
+                            hypotheses[:status_pos]
+                            + f"Status: {verdict}"
+                            + hypotheses[status_pos + len("Status: TESTING"):]
+                        )
 
         self.memory.save_tacit("hypotheses", hypotheses)
 

@@ -688,8 +688,8 @@ class OpportunityScanner:
                 if score >= 70 and category in RESPONSE_TEMPLATES:
                     # Use battle-tested template for high-value leads
                     reply = random.choice(RESPONSE_TEMPLATES[category])
-                if reply and score >= 35:
-                    await self.x.reply_to(tweet.get("id", ""), reply)
+                if reply and score >= 35 and tweet.get("id"):
+                    await self.x.reply_to(tweet["id"], reply)
                     responded += 1
                     await asyncio.sleep(random.uniform(45, 120))
 
@@ -740,8 +740,8 @@ class OpportunityScanner:
                 found += 1
                 self.metrics["by_source"]["x_pain"] = self.metrics["by_source"].get("x_pain", 0) + 1
 
-                if opp.get("empathy_reply") and opp.get("score", 0) >= 40:
-                    await self.x.reply_to(tweet.get("id", ""), opp["empathy_reply"])
+                if opp.get("empathy_reply") and opp.get("score", 0) >= 40 and tweet.get("id"):
+                    await self.x.reply_to(tweet["id"], opp["empathy_reply"])
                     responded += 1
                     await asyncio.sleep(random.uniform(60, 180))
 
@@ -833,7 +833,6 @@ class OpportunityScanner:
             f'"estimated_value": int, "comment_reply": str|null '
             f"(helpful Reddit comment — NO sales pitch, pure value)}}",
             tier=Tier.HAIKU,
-            max_tokens=200,
         )
         return result
 
@@ -900,7 +899,6 @@ class OpportunityScanner:
             f'"can_auto_complete": bool, "proposal_angle": str}}\n'
             f"]}}",
             tier=Tier.HAIKU,
-            max_tokens=500,
         )
         return [l for l in result.get("listings", []) if l.get("fit_score", 0) >= 35]
 
@@ -984,7 +982,6 @@ class OpportunityScanner:
             f'"service_match": str, "opportunity_type": str, '
             f'"estimated_value": int}}',
             tier=Tier.HAIKU,
-            max_tokens=100,
         )
         return result
 
@@ -1029,7 +1026,6 @@ class OpportunityScanner:
                     f'"score": int (0-100), "approach_angle": str}}\n'
                     f"]}}",
                     tier=Tier.HAIKU,
-                    max_tokens=500,
                 )
                 for launch in opps.get("launches", []):
                     if launch.get("score", 0) < 30:
@@ -1081,7 +1077,6 @@ class OpportunityScanner:
                     f'"score": int (0-100), "estimated_value": int, "url": str}}\n'
                     f"]}}",
                     tier=Tier.HAIKU,
-                    max_tokens=400,
                 )
                 for post in opps.get("posts", []):
                     if post.get("score", 0) < 30 or self._is_seen(post.get("title", "")):
@@ -1143,7 +1138,6 @@ class OpportunityScanner:
                     f'"service_match": str, "score": int (0-100), "pitch": str}}\n'
                     f"]}}",
                     tier=Tier.HAIKU,
-                    max_tokens=400,
                 )
                 for job in opps.get("jobs", []):
                     if job.get("score", 0) < 40 or self._is_seen(job.get("company", "")):
@@ -1195,7 +1189,6 @@ class OpportunityScanner:
                     f'"service_match": str, "score": int (0-100), "estimated_value": int}}\n'
                     f"]}}",
                     tier=Tier.HAIKU,
-                    max_tokens=300,
                 )
                 for alert in opps.get("alerts", []):
                     if alert.get("score", 0) < 30 or self._is_seen(alert.get("title", "")):
@@ -1256,7 +1249,6 @@ class OpportunityScanner:
             f'  "reply": str|null (value-first, under 280 chars)\n'
             f"}}",
             tier=Tier.HAIKU,
-            max_tokens=200,
         )
         return result
 
@@ -1280,7 +1272,6 @@ class OpportunityScanner:
             f'  "empathy_reply": str|null\n'
             f"}}",
             tier=Tier.HAIKU,
-            max_tokens=200,
         )
         return result
 

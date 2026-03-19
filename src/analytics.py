@@ -15,6 +15,7 @@ Tracks:
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -38,6 +39,7 @@ class Analytics:
         self.llm = llm
         self.memory = memory
         self.db = db
+        self._track_lock = threading.Lock()
 
     # ── Event Tracking ──────────────────────────────────────────────
 
@@ -47,16 +49,17 @@ class Analytics:
         props = properties or {}
         entry = f"{ts} | {event} | {props}"
 
-        # Append to daily analytics log
-        existing = self.memory.get_tacit("analytics-log") or ""
-        updated = existing + "\n" + entry if existing else entry
+        # Append to daily analytics log (locked to prevent race conditions)
+        with self._track_lock:
+            existing = self.memory.get_tacit("analytics-log") or ""
+            updated = existing + "\n" + entry if existing else entry
 
-        # Keep last 500 entries
-        lines = updated.strip().splitlines()
-        if len(lines) > 500:
-            lines = lines[-500:]
+            # Keep last 500 entries
+            lines = updated.strip().splitlines()
+            if len(lines) > 500:
+                lines = lines[-500:]
 
-        self.memory.save_tacit("analytics-log", "\n".join(lines))
+            self.memory.save_tacit("analytics-log", "\n".join(lines))
 
     def track_lead(self, source: str, service: str, value: float) -> None:
         self.track("lead_created", {"source": source or "unknown", "service": service, "value": max(0, value)})

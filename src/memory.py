@@ -69,7 +69,7 @@ class Memory:
             dir=str(path.parent), suffix=".tmp", prefix=".arcana_",
         )
         try:
-            with os.fdopen(fd, "w") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
             os.replace(tmp_path, str(path))
         except Exception:
