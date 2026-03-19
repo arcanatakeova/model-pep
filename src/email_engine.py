@@ -157,7 +157,7 @@ class EmailEngine:
             f"<table style='border-collapse:collapse;width:100%'>"
             f"<tr><td>Service</td><td>{safe_service}</td></tr>"
             f"<tr><td>Amount</td><td><strong>${amount:,.2f}</strong></td></tr>"
-            f"<tr><td>Due Date</td><td>{due_date}</td></tr>"
+            f"<tr><td>Due Date</td><td>{html_mod.escape(str(due_date))}</td></tr>"
             f"</table>"
             f"<p><a href='{safe_link}' style='background:#000;color:#fff;"
             f"padding:12px 24px;text-decoration:none;display:inline-block;"
