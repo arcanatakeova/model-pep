@@ -74,6 +74,16 @@ class SEOEngine:
             tier=Tier.SONNET,
         )
 
+        # Auto-generate clean slug if missing
+        if result and not result.get("slug"):
+            from src.toolkit import slugify
+            result["slug"] = slugify(result.get("title", keyword))
+
+        # Sanitize the HTML content
+        if result.get("content_html"):
+            from src.toolkit import sanitize_html
+            result["content_html"] = sanitize_html(result["content_html"])
+
         self.memory.log(
             f"[SEO] Article generated: {keyword} ({result.get('word_count', 0)} words)",
             "SEO",

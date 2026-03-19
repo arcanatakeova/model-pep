@@ -60,6 +60,17 @@ class EmailEngine:
         text_body: str = "", reply_to: str = "",
     ) -> bool:
         """Send a single transactional email via SendGrid."""
+        # Validate email before sending
+        from src.toolkit import validate_email, sanitize_html
+        email_check = validate_email(to_email)
+        if not email_check.get("valid"):
+            logger.warning("Invalid email rejected: %s — %s", to_email, email_check.get("error", ""))
+            return False
+        to_email = email_check.get("normalized", to_email)
+
+        # Sanitize HTML body to prevent XSS
+        html_body = sanitize_html(html_body)
+
         if not self.sendgrid_key:
             logger.warning("SendGrid not configured — email not sent to %s", to_email)
             self.memory.log(f"[Email] DRY RUN to {to_email}: {subject}", "Email")

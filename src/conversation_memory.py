@@ -710,26 +710,18 @@ class ConversationMemory:
         return [dict(r) for r in rows]
 
     def _quick_sentiment(self, text: str) -> str:
-        """Fast rule-based sentiment (no LLM call). Good enough for real-time."""
-        lower = text.lower()
-        positive_words = {
-            "thanks", "thank you", "great", "awesome", "love", "perfect",
-            "excellent", "amazing", "helpful", "appreciate", "fantastic",
-            "wonderful", "good", "happy", "excited", "impressed",
-        }
-        negative_words = {
-            "frustrated", "annoyed", "disappointed", "terrible", "awful",
-            "horrible", "hate", "worst", "angry", "unacceptable", "broken",
-            "useless", "waste", "scam", "refund", "cancel", "complaint",
-        }
-        pos = sum(1 for w in positive_words if w in lower)
-        neg = sum(1 for w in negative_words if w in lower)
-
-        if pos > neg:
-            return "positive"
-        elif neg > pos:
-            return "negative"
-        return "neutral"
+        """Sentiment analysis using TextBlob NLP (upgraded from rule-based)."""
+        try:
+            from src.toolkit import sentiment_score
+            return sentiment_score(text).get("label", "neutral")
+        except Exception:
+            # Fallback to simple rule-based if TextBlob unavailable
+            lower = text.lower()
+            pos_words = {"thanks", "great", "awesome", "love", "perfect", "excellent", "amazing", "appreciate"}
+            neg_words = {"frustrated", "disappointed", "terrible", "hate", "worst", "angry", "broken", "refund"}
+            pos = sum(1 for w in pos_words if w in lower)
+            neg = sum(1 for w in neg_words if w in lower)
+            return "positive" if pos > neg else "negative" if neg > pos else "neutral"
 
     def _detect_signals(self, text: str) -> list[str]:
         """Detect lead signals in a message. Returns list of matched keywords."""

@@ -61,15 +61,41 @@ from src.ugc_engine import UGCEngine
 from src.webhook_server import WebhookServer
 from src.x_client import XClient
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("logs/arcana.log", mode="a"),
-    ],
-)
-logger = logging.getLogger("arcana")
+import os as _os
+_os.makedirs("logs", exist_ok=True)
+
+# Use loguru for structured logging if available, fallback to stdlib
+try:
+    from loguru import logger as _loguru
+    import sys
+
+    # Remove default loguru handler and add custom ones
+    _loguru.remove()
+    _loguru.add(sys.stderr, level="INFO", format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | <cyan>{name}</cyan> — {message}")
+    _loguru.add("logs/arcana.log", rotation="10 MB", retention="30 days", compression="gz", level="DEBUG")
+    _loguru.add("logs/errors.log", rotation="5 MB", retention="60 days", level="ERROR")
+
+    # Intercept stdlib logging → loguru
+    class _InterceptHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                level = _loguru.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+            _loguru.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+    logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+    logger = _loguru
+except ImportError:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler("logs/arcana.log", mode="a"),
+        ],
+    )
+    logger = logging.getLogger("arcana")
 
 
 class Orchestrator:

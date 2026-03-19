@@ -1,20 +1,126 @@
 # ARCANA AI — Dependencies
 # Python 3.11+
 
-# Core
-httpx>=0.27
-pydantic>=2.0
-python-dotenv>=1.0
+# ═══════════════════════════════════════════════
+# CORE FRAMEWORK
+# ═══════════════════════════════════════════════
+httpx>=0.27                  # Async HTTP client (used everywhere)
+pydantic>=2.0                # Data validation & settings
+pydantic-settings>=2.0       # Environment-based config management
+python-dotenv>=1.0           # Load .env files
+aiofiles>=23.0               # Async file I/O (non-blocking reads/writes)
+tenacity>=8.2                # Retry decorator with exponential backoff
+arrow>=1.3                   # Better datetime handling + timezone support
+python-dateutil>=2.9         # Advanced date parsing & relative deltas
 
-# LLM (via OpenRouter)
-openai>=1.0
+# ═══════════════════════════════════════════════
+# WEB FRAMEWORK (API Server + Webhooks)
+# ═══════════════════════════════════════════════
+fastapi>=0.109               # Production REST API framework
+uvicorn[standard]>=0.27      # ASGI server for FastAPI
+starlette>=0.36              # ASGI toolkit (FastAPI dependency)
 
-# X / Twitter
-tweepy>=4.14
+# ═══════════════════════════════════════════════
+# LLM & AI
+# ═══════════════════════════════════════════════
+openai>=1.0                  # OpenAI-compatible client (OpenRouter)
+tiktoken>=0.5                # Token counting for cost tracking
 
-# Payments
-stripe>=8.0
+# ═══════════════════════════════════════════════
+# NLP & TEXT PROCESSING
+# ═══════════════════════════════════════════════
+spacy>=3.7                   # NLP: entity extraction, POS tagging, NER
+textblob>=0.18               # Sentiment analysis, text processing
+python-Levenshtein>=0.25     # Fuzzy string matching (deduplication)
+nltk>=3.8                    # NLP toolkit (VADER sentiment for social media)
 
-# Notifications
-discord-webhook>=1.3
-python-telegram-bot>=21.0
+# ═══════════════════════════════════════════════
+# WEB SCRAPING & DATA COLLECTION
+# ═══════════════════════════════════════════════
+beautifulsoup4>=4.12         # HTML/XML parsing for scraping
+lxml>=5.0                    # Fast XML/HTML parser (BS4 backend)
+atoma>=0.0.17                # RSS/Atom feed parsing (job boards, blogs)
+fake-useragent>=1.4          # User-agent rotation (anti-bot detection)
+
+# ═══════════════════════════════════════════════
+# X / TWITTER
+# ═══════════════════════════════════════════════
+tweepy>=4.14                 # Twitter/X API v2 client
+
+# ═══════════════════════════════════════════════
+# PAYMENTS & BILLING
+# ═══════════════════════════════════════════════
+stripe>=8.0                  # Stripe payments API
+
+# ═══════════════════════════════════════════════
+# NOTIFICATIONS & BOTS
+# ═══════════════════════════════════════════════
+discord.py>=2.3              # Discord bot (slash commands, events)
+python-telegram-bot>=21.0    # Telegram bot API
+
+# ═══════════════════════════════════════════════
+# EMAIL & VALIDATION
+# ═══════════════════════════════════════════════
+email-validator>=2.1         # RFC-compliant email validation
+validators>=0.22             # URL, IP, domain validation
+python-slugify>=8.0          # Clean URL slug generation
+
+# ═══════════════════════════════════════════════
+# CONTENT & MARKDOWN
+# ═══════════════════════════════════════════════
+markdown2>=2.4               # Markdown → HTML conversion
+markdownify>=0.12            # HTML → Markdown conversion
+bleach>=6.1                  # HTML sanitization (XSS prevention)
+
+# ═══════════════════════════════════════════════
+# IMAGE & MEDIA PROCESSING
+# ═══════════════════════════════════════════════
+Pillow>=10.0                 # Image manipulation (resize, watermark)
+imageio>=2.33                # Media I/O (read/write images + video frames)
+
+# ═══════════════════════════════════════════════
+# CACHING & PERFORMANCE
+# ═══════════════════════════════════════════════
+cachetools>=5.3              # In-memory caching (LRU, TTL, LFU)
+diskcache>=5.6               # Persistent disk-based cache
+orjson>=3.9                  # Fast JSON serialization (10x faster than json)
+
+# ═══════════════════════════════════════════════
+# SECURITY
+# ═══════════════════════════════════════════════
+# cryptography>=42.0         # Encryption, signing (install if cffi available)
+# PyJWT>=2.8                 # JWT token handling (install if cryptography works)
+
+# ═══════════════════════════════════════════════
+# SCHEDULING
+# ═══════════════════════════════════════════════
+APScheduler>=3.10            # Advanced task scheduling with persistence
+
+# ═══════════════════════════════════════════════
+# MONITORING & LOGGING
+# ═══════════════════════════════════════════════
+loguru>=0.7                  # Better logging (colors, rotation, structured)
+sentry-sdk>=1.40             # Error tracking & alerting
+prometheus-client>=0.20      # Metrics export for monitoring
+structlog>=24.1              # Structured logging (JSON, context)
+
+# ═══════════════════════════════════════════════
+# URL & LINK PROCESSING
+# ═══════════════════════════════════════════════
+furl>=2.1                    # URL parsing & manipulation
+# pyshorteners>=1.0          # URL shortening (requires sgmllib3k)
+
+# ═══════════════════════════════════════════════
+# DATA PROCESSING
+# ═══════════════════════════════════════════════
+jinja2>=3.1                  # Template engine (email templates, reports)
+tabulate>=0.9                # Format data as tables (reports)
+humanize>=4.9                # Human-readable numbers/dates ($1.2M, "3 hours ago")
+
+# ═══════════════════════════════════════════════
+# TESTING (dev only)
+# ═══════════════════════════════════════════════
+pytest>=8.0                  # Test framework
+pytest-asyncio>=0.23         # Async test support
+faker>=22.0                  # Generate fake test data
+respx>=0.20                  # Mock httpx requests in tests

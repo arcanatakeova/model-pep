@@ -69,6 +69,13 @@ class LLM:
                 "X-Title": "ARCANA AI",
             },
         )
+        # Response cache (avoid duplicate LLM calls)
+        try:
+            from cachetools import TTLCache
+            self._response_cache: dict[str, str] = TTLCache(maxsize=100, ttl=300)  # 5-min TTL
+        except ImportError:
+            self._response_cache = {}
+
         # Rate limiting
         self._call_timestamps: deque[float] = deque(maxlen=1000)
         self._max_per_hour = self.config.max_llm_calls_per_hour
@@ -142,12 +149,29 @@ class LLM:
         max_tokens: int = 4096,
         json_mode: bool = False,
     ) -> str:
-        """Single-turn completion with SOUL.md as system prompt."""
+        """Single-turn completion with SOUL.md as system prompt + response cache."""
+        # Check cache for identical prompts (saves API cost)
+        import hashlib
+        cache_key = hashlib.md5(f"{tier.value}:{prompt[:500]}".encode()).hexdigest()
+        cached = self._response_cache.get(cache_key)
+        if cached and temperature <= 0.3:  # Only cache deterministic calls
+            logger.debug("LLM cache hit for %s", cache_key[:8])
+            return cached
+
         messages = [
             {"role": "system", "content": system or self._soul},
             {"role": "user", "content": prompt},
         ]
-        return await self._call(messages, tier, temperature, max_tokens, json_mode)
+        result = await self._call(messages, tier, temperature, max_tokens, json_mode)
+
+        # Cache low-temperature responses
+        if temperature <= 0.3:
+            try:
+                self._response_cache[cache_key] = result
+            except (ValueError, TypeError):
+                pass  # Cache full or invalid
+
+        return result
 
     async def ask_json(self, prompt: str, tier: Tier = Tier.SONNET) -> dict[str, Any]:
         """Ask and parse response as JSON with repair for malformed responses."""

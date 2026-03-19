@@ -479,9 +479,10 @@ class OpportunityScanner:
 
     async def _get_http(self) -> httpx.AsyncClient:
         if self._http is None:
+            from src.toolkit import random_user_agent
             self._http = httpx.AsyncClient(
                 timeout=30,
-                headers={"User-Agent": "ARCANA-AI/1.0"},
+                headers={"User-Agent": random_user_agent()},
                 follow_redirects=True,
             )
         return self._http
