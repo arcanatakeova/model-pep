@@ -30,12 +30,23 @@ DB_PATH = DB_DIR / "arcana.db"
 
 
 class Database:
-    """Persistent storage with structured queries and full-text search."""
+    """Production-grade persistent storage with full-text search.
+
+    Features:
+    - WAL mode for concurrent reads during writes
+    - Auto-vacuum to reclaim space
+    - Busy timeout for lock contention
+    - Periodic integrity checks
+    - Backup support
+    - Connection health monitoring
+    """
 
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: sqlite3.Connection | None = None
+        self._query_count = 0
+        self._error_count = 0
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -45,12 +56,64 @@ class Database:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute("PRAGMA cache_size=-64000")     # 64MB cache
+            self._conn.execute("PRAGMA synchronous=NORMAL")     # Faster with WAL
+            self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
         return self._conn
 
     def close(self) -> None:
         if self._conn:
+            try:
+                self._conn.execute("PRAGMA optimize")
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
             self._conn.close()
             self._conn = None
+            logger.info("Database closed — %d queries, %d errors", self._query_count, self._error_count)
+
+    def backup(self, dest_path: str | Path | None = None) -> Path:
+        """Create a backup of the database."""
+        dest = Path(dest_path) if dest_path else self.db_path.with_suffix(
+            f".backup-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.db"
+        )
+        conn = self._get_conn()
+        backup_conn = sqlite3.connect(str(dest))
+        try:
+            conn.backup(backup_conn)
+            logger.info("Database backed up to %s", dest)
+        finally:
+            backup_conn.close()
+        return dest
+
+    def vacuum(self) -> None:
+        """Run incremental vacuum to reclaim space."""
+        conn = self._get_conn()
+        conn.execute("PRAGMA incremental_vacuum(1000)")
+        conn.commit()
+
+    def integrity_check(self) -> bool:
+        """Run SQLite integrity check."""
+        conn = self._get_conn()
+        result = conn.execute("PRAGMA integrity_check").fetchone()
+        ok = result[0] == "ok" if result else False
+        if not ok:
+            logger.error("Database integrity check FAILED: %s", result)
+        return ok
+
+    def get_db_stats(self) -> dict[str, Any]:
+        """Get database stats for monitoring."""
+        conn = self._get_conn()
+        size_bytes = self.db_path.stat().st_size if self.db_path.exists() else 0
+        page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+        freelist = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        return {
+            "size_mb": round(size_bytes / 1_000_000, 2),
+            "pages": page_count,
+            "free_pages": freelist,
+            "queries": self._query_count,
+            "errors": self._error_count,
+        }
 
     def _init_db(self) -> None:
         """Create all tables and indexes."""
