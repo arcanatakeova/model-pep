@@ -27,6 +27,7 @@ from src.analytics import Analytics
 from src.config import STOP_FILE, Config, get_config
 from src.content_engine import ContentEngine
 from src.crm import CRM
+from src.database import Database
 from src.distribution import ContentDistributor
 from src.email_engine import EmailEngine
 from src.fulfillment import FulfillmentEngine
@@ -47,6 +48,7 @@ from src.seo_engine import SEOEngine
 from src.services import ServiceEngine
 from src.trader_bridge import TraderBridge
 from src.ugc_engine import UGCEngine
+from src.webhook_server import WebhookServer
 from src.x_client import XClient
 
 logging.basicConfig(
@@ -94,6 +96,7 @@ class Orchestrator:
         self.distributor: ContentDistributor | None = None
         self.scheduler: TaskScheduler | None = None
         self.analytics: Analytics | None = None
+        self.db: Database | None = None
         # State
         self._running = True
         self._last_mention_id: str | None = None
@@ -107,10 +110,11 @@ class Orchestrator:
         self.memory = Memory()
         self.notifier = Notifier(self.config)
         self.heartbeat = Heartbeat()
+        self.db = Database()
 
         # Core ops
         self.x = XClient(self.config, self.memory)
-        self.content = ContentEngine(self.llm, self.memory)
+        self.content = ContentEngine(self.llm, self.memory, db=self.db)
         self.leads = LeadPipeline(self.llm, self.memory, self.notifier)
         self.iris = Iris(self.llm, self.memory)
         self.remy = Remy(self.llm, self.memory)
@@ -131,7 +135,7 @@ class Orchestrator:
             self.config.heygen_api_key,
             self.config.makeugc_api_key,
         )
-        self.scanner = OpportunityScanner(self.llm, self.memory, self.x, self.notifier)
+        self.scanner = OpportunityScanner(self.llm, self.memory, self.x, self.notifier, db=self.db)
 
         # Execution layer — close deals, collect money, deliver services
         self.email = EmailEngine(
@@ -140,8 +144,9 @@ class Orchestrator:
         )
         self.payments_engine = PaymentsEngine(
             self.memory, self.config.stripe_secret_key, self.config.gumroad_access_token,
+            db=self.db,
         )
-        self.crm = CRM(self.llm, self.memory)
+        self.crm = CRM(self.llm, self.memory, db=self.db)
         self.outreach = OutreachEngine(
             self.llm, self.memory, self.email, self.crm, self.config.apollo_api_key,
         )
@@ -155,7 +160,7 @@ class Orchestrator:
             self.config.buffer_api_key, self.config.linkedin_token,
         )
         self.scheduler = TaskScheduler(self.memory)
-        self.analytics = Analytics(self.llm, self.memory)
+        self.analytics = Analytics(self.llm, self.memory, db=self.db)
         self.revenue = RevenueEngine(self.memory, self.payments_engine, self.trader)
 
         # Register scheduler handlers
@@ -166,6 +171,13 @@ class Orchestrator:
             "ARCANA AI online. Scanner armed. Execution layer active. "
             "Finding opportunities, closing deals, delivering services, collecting payments."
         )
+        # Start webhook server (background)
+        self.webhook_server = WebhookServer(
+            self.memory, self.payments_engine,
+            stripe_webhook_secret=os.getenv("STRIPE_WEBHOOK_SECRET", ""),
+        )
+        await self.webhook_server.start()
+
         logger.info("Orchestrator initialized — all channels online")
 
     def _register_scheduler_handlers(self) -> None:
@@ -235,6 +247,9 @@ class Orchestrator:
         # Scheduler
         scheduler_report = self.scheduler.format_schedule_report()
 
+        # Database dashboard
+        db_dashboard = self.db.format_dashboard() if self.db else ""
+
         # Stripe MRR
         stripe_mrr = self.payments_engine.get_mrr()
 
@@ -249,6 +264,7 @@ class Orchestrator:
             f"SCANNER PIPELINE: {pipeline_summary['total_opportunities']} opportunities, "
             f"${pipeline_summary['estimated_pipeline_value_monthly']:,.0f}/mo est. value\n"
             f"STRIPE MRR: ${stripe_mrr:,.2f}\n"
+            f"DATABASE DASHBOARD:\n{db_dashboard}\n"
             f"OPEN LEADS: {', '.join(open_leads) or 'None'}\n\n"
             f"Yesterday:\n{yesterday[:800]}\n\n"
             f"Support (Iris): {iris_report}\n"
@@ -279,6 +295,7 @@ class Orchestrator:
             f"{crm_report}\n\n"
             f"{analytics_report}\n\n"
             f"{scheduler_report}\n\n"
+            f"{db_dashboard}\n\n"
             f"**Revenue Actions:**\n"
             + "\n".join(f"- {a}" for a in result.get("revenue_actions", []))
             + "\n\n**Waiting on Ian/Tan:**\n"
@@ -289,6 +306,13 @@ class Orchestrator:
 
         await self.notifier.morning_report(report)
         self.memory.log(report, "Morning Report")
+        if self.db:
+            self.db.log_event("morning_report", "system", {
+                "priorities": self._priorities,
+                "open_leads": len(open_leads),
+                "services_mrr": services_mrr,
+                "stripe_mrr": stripe_mrr,
+            })
         self.heartbeat.update(
             "Active",
             self._priorities[0] if self._priorities else "Awaiting tasks",
@@ -318,6 +342,13 @@ class Orchestrator:
                     f"Scanner: {scan_results['total_found']} opportunities, "
                     f"{scan_results['auto_responded']} responded"
                 )
+                if self.db:
+                    self.db.log_event("scan_cycle_complete", "scanner", {
+                        "total_found": scan_results["total_found"],
+                        "auto_responded": scan_results.get("auto_responded", 0),
+                        "escalated": scan_results.get("escalated", 0),
+                        "cycle": scan_results.get("cycle", 0),
+                    })
         except Exception as exc:
             logger.error("Opportunity scan failed: %s", exc)
 
@@ -334,6 +365,10 @@ class Orchestrator:
                 self._completed_today.append(
                     f"CRM: {crm_results['actions_taken']} pipeline actions"
                 )
+                if self.db:
+                    self.db.log_event("crm_pipeline_advance", "crm", {
+                        "actions_taken": crm_results["actions_taken"],
+                    })
         except Exception as exc:
             logger.error("CRM automation failed: %s", exc)
 
@@ -631,6 +666,19 @@ class Orchestrator:
         )
         await self.notifier.send(summary, "report")
 
+        if self.db:
+            self.db.log_event("nightly_review", "system", {
+                "wins": len(analysis.get("wins", [])),
+                "bottlenecks": len(analysis.get("bottlenecks", [])),
+                "lessons": len(analysis.get("lessons_learned", [])),
+            })
+            # Record revenue metrics
+            if rev_snapshot:
+                total_mrr = rev_snapshot.get("total_mrr", 0) or 0
+                self.db.record_metric("mrr", total_mrr)
+                self.db.record_metric("services_mrr", services_mrr)
+                self.db.record_metric("ugc_mrr", ugc_mrr)
+
         self.heartbeat.clear()
         self._completed_today = []
 
@@ -727,6 +775,10 @@ class Orchestrator:
             await self.fulfillment.close()
         if self.distributor:
             await self.distributor.close()
+        if self.webhook_server:
+            await self.webhook_server.stop()
+        if self.db:
+            self.db.close()
 
 
 def main() -> None:
