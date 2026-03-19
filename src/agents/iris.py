@@ -14,8 +14,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from src.email_engine import EmailEngine
 from src.llm import LLM, Tier
 from src.memory import Memory
+from src.notify import Notifier
+from src.products import ProductManager
 
 logger = logging.getLogger("arcana.iris")
 
@@ -23,9 +26,20 @@ logger = logging.getLogger("arcana.iris")
 class Iris:
     """Customer support sub-agent."""
 
-    def __init__(self, llm: LLM, memory: Memory) -> None:
+    def __init__(
+        self,
+        llm: LLM,
+        memory: Memory,
+        email_engine: EmailEngine,
+        notifier: Notifier,
+        products: ProductManager | None = None,
+    ) -> None:
         self.llm = llm
         self.memory = memory
+        self.email_engine = email_engine
+        self.notifier = notifier
+        self.products = products
+        self._pending_inquiries: list[dict[str, Any]] = []
 
     async def handle_inquiry(self, customer: str, message: str, context: str = "") -> dict[str, Any]:
         """Handle a customer support inquiry."""
@@ -72,6 +86,24 @@ class Iris:
             f"Notes: {result.get('notes', '')}",
         )
 
+        # Actually send the response via email
+        response_text = result.get("response", "")
+        if response_text and "@" in customer:
+            await self.email_engine.send(
+                to_email=customer,
+                subject="Re: Your inquiry — Arcana Operations",
+                html_body=f"<p>{response_text}</p>",
+                text_body=response_text,
+            )
+
+        # If escalation needed, alert Ian/Tan
+        if result.get("action") == "escalate":
+            await self.notifier.send(
+                f"[Iris] Escalation needed — {customer}: "
+                f"{result.get('escalate_reason', 'No reason given')}",
+                level="error",
+            )
+
         return result
 
     async def generate_faq_response(self, question: str) -> str:
@@ -86,6 +118,166 @@ class Iris:
         )
         return response.strip()
 
+    async def handle_email_inquiry(
+        self, from_email: str, subject: str, body: str,
+    ) -> dict[str, Any]:
+        """Process an incoming customer email, generate a response, and send the reply."""
+        result = await self.handle_inquiry(
+            customer=from_email,
+            message=body,
+            context=f"Email subject: {subject}",
+        )
+
+        # handle_inquiry already sends via email_engine, but use the original
+        # subject for threading if the generic reply wasn't sent (no @ in customer)
+        response_text = result.get("response", "")
+        if response_text and "@" not in from_email:
+            # Fallback: shouldn't happen for emails, but guard anyway
+            logger.warning("Email inquiry from non-email address: %s", from_email)
+
+        return result
+
+    async def handle_discord_inquiry(
+        self, user_id: str, username: str, message: str,
+    ) -> dict[str, Any]:
+        """Process a Discord DM support inquiry and respond via Discord."""
+        result = await self.handle_inquiry(
+            customer=username,
+            message=message,
+            context=f"Discord DM from user {user_id}",
+        )
+
+        response_text = result.get("response", "")
+        if response_text:
+            await self.notifier.send(
+                f"[Iris → {username}] {response_text[:1500]}",
+                level="info",
+            )
+
+        return result
+
+    async def handle_refund_request(
+        self, customer: str, product: str, reason: str,
+        order_id: str = "", amount: float = 0.0,
+    ) -> dict[str, Any]:
+        """Process a refund request: evaluate, notify payments, send confirmation."""
+        result = await self.llm.ask_json(
+            f"You are Iris, customer support for Arcana Operations.\n"
+            f"Evaluate this refund request.\n\n"
+            f"Customer: {customer}\n"
+            f"Product: {product}\n"
+            f"Order ID: {order_id or 'not provided'}\n"
+            f"Amount: ${amount:.2f}\n"
+            f"Reason: {reason}\n\n"
+            f"Rules:\n"
+            f"- Refunds under $50 for digital products: approve automatically.\n"
+            f"- Refunds over $50 or for services: escalate to Ian/Tan.\n"
+            f"- Always be empathetic and professional.\n\n"
+            f"Return JSON: {{"
+            f'"approved": bool, '
+            f'"response": str, '
+            f'"escalate": bool, '
+            f'"notes": str}}',
+            tier=Tier.SONNET,
+        )
+
+        action = "refund_approved" if result.get("approved") else "refund_escalated"
+
+        self.memory.log(
+            f"[Iris] Refund request: {customer} — {product} (${amount:.2f})\n"
+            f"Reason: {reason[:200]}\n"
+            f"Decision: {action}",
+            "Support",
+        )
+
+        # Notify Ian/Tan about the refund
+        await self.notifier.send(
+            f"[Iris] Refund {action}: {customer} — {product} "
+            f"(${amount:.2f}). Reason: {reason[:100]}",
+            level="sale" if result.get("approved") else "error",
+        )
+
+        # Send confirmation email to customer
+        response_text = result.get("response", "")
+        if response_text and "@" in customer:
+            await self.email_engine.send(
+                to_email=customer,
+                subject=f"Re: Refund request — {product}",
+                html_body=f"<p>{response_text}</p>",
+                text_body=response_text,
+            )
+
+        # Save to customer history
+        self.memory.save_knowledge(
+            "resources",
+            f"customer-{customer}",
+            f"Customer: {customer}\n"
+            f"Refund request: {product} (${amount:.2f})\n"
+            f"Decision: {action}\n"
+            f"Notes: {result.get('notes', '')}",
+        )
+
+        return {**result, "action": action}
+
+    def queue_inquiry(
+        self, channel: str, customer: str, message: str, **kwargs: Any,
+    ) -> None:
+        """Add an inquiry to the pending queue for batch processing."""
+        self._pending_inquiries.append({
+            "channel": channel,
+            "customer": customer,
+            "message": message,
+            **kwargs,
+        })
+
+    async def auto_respond_queue(self) -> list[dict[str, Any]]:
+        """Process all pending customer inquiries from the queue."""
+        results: list[dict[str, Any]] = []
+        while self._pending_inquiries:
+            inquiry = self._pending_inquiries.pop(0)
+            channel = inquiry.pop("channel", "email")
+            customer = inquiry.pop("customer", "")
+            message = inquiry.pop("message", "")
+
+            try:
+                if channel == "email":
+                    result = await self.handle_email_inquiry(
+                        from_email=customer,
+                        subject=inquiry.get("subject", "Support inquiry"),
+                        body=message,
+                    )
+                elif channel == "discord":
+                    result = await self.handle_discord_inquiry(
+                        user_id=inquiry.get("user_id", ""),
+                        username=customer,
+                        message=message,
+                    )
+                elif channel == "refund":
+                    result = await self.handle_refund_request(
+                        customer=customer,
+                        product=inquiry.get("product", "Unknown"),
+                        reason=message,
+                        order_id=inquiry.get("order_id", ""),
+                        amount=inquiry.get("amount", 0.0),
+                    )
+                else:
+                    result = await self.handle_inquiry(customer, message)
+
+                results.append({"customer": customer, "channel": channel, **result})
+            except Exception as exc:
+                logger.error("Failed to process inquiry from %s: %s", customer, exc)
+                results.append({
+                    "customer": customer,
+                    "channel": channel,
+                    "action": "error",
+                    "error": str(exc),
+                })
+
+        self.memory.log(
+            f"[Iris] Auto-responded to {len(results)} queued inquiries", "Support",
+        )
+        return results
+
     async def nightly_report(self) -> str:
         """Generate nightly support report for ARCANA to review."""
         today = self.memory.get_today()
@@ -97,14 +289,19 @@ class Iris:
         ]
 
         if not support_lines:
-            return "No support tickets today."
+            report = "No support tickets today."
+        else:
+            report = await self.llm.ask(
+                f"Summarize today's customer support activity:\n\n"
+                f"{chr(10).join(support_lines[:20])}\n\n"
+                f"Include: tickets handled, common issues, anything that needed escalation, "
+                f"and suggestions for reducing future support load.",
+                tier=Tier.HAIKU,
+                max_tokens=300,
+            )
+            report = report.strip()
 
-        report = await self.llm.ask(
-            f"Summarize today's customer support activity:\n\n"
-            f"{chr(10).join(support_lines[:20])}\n\n"
-            f"Include: tickets handled, common issues, anything that needed escalation, "
-            f"and suggestions for reducing future support load.",
-            tier=Tier.HAIKU,
-            max_tokens=300,
-        )
-        return report.strip()
+        # Actually send the report to Discord/Telegram
+        await self.notifier.send(f"[Iris Nightly Report]\n{report}", level="report")
+
+        return report

@@ -28,8 +28,10 @@ from typing import Any
 
 import httpx
 
+from src.email_engine import EmailEngine
 from src.llm import LLM, Tier
 from src.memory import Memory
+from src.payments import PaymentsEngine
 
 logger = logging.getLogger("arcana.ugc")
 
@@ -60,11 +62,17 @@ DIMENSIONS = {
 class UGCEngine:
     """Fully autonomous UGC video production pipeline."""
 
-    def __init__(self, llm: LLM, memory: Memory, heygen_key: str, makeugc_key: str = "") -> None:
+    def __init__(
+        self, llm: LLM, memory: Memory, heygen_key: str, makeugc_key: str = "",
+        email_engine: EmailEngine | None = None,
+        payments_engine: PaymentsEngine | None = None,
+    ) -> None:
         self.llm = llm
         self.memory = memory
         self.heygen_key = heygen_key
         self.makeugc_key = makeugc_key
+        self.email_engine = email_engine
+        self.payments_engine = payments_engine
         self._client: httpx.AsyncClient | None = None
         self._avatars: list[dict] | None = None
         self._voices: list[dict] | None = None

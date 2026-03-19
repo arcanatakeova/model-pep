@@ -12,10 +12,15 @@ Reports to ARCANA nightly. Hot leads escalated to Ian/Tan immediately.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from src.llm import LLM, Tier
 from src.memory import Memory
+
+if TYPE_CHECKING:
+    from src.email_engine import EmailEngine
+    from src.notify import Notifier
+    from src.x_client import XClient
 
 logger = logging.getLogger("arcana.remy")
 
@@ -23,9 +28,19 @@ logger = logging.getLogger("arcana.remy")
 class Remy:
     """Sales and lead management sub-agent."""
 
-    def __init__(self, llm: LLM, memory: Memory) -> None:
+    def __init__(
+        self,
+        llm: LLM,
+        memory: Memory,
+        email_engine: EmailEngine | None = None,
+        x_client: XClient | None = None,
+        notifier: Notifier | None = None,
+    ) -> None:
         self.llm = llm
         self.memory = memory
+        self.email_engine = email_engine
+        self.x_client = x_client
+        self.notifier = notifier
 
     async def follow_up(self, handle: str, context: str) -> dict[str, Any]:
         """Generate a follow-up message for a qualified lead."""
@@ -62,7 +77,48 @@ class Remy:
             "Sales",
         )
 
+        # ── Actually SEND the follow-up ──────────────────────────────
+        sent_via: list[str] = []
+
+        # Send email follow-up if email_engine is wired and lead has email
+        if self.email_engine and result.get("message_email"):
+            lead_info = lead_info or ""
+            # Extract email from lead file if available
+            email = self._extract_email(lead_info)
+            if email:
+                sent = await self.email_engine.send(
+                    to_email=email,
+                    subject=f"Following up — Arcana Operations",
+                    html_body=result["message_email"],
+                )
+                if sent:
+                    sent_via.append("email")
+
+        # Send X reply/DM if x_client is wired
+        if self.x_client and result.get("message_x"):
+            try:
+                # Reply to their latest tweet mentioning us, or post a follow-up
+                await self.x_client.post_tweet(
+                    f"@{handle} {result['message_x']}"
+                )
+                sent_via.append("x_reply")
+            except Exception as exc:
+                logger.warning("X follow-up failed for @%s: %s", handle, exc)
+
+        if sent_via:
+            self.memory.log(
+                f"[Remy] Follow-up SENT to @{handle} via {', '.join(sent_via)}",
+                "Sales",
+            )
+        result["sent_via"] = sent_via
         return result
+
+    @staticmethod
+    def _extract_email(lead_info: str) -> str:
+        """Extract an email address from lead info text."""
+        import re
+        match = re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", lead_info)
+        return match.group(0) if match else ""
 
     async def generate_proposal(self, handle: str, service: str, scope: str) -> str:
         """Generate a service proposal for a qualified lead."""
@@ -91,6 +147,21 @@ class Remy:
             f"proposal-{handle}",
             f"# Proposal for @{handle}\n\nService: {service}\nScope: {scope}\n\n{proposal}",
         )
+
+        # ── Send the proposal via email ──────────────────────────────
+        if self.email_engine:
+            lead_info_text = lead_info or ""
+            email = self._extract_email(lead_info_text)
+            if email:
+                sent = await self.email_engine.send_proposal(
+                    to_email=email,
+                    client_name=handle,
+                    proposal_text=proposal.strip(),
+                )
+                if sent:
+                    self.memory.log(
+                        f"[Remy] Proposal SENT to @{handle} via email", "Sales",
+                    )
 
         return proposal.strip()
 

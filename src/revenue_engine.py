@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.memory import Memory
-from src.products import ProductManager
+from src.payments import PaymentsEngine
 from src.trader_bridge import TraderBridge
 
 logger = logging.getLogger("arcana.revenue")
@@ -42,16 +42,16 @@ class RevenueChannel:
 class RevenueEngine:
     """Unified revenue tracking across all channels."""
 
-    def __init__(self, memory: Memory, products: ProductManager, trader: TraderBridge) -> None:
+    def __init__(self, memory: Memory, payments: PaymentsEngine, trader: TraderBridge) -> None:
         self.memory = memory
-        self.products = products
+        self.payments = payments
         self.trader = trader
 
     async def get_full_revenue_snapshot(self) -> dict[str, Any]:
         """Pull revenue from every channel. The complete picture."""
 
         # 1. Digital products (Stripe + Gumroad)
-        product_rev = await self.products.get_revenue_summary()
+        product_rev = await self.payments.get_total_revenue()
         stripe_rev = product_rev.get("stripe", {}).get("revenue", 0)
         gumroad_rev = product_rev.get("gumroad", {}).get("revenue", 0)
 

@@ -14,16 +14,31 @@ from src.llm import LLM, Tier
 from src.memory import Memory
 from src.notify import Notifier
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.agents.remy import Remy
+    from src.email_engine import EmailEngine
+
 logger = logging.getLogger("arcana.leads")
 
 
 class LeadPipeline:
     """Qualify and route consulting leads from X and other sources."""
 
-    def __init__(self, llm: LLM, memory: Memory, notifier: Notifier) -> None:
+    def __init__(
+        self,
+        llm: LLM,
+        memory: Memory,
+        notifier: Notifier,
+        remy: Remy | None = None,
+        email_engine: EmailEngine | None = None,
+    ) -> None:
         self.llm = llm
         self.memory = memory
         self.notifier = notifier
+        self.remy = remy
+        self.email_engine = email_engine
 
     async def qualify(self, handle: str, text: str, source: str = "x_mention") -> dict[str, Any]:
         """Score and qualify a potential consulting lead."""
@@ -82,6 +97,13 @@ class LeadPipeline:
         if score >= 40:
             await self.notifier.lead_alert(handle, text[:100], score)
 
+        # Auto-trigger follow-up for qualified leads (score >= 60)
+        if score >= 60 and self.remy:
+            try:
+                await self.auto_nurture_lead(handle, text, result)
+            except Exception as exc:
+                logger.error("Auto-nurture failed for @%s: %s", handle, exc)
+
         return result
 
     async def check_mention_for_lead(self, mention_text: str) -> bool:
@@ -131,3 +153,46 @@ class LeadPipeline:
     def get_lead_details(self, handle: str) -> str:
         """Get details for a specific lead."""
         return self.memory.get_knowledge("projects", f"lead-{handle}")
+
+    async def auto_nurture_lead(
+        self, handle: str, context: str, qualification: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Full flow: qualify → Remy follow-up → send via email or X DM.
+
+        Called automatically when a lead scores >= 60, or can be triggered
+        manually for any lead in the pipeline.
+        """
+        results: dict[str, Any] = {"handle": handle, "actions": []}
+
+        # Step 1: Generate follow-up via Remy
+        if not self.remy:
+            logger.warning("Remy not configured — cannot nurture @%s", handle)
+            return results
+
+        follow_up = await self.remy.follow_up(handle, context)
+        results["follow_up"] = follow_up
+        results["actions"].append("follow_up_generated")
+
+        # Step 2: Send follow-up — Remy.follow_up now handles delivery
+        # (email + X DM are sent inside remy.follow_up when engines are wired)
+        # If Remy doesn't have email_engine but we do, send as fallback
+        if not self.remy.email_engine and self.email_engine:
+            email = qualification.get("email") or ""
+            if email and follow_up.get("message_email"):
+                sent = await self.email_engine.send(
+                    to_email=email,
+                    subject=f"Following up — Arcana Operations",
+                    html_body=follow_up["message_email"],
+                )
+                if sent:
+                    results["actions"].append("email_sent_fallback")
+
+        logger.info(
+            "Auto-nurture complete for @%s — actions: %s",
+            handle, ", ".join(results["actions"]),
+        )
+        self.memory.log(
+            f"[Leads] Auto-nurture @{handle}: {', '.join(results['actions'])}",
+            "Leads",
+        )
+        return results

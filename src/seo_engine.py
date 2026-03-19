@@ -16,6 +16,7 @@ Content niches aligned with Arcana Operations:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from src.llm import LLM, Tier
@@ -27,9 +28,16 @@ logger = logging.getLogger("arcana.seo")
 class SEOEngine:
     """Generate SEO-optimized content at scale."""
 
-    def __init__(self, llm: LLM, memory: Memory) -> None:
+    def __init__(
+        self,
+        llm: LLM,
+        memory: Memory,
+        fulfillment: "FulfillmentEngine | None" = None,
+    ) -> None:
         self.llm = llm
         self.memory = memory
+        self.fulfillment = fulfillment
+        self._published: list[dict[str, Any]] = []
 
     async def generate_article(
         self, keyword: str, intent: str = "informational", word_count: int = 1500

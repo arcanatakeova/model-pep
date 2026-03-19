@@ -20,6 +20,7 @@ import httpx
 
 from src.llm import LLM, Tier
 from src.memory import Memory
+from src.retry import retry
 
 logger = logging.getLogger("arcana.email")
 
