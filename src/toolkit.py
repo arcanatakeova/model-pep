@@ -499,3 +499,474 @@ def extract_domain(url: str) -> str:
         return furl(url).host or ""
     except Exception:
         return ""
+
+
+# ═══════════════════════════════════════════════
+# PDF GENERATION
+# ═══════════════════════════════════════════════
+
+def generate_pdf(
+    title: str,
+    content_blocks: list[dict[str, str]],
+    output_path: str | Path,
+    author: str = "ARCANA AI",
+) -> bool:
+    """Generate a professional PDF document.
+
+    Args:
+        title: Document title
+        content_blocks: List of {"type": "heading"|"paragraph"|"bullet", "text": str}
+        output_path: Where to save the PDF
+        author: Document author metadata
+    """
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
+
+        doc = SimpleDocTemplate(
+            str(output_path),
+            pagesize=letter,
+            topMargin=1 * inch,
+            bottomMargin=1 * inch,
+            leftMargin=1 * inch,
+            rightMargin=1 * inch,
+        )
+        doc.author = author
+        doc.title = title
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            "CustomTitle", parent=styles["Title"], fontSize=24, spaceAfter=20,
+        )
+        heading_style = ParagraphStyle(
+            "CustomHeading", parent=styles["Heading2"], fontSize=16, spaceAfter=10, spaceBefore=15,
+        )
+        body_style = styles["BodyText"]
+
+        story = [Paragraph(title, title_style), Spacer(1, 0.3 * inch)]
+
+        bullet_buffer: list[str] = []
+
+        def flush_bullets() -> None:
+            nonlocal bullet_buffer
+            if bullet_buffer:
+                items = [ListItem(Paragraph(b, body_style)) for b in bullet_buffer]
+                story.append(ListFlowable(items, bulletType="bullet"))
+                story.append(Spacer(1, 0.1 * inch))
+                bullet_buffer = []
+
+        for block in content_blocks:
+            btype = block.get("type", "paragraph")
+            text = block.get("text", "")
+
+            if btype != "bullet":
+                flush_bullets()
+
+            if btype == "heading":
+                story.append(Paragraph(text, heading_style))
+            elif btype == "paragraph":
+                story.append(Paragraph(text, body_style))
+                story.append(Spacer(1, 0.1 * inch))
+            elif btype == "bullet":
+                bullet_buffer.append(text)
+
+        flush_bullets()
+        doc.build(story)
+        return True
+    except Exception:
+        return False
+
+
+def generate_invoice_pdf(
+    output_path: str | Path,
+    invoice_number: str,
+    client_name: str,
+    items: list[dict[str, Any]],
+    total: float,
+    date: str = "",
+) -> bool:
+    """Generate a simple invoice PDF.
+
+    Args:
+        items: List of {"description": str, "quantity": int, "price": float}
+    """
+    if not date:
+        date = now_utc().strftime("%Y-%m-%d")
+
+    blocks = [
+        {"type": "heading", "text": f"Invoice #{invoice_number}"},
+        {"type": "paragraph", "text": f"Date: {date}"},
+        {"type": "paragraph", "text": f"Bill To: {client_name}"},
+        {"type": "heading", "text": "Items"},
+    ]
+    for item in items:
+        desc = item.get("description", "")
+        qty = item.get("quantity", 1)
+        price = item.get("price", 0)
+        blocks.append({"type": "bullet", "text": f"{desc} — {qty}x @ ${price:.2f} = ${qty * price:.2f}"})
+
+    blocks.append({"type": "heading", "text": f"Total: ${total:.2f}"})
+    blocks.append({"type": "paragraph", "text": "Thank you for your business! — Arcana Operations LLC"})
+
+    return generate_pdf(f"Invoice {invoice_number}", blocks, output_path)
+
+
+# ═══════════════════════════════════════════════
+# QR CODE GENERATION
+# ═══════════════════════════════════════════════
+
+def generate_qr_code(
+    data: str, output_path: str | Path,
+    size: int = 10, border: int = 2,
+) -> bool:
+    """Generate a QR code image."""
+    try:
+        import qrcode
+        qr = qrcode.QRCode(version=1, box_size=size, border=border)
+        qr.add_data(data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        img.save(str(output_path))
+        return True
+    except Exception:
+        return False
+
+
+def generate_micro_qr(data: str, output_path: str | Path) -> bool:
+    """Generate a compact QR code using segno (supports Micro QR)."""
+    try:
+        import segno
+        qr = segno.make(data)
+        qr.save(str(output_path), scale=8, border=2)
+        return True
+    except Exception:
+        return False
+
+
+# ═══════════════════════════════════════════════
+# EXCEL GENERATION
+# ═══════════════════════════════════════════════
+
+def generate_excel(
+    data: list[dict[str, Any]],
+    output_path: str | Path,
+    sheet_name: str = "Report",
+) -> bool:
+    """Generate an Excel file from a list of dicts."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = sheet_name
+
+        if not data:
+            wb.save(str(output_path))
+            return True
+
+        # Header row (bold, blue background)
+        headers = list(data[0].keys())
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+
+        # Data rows
+        for row_idx, row_data in enumerate(data, 2):
+            for col_idx, header in enumerate(headers, 1):
+                ws.cell(row=row_idx, column=col_idx, value=row_data.get(header, ""))
+
+        # Auto-fit column widths
+        for col_idx, header in enumerate(headers, 1):
+            max_len = max(len(str(header)), *(len(str(row.get(header, ""))) for row in data))
+            ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max_len + 2, 50)
+
+        wb.save(str(output_path))
+        return True
+    except Exception:
+        return False
+
+
+# ═══════════════════════════════════════════════
+# FAST DATAFRAMES (Polars)
+# ═══════════════════════════════════════════════
+
+def dataframe_from_dicts(data: list[dict[str, Any]]) -> Any:
+    """Create a Polars DataFrame from a list of dicts."""
+    import polars as pl
+    return pl.DataFrame(data)
+
+
+def dataframe_summary(data: list[dict[str, Any]], group_by: str, agg_col: str, agg: str = "sum") -> list[dict]:
+    """Aggregate data using Polars. Returns list of dicts.
+
+    Args:
+        agg: "sum", "mean", "count", "min", "max"
+    """
+    import polars as pl
+    df = pl.DataFrame(data)
+    agg_fn = getattr(pl.col(agg_col), agg)
+    result = df.group_by(group_by).agg(agg_fn().alias(f"{agg_col}_{agg}"))
+    return result.to_dicts()
+
+
+# ═══════════════════════════════════════════════
+# SIGNED TOKENS (itsdangerous)
+# ═══════════════════════════════════════════════
+
+_signer_secret = None
+
+
+def _get_signer_secret() -> str:
+    """Get signing secret from env or generate one."""
+    global _signer_secret
+    if _signer_secret is None:
+        import os
+        _signer_secret = os.getenv("SIGNING_SECRET", "arcana-default-change-me")
+    return _signer_secret
+
+
+def sign_token(data: str, salt: str = "arcana") -> str:
+    """Create a signed token (e.g., for unsubscribe links)."""
+    from itsdangerous import URLSafeTimedSerializer
+    s = URLSafeTimedSerializer(_get_signer_secret())
+    return s.dumps(data, salt=salt)
+
+
+def verify_token(token: str, salt: str = "arcana", max_age: int = 86400) -> str | None:
+    """Verify a signed token. Returns original data or None if expired/invalid.
+
+    Args:
+        max_age: Maximum age in seconds (default 24 hours)
+    """
+    from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
+    s = URLSafeTimedSerializer(_get_signer_secret())
+    try:
+        return s.loads(token, salt=salt, max_age=max_age)
+    except (SignatureExpired, BadSignature):
+        return None
+
+
+# ═══════════════════════════════════════════════
+# UNIFIED NOTIFICATIONS (Apprise)
+# ═══════════════════════════════════════════════
+
+def send_notification(
+    title: str, body: str,
+    urls: list[str] | None = None,
+) -> bool:
+    """Send notification to multiple channels via Apprise.
+
+    URLs format examples:
+        - "discord://webhook_id/webhook_token"
+        - "tgram://bot_token/chat_id"
+        - "slack://token_a/token_b/token_c/#channel"
+        - "mailto://user:pass@gmail.com"
+    """
+    try:
+        import apprise
+        ap = apprise.Apprise()
+        if urls:
+            for url in urls:
+                ap.add(url)
+        return ap.notify(title=title, body=body)
+    except Exception:
+        return False
+
+
+# ═══════════════════════════════════════════════
+# GEOCODING (Lead Scoring)
+# ═══════════════════════════════════════════════
+
+def geocode_location(location: str) -> dict[str, Any] | None:
+    """Geocode a location string to lat/lng + details."""
+    try:
+        from geopy.geocoders import Nominatim
+        geolocator = Nominatim(user_agent="arcana-ai")
+        result = geolocator.geocode(location, timeout=5)
+        if result:
+            return {
+                "address": result.address,
+                "latitude": result.latitude,
+                "longitude": result.longitude,
+            }
+    except Exception:
+        pass
+    return None
+
+
+def distance_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate distance between two points in miles."""
+    from geopy.distance import geodesic
+    return geodesic((lat1, lon1), (lat2, lon2)).miles
+
+
+# Portland, OR coordinates for lead scoring
+ARCANA_HQ = (45.5152, -122.6784)
+
+
+def lead_distance_score(location: str) -> float:
+    """Score a lead 0-1 based on proximity to Portland (closer = higher)."""
+    geo = geocode_location(location)
+    if not geo:
+        return 0.5  # Unknown location gets neutral score
+    dist = distance_miles(
+        ARCANA_HQ[0], ARCANA_HQ[1],
+        geo["latitude"], geo["longitude"],
+    )
+    # Within 50 miles = 1.0, within 500 miles = 0.7, beyond = 0.3
+    if dist < 50:
+        return 1.0
+    elif dist < 500:
+        return 0.7
+    elif dist < 2000:
+        return 0.5
+    return 0.3
+
+
+# ═══════════════════════════════════════════════
+# DNS / DOMAIN INTELLIGENCE
+# ═══════════════════════════════════════════════
+
+def check_mx_records(domain: str) -> list[str]:
+    """Check if a domain has MX records (can receive email)."""
+    try:
+        import dns.resolver
+        answers = dns.resolver.resolve(domain, "MX")
+        return [str(r.exchange).rstrip(".") for r in answers]
+    except Exception:
+        return []
+
+
+def domain_has_email(domain: str) -> bool:
+    """Check if a domain can receive email (has MX records)."""
+    return len(check_mx_records(domain)) > 0
+
+
+# ═══════════════════════════════════════════════
+# CONTENT VARIANTS (Markov Chains)
+# ═══════════════════════════════════════════════
+
+def train_markov_model(corpus: list[str]) -> Any:
+    """Train a Markov chain model on a corpus of texts."""
+    import markovify
+    combined = "\n".join(corpus)
+    return markovify.Text(combined, state_size=2)
+
+
+def generate_variants(model: Any, count: int = 5, max_chars: int = 280) -> list[str]:
+    """Generate text variants from a trained Markov model."""
+    results = []
+    for _ in range(count * 3):  # Over-generate to filter
+        sentence = model.make_short_sentence(max_chars)
+        if sentence and sentence not in results:
+            results.append(sentence)
+        if len(results) >= count:
+            break
+    return results
+
+
+# ═══════════════════════════════════════════════
+# FAST HASHING (xxhash)
+# ═══════════════════════════════════════════════
+
+def fast_hash(data: str | bytes) -> str:
+    """Ultra-fast content hash using xxhash (10x faster than MD5)."""
+    import xxhash
+    if isinstance(data, str):
+        data = data.encode()
+    return xxhash.xxh64(data).hexdigest()
+
+
+def content_fingerprint(text: str) -> str:
+    """Generate a fingerprint for deduplication (normalized + hashed)."""
+    import re
+    normalized = re.sub(r"\s+", " ", text.lower().strip())
+    return fast_hash(normalized)
+
+
+# ═══════════════════════════════════════════════
+# SEMANTIC DIFFING
+# ═══════════════════════════════════════════════
+
+def deep_diff(old: dict | list, new: dict | list) -> dict[str, Any]:
+    """Get semantic diff between two data structures."""
+    from deepdiff import DeepDiff
+    diff = DeepDiff(old, new, ignore_order=True)
+    return dict(diff) if diff else {}
+
+
+def has_changed(old: dict | list, new: dict | list) -> bool:
+    """Check if two data structures differ."""
+    return bool(deep_diff(old, new))
+
+
+# ═══════════════════════════════════════════════
+# SITEMAP PARSING (Intel)
+# ═══════════════════════════════════════════════
+
+def parse_sitemap(sitemap_url: str) -> list[str]:
+    """Parse a sitemap and return all page URLs."""
+    try:
+        from usp.tree import sitemap_tree_for_homepage
+        tree = sitemap_tree_for_homepage(sitemap_url)
+        return [page.url for page in tree.all_pages() if page.url]
+    except Exception:
+        return []
+
+
+# ═══════════════════════════════════════════════
+# GRAPH ANALYSIS (Networks)
+# ═══════════════════════════════════════════════
+
+def build_referral_graph(
+    edges: list[tuple[str, str, float]],
+) -> Any:
+    """Build a weighted graph from (source, target, weight) edges."""
+    import networkx as nx
+    G = nx.DiGraph()
+    for source, target, weight in edges:
+        G.add_edge(source, target, weight=weight)
+    return G
+
+
+def top_influencers(graph: Any, top_n: int = 10) -> list[tuple[str, float]]:
+    """Find top influencers in a network by PageRank."""
+    import networkx as nx
+    pr = nx.pagerank(graph)
+    sorted_nodes = sorted(pr.items(), key=lambda x: -x[1])
+    return sorted_nodes[:top_n]
+
+
+# ═══════════════════════════════════════════════
+# COLOR EXTRACTION
+# ═══════════════════════════════════════════════
+
+def extract_colors(image_path: str | Path, count: int = 5) -> list[tuple[int, int, int]]:
+    """Extract dominant colors from an image as RGB tuples."""
+    try:
+        from colorthief import ColorThief
+        ct = ColorThief(str(image_path))
+        return ct.get_palette(color_count=count, quality=10)
+    except Exception:
+        return []
+
+
+def dominant_color(image_path: str | Path) -> tuple[int, int, int] | None:
+    """Get the single most dominant color from an image."""
+    try:
+        from colorthief import ColorThief
+        ct = ColorThief(str(image_path))
+        return ct.get_color(quality=10)
+    except Exception:
+        return None
+
+
+def rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+    """Convert RGB tuple to hex color string."""
+    return "#{:02x}{:02x}{:02x}".format(*rgb)

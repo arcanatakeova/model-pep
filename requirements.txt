@@ -77,6 +77,10 @@ bleach>=6.1                  # HTML sanitization (XSS prevention)
 # ═══════════════════════════════════════════════
 Pillow>=10.0                 # Image manipulation (resize, watermark)
 imageio>=2.33                # Media I/O (read/write images + video frames)
+qrcode[pil]>=7.4             # QR code generation (product links, CTAs)
+segno>=1.6                   # Advanced QR/Micro-QR codes
+python-barcode>=0.15         # Barcode generation (product codes)
+colorthief>=0.2              # Extract dominant colors from images
 
 # ═══════════════════════════════════════════════
 # CACHING & PERFORMANCE
@@ -84,10 +88,12 @@ imageio>=2.33                # Media I/O (read/write images + video frames)
 cachetools>=5.3              # In-memory caching (LRU, TTL, LFU)
 diskcache>=5.6               # Persistent disk-based cache
 orjson>=3.9                  # Fast JSON serialization (10x faster than json)
+xxhash>=3.4                  # Ultra-fast hashing (deduplication, content fingerprinting)
 
 # ═══════════════════════════════════════════════
-# SECURITY
+# SECURITY & SIGNED TOKENS
 # ═══════════════════════════════════════════════
+itsdangerous>=2.1             # Signed/expiring tokens (webhooks, unsubscribe links)
 # cryptography>=42.0         # Encryption, signing (install if cffi available)
 # PyJWT>=2.8                 # JWT token handling (install if cryptography works)
 
@@ -116,6 +122,38 @@ furl>=2.1                    # URL parsing & manipulation
 jinja2>=3.1                  # Template engine (email templates, reports)
 tabulate>=0.9                # Format data as tables (reports)
 humanize>=4.9                # Human-readable numbers/dates ($1.2M, "3 hours ago")
+polars>=0.20                 # Fast dataframes (analytics, revenue reports)
+openpyxl>=3.1                # Excel file generation (client reports, exports)
+reportlab>=4.1               # PDF generation (digital products, invoices)
+
+# ═══════════════════════════════════════════════
+# NOTIFICATIONS (Unified)
+# ═══════════════════════════════════════════════
+apprise>=1.7                 # Unified notifications (Discord, Telegram, Slack, email, SMS)
+
+# ═══════════════════════════════════════════════
+# API RATE LIMITING
+# ═══════════════════════════════════════════════
+slowapi>=0.1                 # FastAPI rate limiting (per-IP, per-key)
+
+# ═══════════════════════════════════════════════
+# CONTENT GENERATION
+# ═══════════════════════════════════════════════
+markovify>=0.9               # Markov chain text generation (hook/copy variants)
+
+# ═══════════════════════════════════════════════
+# INTELLIGENCE & ANALYSIS
+# ═══════════════════════════════════════════════
+geopy>=2.4                   # Geocoding & distance (lead scoring by region)
+ultimate-sitemap-parser>=0.5 # Parse competitor sitemaps for intel
+dnspython>=2.6               # DNS lookups (MX record validation, domain intel)
+networkx>=3.2                # Graph analysis (referral networks, competitor mapping)
+deepdiff>=7.0                # Semantic diffing (config changes, prompt versioning)
+
+# ═══════════════════════════════════════════════
+# CONFIGURATION
+# ═══════════════════════════════════════════════
+PyYAML>=6.0                  # YAML config files
 
 # ═══════════════════════════════════════════════
 # TESTING (dev only)

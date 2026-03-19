@@ -146,5 +146,54 @@ class ProductManager:
             logger.error("Gumroad create failed: %s", exc)
             return {"error": str(exc)}
 
+    async def generate_product_pdf(
+        self, title: str, content_blocks: list[dict[str, str]],
+        output_dir: str = "data/products",
+    ) -> str | None:
+        """Generate a PDF digital product with QR code linking to purchase page.
+
+        Returns the output file path, or None on failure.
+        """
+        from src.toolkit import generate_pdf, generate_qr_code, slugify
+        from pathlib import Path
+
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        slug = slugify(title)
+        pdf_path = out_dir / f"{slug}.pdf"
+        qr_path = out_dir / f"{slug}-qr.png"
+
+        # Generate the PDF
+        success = generate_pdf(title, content_blocks, pdf_path, author="Arcana Operations LLC")
+        if not success:
+            logger.error("Failed to generate PDF: %s", title)
+            return None
+
+        # Generate QR code linking to the product (placeholder URL)
+        generate_qr_code(f"https://arcanaoperations.com/products/{slug}", qr_path)
+
+        self.memory.log(f"[Products] Generated PDF: {title} → {pdf_path}", "Products")
+        return str(pdf_path)
+
+    async def generate_invoice(
+        self, invoice_number: str, client_name: str,
+        items: list[dict[str, Any]], total: float,
+        output_dir: str = "data/invoices",
+    ) -> str | None:
+        """Generate an invoice PDF for a client."""
+        from src.toolkit import generate_invoice_pdf
+        from pathlib import Path
+
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = out_dir / f"invoice-{invoice_number}.pdf"
+
+        success = generate_invoice_pdf(pdf_path, invoice_number, client_name, items, total)
+        if not success:
+            return None
+
+        self.memory.log(f"[Products] Invoice generated: #{invoice_number} for {client_name} (${total:.2f})", "Products")
+        return str(pdf_path)
+
     async def close(self) -> None:
         await self._client.aclose()

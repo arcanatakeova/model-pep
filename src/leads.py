@@ -69,6 +69,17 @@ class LeadPipeline:
         score = result.get("score", 0)
         priority = result.get("priority", "cold")
 
+        # Enrich with NLP sentiment + content fingerprint for dedup
+        try:
+            from src.toolkit import sentiment_score, content_fingerprint, extract_keywords
+            sentiment = sentiment_score(text)
+            result["sentiment"] = sentiment["label"]
+            result["sentiment_polarity"] = sentiment["polarity"]
+            result["keywords"] = extract_keywords(text, top_n=5)
+            result["fingerprint"] = content_fingerprint(text)
+        except Exception:
+            pass
+
         # Log to memory
         self.memory.log(
             f"Lead: @{handle} (score: {score}, {priority}) — {text[:100]}\n"

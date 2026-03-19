@@ -493,7 +493,11 @@ class OpportunityScanner:
             self._http = None
 
     def _dedup_key(self, text: str) -> str:
-        return hashlib.md5(text.encode()).hexdigest()[:12]
+        try:
+            from src.toolkit import fast_hash
+            return fast_hash(text)[:12]  # xxhash: 10x faster than MD5
+        except ImportError:
+            return hashlib.md5(text.encode()).hexdigest()[:12]
 
     def _is_seen(self, text: str) -> bool:
         key = self._dedup_key(text)

@@ -228,3 +228,35 @@ class RevenueEngine:
             )
 
         return "\n".join(lines)
+
+    def export_revenue_excel(
+        self, snapshot: dict[str, Any], output_path: str = "data/reports/revenue.xlsx",
+    ) -> str | None:
+        """Export revenue snapshot to a formatted Excel file."""
+        try:
+            from src.toolkit import generate_excel
+            from pathlib import Path
+
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+            rows = []
+            for ch in snapshot.get("channels", []):
+                rows.append({
+                    "Channel": ch.get("name", ""),
+                    "Revenue": f"${ch.get('revenue', 0):,.2f}",
+                    "Target": f"${ch.get('target', 0):,}",
+                    "% of Target": f"{ch.get('pct_of_target', 0):.1f}%",
+                    "Active": "Yes" if ch.get("active") else "No",
+                })
+            rows.append({
+                "Channel": "TOTAL",
+                "Revenue": f"${snapshot.get('total_monthly_revenue', 0):,.2f}",
+                "Target": f"${snapshot.get('monthly_target', 0):,}",
+                "% of Target": f"{snapshot.get('pct_of_target', 0):.1f}%",
+                "Active": "",
+            })
+
+            success = generate_excel(rows, output_path, sheet_name=snapshot.get("month", "Revenue"))
+            return output_path if success else None
+        except Exception:
+            return None
