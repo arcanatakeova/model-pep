@@ -42,6 +42,7 @@ from typing import Any
 
 import httpx
 
+from src.database import Database
 from src.llm import LLM, Tier
 from src.memory import Memory
 from src.notify import Notifier
@@ -451,11 +452,13 @@ class OpportunityScanner:
 
     def __init__(
         self, llm: LLM, memory: Memory, x: XClient, notifier: Notifier,
+        db: Database | None = None,
     ) -> None:
         self.llm = llm
         self.memory = memory
         self.x = x
         self.notifier = notifier
+        self.db = db
         self._http: httpx.AsyncClient | None = None
 
         # State tracking
@@ -1338,6 +1341,26 @@ class OpportunityScanner:
             f"- Status: {'auto_responded' if details.get('reply') or details.get('empathy_reply') else 'queued'}\n"
             f"- Text: {text[:300]}\n",
         )
+
+        # Persist to SQLite database
+        if self.db:
+            platform = source.split("_")[0] if "_" in source else source
+            self.db.log_opportunity(
+                source=source,
+                platform=platform,
+                original_text=text[:500],
+                score=score,
+                query_used=details.get("query_used"),
+                author=details.get("author") or identifier,
+                author_handle=details.get("author_handle"),
+                service_match=service,
+                estimated_value=details.get("estimated_value", 0),
+                urgency=details.get("urgency"),
+                buyer_type=details.get("buyer_type"),
+                auto_responded=1 if details.get("reply") or details.get("empathy_reply") else 0,
+                response_text=details.get("reply") or details.get("empathy_reply"),
+                metadata=details,
+            )
 
     def get_pipeline(self, min_score: int = 0) -> list[str]:
         """Get all opportunities in the pipeline."""
