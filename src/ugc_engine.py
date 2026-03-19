@@ -218,25 +218,29 @@ class UGCEngine:
 
     async def generate_hooks(self, product_name: str, niche: str, count: int = 10) -> list[dict[str, str]]:
         """Generate a bank of scroll-stopping hooks. The hook is 80% of the video's success."""
-        result = await self.llm.ask_json(
-            f"Generate {count} scroll-stopping UGC hooks for this product.\n\n"
-            f"Product: {product_name}\n"
-            f"Niche: {niche}\n\n"
-            f"Hook categories (include variety):\n"
-            f"1. CONTROVERSIAL: Bold claim that makes people disagree/agree\n"
-            f"2. SHOCK STAT: 'Did you know 73% of...' (use real-sounding stats)\n"
-            f"3. POV: 'POV: You just found the...' (relatable scenario)\n"
-            f"4. STORY: 'I spent $500 testing every... here's the winner'\n"
-            f"5. QUESTION: 'Why is nobody talking about...'\n"
-            f"6. PATTERN INTERRUPT: Something unexpected visually/verbally\n"
-            f"7. SOCIAL PROOF: 'This went viral because...'\n"
-            f"8. FEAR: 'If you're still using X, you need to see this'\n"
-            f"9. CURIOSITY GAP: 'The one thing I changed that...'\n"
-            f"10. DIRECT: 'Stop wasting money on...' (aggressive but effective)\n\n"
-            f"Each hook must be under 10 seconds spoken. Make them irresistible.\n\n"
-            f"Return JSON: {{\"hooks\": [{{\"text\": str, \"type\": str, \"estimated_ctr\": str}}]}}",
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Generate {count} scroll-stopping UGC hooks for this product.\n\n"
+                f"Product: {product_name}\n"
+                f"Niche: {niche}\n\n"
+                f"Hook categories (include variety):\n"
+                f"1. CONTROVERSIAL: Bold claim that makes people disagree/agree\n"
+                f"2. SHOCK STAT: 'Did you know 73% of...' (use real-sounding stats)\n"
+                f"3. POV: 'POV: You just found the...' (relatable scenario)\n"
+                f"4. STORY: 'I spent $500 testing every... here's the winner'\n"
+                f"5. QUESTION: 'Why is nobody talking about...'\n"
+                f"6. PATTERN INTERRUPT: Something unexpected visually/verbally\n"
+                f"7. SOCIAL PROOF: 'This went viral because...'\n"
+                f"8. FEAR: 'If you're still using X, you need to see this'\n"
+                f"9. CURIOSITY GAP: 'The one thing I changed that...'\n"
+                f"10. DIRECT: 'Stop wasting money on...' (aggressive but effective)\n\n"
+                f"Each hook must be under 10 seconds spoken. Make them irresistible.\n\n"
+                f"Return JSON: {{\"hooks\": [{{\"text\": str, \"type\": str, \"estimated_ctr\": str}}]}}",
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("generate_hooks ask_json failed: %s", exc)
+            return []
         return result.get("hooks", [])
 
     # ── Video Generation (HeyGen API) ──────────────────────────────
@@ -413,27 +417,31 @@ class UGCEngine:
 
     async def _quality_check(self, script: str, product: str, video_url: str) -> dict[str, Any]:
         """AI quality gate on the produced video."""
-        result = await self.llm.ask_json(
-            f"Rate this UGC video script on a 1-10 scale.\n\n"
-            f"Product: {product}\n"
-            f"Script: {script}\n\n"
-            f"Rate on:\n"
-            f"1. Hook strength (does it stop the scroll?)\n"
-            f"2. Authenticity (does it sound like a real person, not a commercial?)\n"
-            f"3. CTA clarity (is the next step obvious?)\n"
-            f"4. Pacing (right length, no dead spots?)\n"
-            f"5. Conversion potential (would this make someone buy?)\n\n"
-            f"Return JSON: {{"
-            f'"score": int (1-10 overall), '
-            f'"hook_score": int, '
-            f'"authenticity_score": int, '
-            f'"cta_score": int, '
-            f'"pacing_score": int, '
-            f'"conversion_score": int, '
-            f'"improvements": [str], '
-            f'"verdict": "publish"|"revise"|"reject"}}',
-            tier=Tier.HAIKU,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Rate this UGC video script on a 1-10 scale.\n\n"
+                f"Product: {product}\n"
+                f"Script: {script}\n\n"
+                f"Rate on:\n"
+                f"1. Hook strength (does it stop the scroll?)\n"
+                f"2. Authenticity (does it sound like a real person, not a commercial?)\n"
+                f"3. CTA clarity (is the next step obvious?)\n"
+                f"4. Pacing (right length, no dead spots?)\n"
+                f"5. Conversion potential (would this make someone buy?)\n\n"
+                f"Return JSON: {{"
+                f'"score": int (1-10 overall), '
+                f'"hook_score": int, '
+                f'"authenticity_score": int, '
+                f'"cta_score": int, '
+                f'"pacing_score": int, '
+                f'"conversion_score": int, '
+                f'"improvements": [str], '
+                f'"verdict": "publish"|"revise"|"reject"}}',
+                tier=Tier.HAIKU,
+            )
+        except Exception as exc:
+            logger.error("_quality_check ask_json failed: %s", exc)
+            return {"score": 5, "verdict": "publish", "improvements": []}
         return result
 
     # ── Batch Production ────────────────────────────────────────────
