@@ -873,11 +873,11 @@ class UGCEngine:
                     except (IndexError, ValueError):
                         pass
                 elif lower.startswith("product:"):
-                    product_name = lower.split(":", 1)[1].strip()
+                    product_name = line.strip("- ").strip().split(":", 1)[1].strip()
                 elif lower.startswith("description:"):
-                    product_desc = lower.split(":", 1)[1].strip()
+                    product_desc = line.strip("- ").strip().split(":", 1)[1].strip()
                 elif lower.startswith("audience:") or lower.startswith("target audience:"):
-                    target_audience = lower.split(":", 1)[1].strip()
+                    target_audience = line.strip("- ").strip().split(":", 1)[1].strip()
                 elif lower.startswith("status:"):
                     status = lower.split(":", 1)[1].strip().lower()
 
