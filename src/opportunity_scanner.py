@@ -65,6 +65,13 @@ X_HUNT_QUERIES: dict[str, list[str]] = {
         '"ad creative" ("need" OR "looking for" OR "who does" OR "agency")',
         '"Reels" ("need help" OR "who creates" OR "looking for creator")',
         '"user generated content" ("need" OR "looking for" OR "how to")',
+        '"unboxing video" ("need" OR "looking for" OR "who does")',
+        '"product demo" ("video" OR "need" OR "creator" OR "looking for")',
+        '"Meta ads" ("creative" OR "need" OR "video" OR "UGC")',
+        '"video ads" ("agency" OR "freelancer" OR "need" OR "DTC")',
+        '"influencer content" ("need" OR "looking for" OR "budget")',
+        '"shoppable video" OR "product photography" ("need" OR "looking")',
+        '"content creator" ("ecommerce" OR "DTC" OR "Shopify" OR "Amazon")',
     ],
 
     # ── AI Chatbot ($300-1000/mo) ───────────────────────────────
@@ -75,6 +82,15 @@ X_HUNT_QUERIES: dict[str, list[str]] = {
         '"automate support" OR "support tickets" ("too many" OR "overwhelmed")',
         '"intercom alternative" OR "zendesk alternative" OR "drift alternative"',
         '"chatbot developer" OR "chatbot agency" OR "build me a bot"',
+        '"AI customer service" ("need" OR "looking for" OR "implement")',
+        '"live chat" ("too expensive" OR "need" OR "alternative" OR "bot")',
+        '"customer support" ("automate" OR "AI" OR "overwhelmed" OR "scaling")',
+        '"helpdesk" ("AI" OR "automate" OR "alternative" OR "need")',
+        '"WhatsApp bot" OR "Telegram bot" OR "Slack bot" ("business" OR "need")',
+        '"AI assistant" ("for my website" OR "for my business" OR "need")',
+        '"reduce support tickets" OR "support is killing us" OR "drowning in tickets"',
+        '"Tidio" OR "ManyChat" OR "Chatfuel" ("alternative" OR "better" OR "need")',
+        '"FAQ bot" OR "knowledge base AI" OR "self-service support"',
     ],
 
     # ── Social Media Management ($500-5000/mo) ──────────────────
@@ -86,6 +102,14 @@ X_HUNT_QUERIES: dict[str, list[str]] = {
         '"social media strategy" ("need" OR "help" OR "looking for")',
         '"Instagram growth" ("need help" OR "struggling" OR "how to")',
         '"Twitter management" OR "X management" ("need" OR "looking for")',
+        '"social media agency" ("recommend" OR "looking for" OR "affordable")',
+        '"content calendar" ("need help" OR "overwhelmed" OR "template")',
+        '"grow my following" OR "grow my audience" ("help" OR "how to" OR "tips")',
+        '"social media ROI" ("not seeing" OR "bad" OR "how to" OR "improve")',
+        '"LinkedIn content" ("need" OR "help" OR "strategy" OR "ghostwriter")',
+        '"Pinterest marketing" ("need" OR "help" OR "strategy")',
+        '"brand awareness" ("social" OR "need" OR "strategy" OR "help")',
+        '"social media" ("burned out" OR "hate" OR "no time" OR "can\'t keep up")',
     ],
 
     # ── Lead Gen / Cold Email ($500-2000/mo) ────────────────────
@@ -96,6 +120,15 @@ X_HUNT_QUERIES: dict[str, list[str]] = {
         '"cold outreach" ("help" OR "need" OR "agency" OR "tool")',
         '"lead gen agency" OR "appointment setting" ("looking for" OR "need")',
         '"not enough clients" OR "need more customers" OR "how to get clients"',
+        '"Instantly" OR "Lemlist" OR "Smartlead" ("alternative" OR "help" OR "setup")',
+        '"cold email deliverability" ("help" OR "issues" OR "low open rates")',
+        '"sales development" ("outsource" OR "need" OR "agency" OR "hire")',
+        '"B2B outreach" ("need" OR "help" OR "agency" OR "tool")',
+        '"pipeline empty" OR "pipeline is dry" OR "no pipeline"',
+        '"SDR" ("too expensive" OR "alternative" OR "hiring" OR "need")',
+        '"Apollo" OR "ZoomInfo" ("alternative" OR "help" OR "too expensive")',
+        '"inbound leads" ("not enough" OR "need more" OR "dried up")',
+        '"outbound" ("starting" OR "help" OR "need" OR "agency" OR "build")',
     ],
 
     # ── Review Management ($29-59/mo/location) ──────────────────
@@ -105,6 +138,16 @@ X_HUNT_QUERIES: dict[str, list[str]] = {
         '"Yelp reviews" ("help" OR "need" OR "respond to")',
         '"reputation management" ("need" OR "looking for" OR "help")',
         '"online reputation" ("damaged" OR "need help" OR "fix")',
+        '"1 star review" OR "fake review" ("help" OR "what to do" OR "how to")',
+        '"respond to reviews" ("help" OR "template" OR "how to" OR "AI")',
+        '"review response" ("service" OR "agency" OR "automate" OR "AI")',
+        '"Trustpilot" ("reviews" OR "management" OR "help" OR "respond")',
+        '"Google Business Profile" ("reviews" OR "help" OR "manage")',
+        '"restaurant reviews" ("help" OR "respond" OR "bad" OR "negative")',
+        '"doctor reviews" OR "dentist reviews" ("help" OR "respond" OR "manage")',
+        '"hotel reviews" ("respond" OR "manage" OR "help" OR "negative")',
+        '"review response time" OR "review management tool" OR "review automation"',
+        '"reputation" ("crisis" OR "damage" OR "repair" OR "fix" OR "help")',
     ],
 
     # ── SEO ($1500-5000/mo) ─────────────────────────────────────
@@ -114,6 +157,16 @@ X_HUNT_QUERIES: dict[str, list[str]] = {
         '"organic traffic" ("need more" OR "dropped" OR "help")',
         '"Google ranking" ("dropped" OR "need help" OR "improve")',
         '"content marketing" ("need" OR "help" OR "agency" OR "looking for")',
+        '"blog content" ("need" OR "help" OR "writer" OR "agency")',
+        '"technical SEO" ("need" OR "audit" OR "help" OR "issues")',
+        '"local SEO" ("need" OR "help" OR "agency" OR "not ranking")',
+        '"link building" ("need" OR "service" OR "agency" OR "help")',
+        '"keyword research" ("need help" OR "service" OR "don\'t know how")',
+        '"SEO" ("fired my" OR "bad agency" OR "wasted money" OR "scammed")',
+        '"programmatic SEO" ("need" OR "help" OR "how to" OR "setup")',
+        '"Ahrefs" OR "SEMrush" ("alternative" OR "too expensive" OR "help")',
+        '"website traffic" ("dropped" OR "declining" OR "need more" OR "help")',
+        '"Google update" ("hit" OR "penalized" OR "lost rankings" OR "recovery")',
     ],
 
     # ── AI Consulting ($2000-10000/mo) ──────────────────────────
@@ -124,6 +177,48 @@ X_HUNT_QUERIES: dict[str, list[str]] = {
         '"AI developer" ("looking for" OR "need" OR "hiring")',
         '"digital transformation" ("need" OR "help" OR "consulting")',
         '"workflow automation" ("need" OR "help" OR "looking for")',
+        '"AI agent" ("build" OR "need" OR "looking for" OR "developer")',
+        '"n8n" OR "Make.com" OR "Zapier" ("help" OR "too complex" OR "need developer")',
+        '"ChatGPT" ("for my business" OR "implement" OR "integrate" OR "API")',
+        '"AI integration" ("need" OR "help" OR "consulting" OR "strategy")',
+        '"custom AI" ("need" OR "build" OR "looking for" OR "developer")',
+        '"process automation" ("need" OR "help" OR "consulting")',
+        '"AI ROI" OR "AI budget" OR "AI spend" ("help" OR "how to" OR "justify")',
+        '"replace" ("manual work" OR "spreadsheets" OR "data entry") AND "AI"',
+        '"GPT" ("fine-tune" OR "custom" OR "business" OR "integrate" OR "deploy")',
+    ],
+
+    # ── Email Marketing ($500-3000/mo) ──────────────────────────
+    "email_marketing": [
+        '"email marketing" ("need help" OR "agency" OR "looking for" OR "freelancer")',
+        '"email automation" ("need" OR "setup" OR "help" OR "looking for")',
+        '"email sequences" ("need" OR "help" OR "not working" OR "improve")',
+        '"Klaviyo" OR "Mailchimp" ("help" OR "migration" OR "setup" OR "alternative")',
+        '"newsletter" ("start" OR "need help" OR "grow" OR "monetize")',
+        '"email deliverability" ("issues" OR "help" OR "spam" OR "not landing")',
+        '"email copywriting" ("need" OR "help" OR "hiring" OR "agency")',
+        '"drip campaign" ("need" OR "help" OR "setup" OR "not working")',
+        '"welcome sequence" OR "nurture sequence" ("need" OR "help" OR "build")',
+        '"email list" ("grow" OR "build" OR "need help" OR "monetize")',
+        '"abandoned cart" ("email" OR "recovery" OR "help" OR "sequence")',
+        '"email strategy" ("need" OR "help" OR "consulting" OR "audit")',
+        '"open rates" ("low" OR "declining" OR "improve" OR "help")',
+        '"click rates" ("low" OR "improve" OR "help" OR "bad")',
+        '"unsubscribe rate" ("high" OR "too many" OR "help" OR "fix")',
+    ],
+
+    # ── Website / Landing Page ($1000-5000 one-time) ────────────
+    "web_design": [
+        '"need a website" OR "need a landing page" OR "website redesign"',
+        '"Shopify" ("setup" OR "need help" OR "developer" OR "customize")',
+        '"WordPress" ("help" OR "developer" OR "redesign" OR "fix")',
+        '"Webflow" ("need" OR "developer" OR "help" OR "build")',
+        '"conversion rate" ("low" OR "need help" OR "optimize" OR "CRO")',
+        '"landing page" ("not converting" OR "need" OR "build" OR "optimize")',
+        '"website speed" ("slow" OR "improve" OR "help" OR "optimize")',
+        '"ecommerce website" ("need" OR "build" OR "redesign" OR "help")',
+        '"headless commerce" ("need" OR "migrate" OR "help" OR "build")',
+        '"website" ("outdated" OR "ugly" OR "need new" OR "embarrassing")',
     ],
 
     # ── Competitor Displacement ─────────────────────────────────
@@ -134,6 +229,15 @@ X_HUNT_QUERIES: dict[str, list[str]] = {
         '"disappointed with" ("agency" OR "freelancer" OR "results")',
         '"overcharged" ("agency" OR "freelancer" OR "developer")',
         '"anyone better than" OR "alternative to my current"',
+        '"scammed by" ("agency" OR "freelancer" OR "marketing" OR "SEO")',
+        '"no results" ("agency" OR "freelancer" OR "marketing")',
+        '"ghosted by" ("agency" OR "freelancer" OR "developer")',
+        '"missed deadlines" ("agency" OR "freelancer" OR "developer")',
+        '"poor communication" ("agency" OR "freelancer" OR "developer")',
+        '"switching agencies" OR "changing agencies" OR "need better agency"',
+        '"contract ending" ("agency" OR "freelancer" OR "marketing")',
+        '"cancelling" ("agency" OR "marketing service" OR "freelancer")',
+        '"regret hiring" ("agency" OR "freelancer" OR "cheap" OR "offshore")',
     ],
 
     # ── Trigger Events (Budget Just Freed Up) ───────────────────
@@ -143,6 +247,16 @@ X_HUNT_QUERIES: dict[str, list[str]] = {
         '"scaling" AND ("need help" OR "looking for" OR "hiring")',
         '"growing fast" AND ("need" OR "overwhelmed" OR "hiring")',
         '"new business" AND ("need" OR "website" OR "marketing" OR "social media")',
+        '"just got funded" OR "closed our round" OR "raised capital"',
+        '"expanding" AND ("new market" OR "hiring" OR "need" OR "marketing")',
+        '"product launch" AND ("need" OR "marketing" OR "help" OR "strategy")',
+        '"going viral" AND ("need help" OR "scaling" OR "overwhelmed")',
+        '"revenue milestone" OR "hit $1M" OR "hit $100K" OR "first sale"',
+        '"Y Combinator" OR "Techstars" OR "500 Startups" AND ("looking for" OR "need")',
+        '"opening" AND ("new location" OR "new store" OR "new office")',
+        '"rebranding" AND ("need" OR "help" OR "agency" OR "looking for")',
+        '"IPO" OR "acquisition" OR "merger" AND ("marketing" OR "rebrand")',
+        '"hiring" AND ("marketing" OR "social media" OR "content") AND "can\'t find"',
     ],
 
     # ── Watering Holes (Where Ideal Clients Hang Out) ───────────
@@ -153,6 +267,15 @@ X_HUNT_QUERIES: dict[str, list[str]] = {
         '"startup founder" AND ("need" OR "looking for" OR "marketing")',
         '"agency owner" AND ("need" OR "white label" OR "outsource")',
         '"Shopify store" AND ("need" OR "help" OR "marketing" OR "struggling")',
+        '"solopreneur" AND ("need" OR "help" OR "overwhelmed" OR "tip")',
+        '"side hustle" AND ("grow" OR "marketing" OR "need" OR "help")',
+        '"bootstrapped" AND ("need" OR "marketing" OR "growth" OR "help")',
+        '"Amazon seller" AND ("need" OR "marketing" OR "help" OR "struggling")',
+        '"restaurant owner" AND ("marketing" OR "reviews" OR "help" OR "social")',
+        '"real estate agent" AND ("marketing" OR "leads" OR "social" OR "help")',
+        '"coach" OR "consultant" AND ("marketing" OR "clients" OR "leads" OR "help")',
+        '"SaaS founder" AND ("marketing" OR "growth" OR "leads" OR "content")',
+        '"freelancer" AND ("clients" OR "marketing" OR "grow" OR "help")',
     ],
 }
 
@@ -168,44 +291,142 @@ PAIN_QUERIES = [
     '"can\'t afford" ("agency" OR "marketing" OR "developer") AND "but need"',
     '"doing everything myself" OR "wearing too many hats" OR "no team"',
     '"losing customers" OR "losing clients" OR "churn" AND ("help" OR "how to")',
+    '"support inbox" ("overflowing" OR "drowning" OR "can\'t keep up")',
+    '"need to automate" OR "should automate" OR "how to automate"',
+    '"burned out" AND ("business" OR "entrepreneur" OR "founder")',
+    '"no marketing budget" OR "tight budget" AND ("marketing" OR "growth")',
+    '"website" ("no traffic" OR "zero visitors" OR "nobody visits")',
+    '"email list" ("dead" OR "not growing" OR "no engagement")',
+    '"sales are down" OR "revenue dropping" OR "losing money"',
+    '"competitors" ("crushing us" OR "ahead of" OR "outranking")',
+    '"onboarding" ("too slow" OR "losing people" OR "painful" OR "manual")',
+    '"spreadsheet hell" OR "drowning in spreadsheets" OR "too many tools"',
+    '"cash flow" ("problems" OR "tight" OR "struggling")',
+    '"nobody knows about us" OR "no brand awareness" OR "invisible online"',
+    '"return customers" ("none" OR "low" OR "how to get" OR "struggling")',
+    '"hiring" ("can\'t find" OR "too expensive" OR "nobody applies")',
+    '"admin work" ("too much" OR "killing me" OR "overwhelmed")',
+    '"pricing" ("too low" OR "undercharging" OR "race to bottom")',
+    '"customer complaints" ("too many" OR "increasing" OR "can\'t handle")',
+    '"marketing" ("doesn\'t work" OR "waste" OR "not seeing results")',
+    '"inventory" ("managing" OR "nightmare" OR "tracking" OR "manual")',
+    '"invoicing" ("manual" OR "late payments" OR "chasing" OR "automate")',
 ]
 
 # ── Reddit subreddits to monitor ────────────────────────────────
 REDDIT_SUBREDDITS = [
-    "smallbusiness",
-    "Entrepreneur",
-    "ecommerce",
-    "startups",
-    "digital_marketing",
-    "socialmedia",
-    "SEO",
-    "PPC",
-    "SaaS",
-    "freelance",
-    "marketing",
-    "webdev",
-    "artificial",
-    "ChatGPT",
+    # Business & Entrepreneurship
+    "smallbusiness", "Entrepreneur", "startups", "SaaS", "GrowMyBusiness",
+    "EntrepreneurRideAlong", "sweatystartup", "microsaas", "indiehackers",
+    # E-commerce
+    "ecommerce", "shopify", "AmazonSeller", "FulfillmentByAmazon", "dropship",
+    "AmazonFBA", "Etsy",
+    # Marketing & Growth
+    "digital_marketing", "socialmedia", "SEO", "PPC", "marketing",
+    "content_marketing", "emailmarketing", "copywriting", "advertising",
+    "SocialMediaMarketing", "growthhacking",
+    # Tech & Development
+    "webdev", "web_design", "artificial", "ChatGPT", "LocalLLaMA",
+    "MachineLearning", "learnprogramming",
+    # Freelancing & Agency
+    "freelance", "Upwork", "agency", "DigitalNomad",
+    # Industry Specific
+    "restaurateur", "RealEstate", "dentistry", "realtors", "legaladvice",
+    "healthcare", "fitness",
 ]
 
 # ── Freelance platform search terms ─────────────────────────────
 FREELANCE_SEARCH_TERMS = [
-    "AI chatbot development",
-    "UGC video production",
-    "social media management",
-    "cold email automation",
-    "AI content writing",
-    "review management",
-    "lead generation",
-    "AI agent development",
-    "business process automation",
-    "SEO content writing",
-    "TikTok ad creative",
-    "email marketing automation",
-    "customer support automation",
-    "product demo video",
-    "brand video content",
+    "AI chatbot development", "UGC video production", "social media management",
+    "cold email automation", "AI content writing", "review management",
+    "lead generation", "AI agent development", "business process automation",
+    "SEO content writing", "TikTok ad creative", "email marketing automation",
+    "customer support automation", "product demo video", "brand video content",
+    "AI workflow automation", "n8n automation setup", "Zapier expert",
+    "Make.com automation", "CRM setup and automation", "HubSpot setup",
+    "Salesforce automation", "data entry automation", "web scraping",
+    "API integration", "WhatsApp chatbot", "Discord bot development",
+    "Slack bot development", "GPT fine-tuning", "AI agent builder",
+    "video editing for social", "Instagram Reels creation", "YouTube Shorts",
+    "podcast editing", "landing page design", "conversion optimization",
+    "Google Ads management", "Facebook Ads management", "LinkedIn Ads",
+    "Shopify store setup", "WooCommerce setup", "headless CMS development",
 ]
+
+# ── Indeed/Job Board terms (companies hiring = they have budget) ─
+JOB_BOARD_TERMS = [
+    "social media coordinator", "social media manager", "content creator",
+    "marketing coordinator", "digital marketing specialist", "SEO specialist",
+    "email marketing specialist", "customer support representative",
+    "community manager", "brand ambassador", "growth marketer",
+    "content marketing manager", "copywriter", "video editor",
+    "graphic designer", "marketing assistant", "PR coordinator",
+]
+
+# ── Product Hunt categories to monitor ──────────────────────────
+PRODUCT_HUNT_CATEGORIES = [
+    "saas", "developer-tools", "marketing", "e-commerce", "ai",
+    "productivity", "social-media", "analytics", "customer-support",
+    "no-code", "design-tools", "startup-tools",
+]
+
+# ── Google Alerts RSS keywords ──────────────────────────────────
+GOOGLE_ALERT_KEYWORDS = [
+    "looking for AI agency", "need marketing automation",
+    "small business automation", "AI chatbot for business",
+    "UGC creator needed", "social media manager hiring",
+    "review management service", "SEO agency Portland",
+    "AI consulting Portland", "business automation Portland",
+    "cold email agency", "lead generation service",
+]
+
+# ── Indie Hackers keywords ──────────────────────────────────────
+INDIEHACKER_KEYWORDS = [
+    "need marketing", "need UGC", "looking for agency",
+    "need help with SEO", "customer support scaling",
+    "cold email", "lead gen", "content marketing",
+]
+
+# ── Geographic targeting (Portland-first) ───────────────────────
+GEO_TARGETS = {
+    "local": ["Portland", "PDX", "Oregon", "PNW"],
+    "regional": ["Seattle", "Vancouver WA", "Boise", "Pacific Northwest"],
+    "national": ["USA", "US", "United States"],
+}
+
+# ── Response templates (high-conversion, battle-tested) ─────────
+RESPONSE_TEMPLATES: dict[str, list[str]] = {
+    "ugc": [
+        "We produce UGC at scale for DTC brands — cut content costs 80% vs traditional agencies. Happy to show examples. DM open.",
+        "Running UGC production for 3 brands right now. The key: AI-powered scripting + human-quality video. Would love to share what's working.",
+        "Just helped a Shopify store go from $0 to $40K/mo with UGC-driven Meta ads. The framework is repeatable. DM me.",
+    ],
+    "chatbot": [
+        "Built this exact setup for a SaaS company — reduced support tickets 60% in the first month. Happy to share the architecture.",
+        "AI chatbots are our bread and butter. The trick is training on YOUR data, not generic. Would love to walk you through our approach.",
+        "We deploy custom AI chatbots that actually work (not the template garbage). One client saved $4K/mo in support costs. DM open.",
+    ],
+    "social": [
+        "Managing social for 5 businesses right now. The 80/20: batch content creation + scheduling + engagement system. Happy to share the framework.",
+        "Social media doesn't have to be a time sink. We automate 80% and focus human effort on the 20% that actually drives revenue. DM me.",
+    ],
+    "leadgen": [
+        "Running cold email campaigns that get 15-25% open rates and 3-5% reply rates. The key is hyper-personalization at scale. Happy to share.",
+        "Built lead gen systems for B2B SaaS — consistently book 10-20 calls/month from cold outreach. DM me for the playbook.",
+    ],
+    "reviews": [
+        "We manage review responses for 50+ locations. AI-crafted, brand-consistent responses within 24 hours. $45/mo per location. DM me.",
+        "Bad reviews don't have to hurt. We respond to every review with empathy + brand voice. One restaurant went from 3.2 to 4.6 stars in 3 months.",
+    ],
+    "seo": [
+        "SEO is a long game but we've helped clients 3x organic traffic in 6 months. The strategy: programmatic content + technical fixes. Happy to audit yours.",
+        "Just recovered a client's rankings after a Google update. The fix was surprisingly simple. DM me if you want the playbook.",
+    ],
+    "consulting": [
+        "We build AI automations that replace 10-20 hours of manual work per week. ROI is usually 30 days. Happy to scope your use case.",
+        "AI consulting is what we do — strategy + implementation + ongoing optimization. One client saved $8K/mo by automating their onboarding. DM me.",
+    ],
+}
 
 # ── Service pricing (for qualification) ─────────────────────────
 SERVICE_PRICING = {
@@ -282,7 +503,11 @@ class OpportunityScanner:
     # ════════════════════════════════════════════════════════════════
 
     async def scan_cycle(self) -> dict[str, Any]:
-        """Run one full scan cycle. This is called by the orchestrator every 15 min."""
+        """Run one AGGRESSIVE scan cycle. Hits 5+ sources every time.
+
+        Every cycle touches X (always), pain signals (always), plus 3+ rotated
+        sources. The scanner is ALWAYS hunting across multiple platforms.
+        """
         self._cycle_count += 1
         logger.info("=== OPPORTUNITY SCAN CYCLE #%d ===", self._cycle_count)
 
@@ -292,62 +517,97 @@ class OpportunityScanner:
             "x_pain": 0,
             "x_displacement": 0,
             "x_triggers": 0,
+            "x_watering_holes": 0,
             "reddit": 0,
             "freelance": 0,
             "hn": 0,
+            "product_hunt": 0,
+            "indie_hackers": 0,
+            "job_boards": 0,
+            "google_alerts": 0,
             "total_found": 0,
             "auto_responded": 0,
             "escalated": 0,
         }
 
-        # ── Phase 1: X Inbound Hunting (pick 2 service categories) ──
+        # ═══ ALWAYS-ON SOURCES (every cycle) ═══════════════════════
+
+        # ── Phase 1: X Inbound Hunting (pick 3 service categories) ──
         categories = list(X_HUNT_QUERIES.keys())
         random.shuffle(categories)
-        for cat in categories[:2]:
+        for cat in categories[:3]:  # 3 categories per cycle (was 2)
             r = await self._hunt_x_category(cat)
             results["x_inbound"] += r.get("found", 0)
             results["auto_responded"] += r.get("responded", 0)
             results["escalated"] += r.get("escalated", 0)
-            await asyncio.sleep(random.uniform(3, 8))
+            await asyncio.sleep(random.uniform(2, 5))
 
-        # ── Phase 2: Pain Signal Detection ──────────────────────────
-        r = await self._hunt_pain_signals()
-        results["x_pain"] = r.get("found", 0)
-        results["auto_responded"] += r.get("responded", 0)
+        # ── Phase 2: Pain Signal Detection (2 queries per cycle) ────
+        for _ in range(2):  # Run 2 pain queries (was 1)
+            r = await self._hunt_pain_signals()
+            results["x_pain"] += r.get("found", 0)
+            results["auto_responded"] += r.get("responded", 0)
 
-        # ── Phase 3: Competitor Displacement (every 3rd cycle) ──────
-        if self._cycle_count % 3 == 0:
+        # ── Phase 3: Competitor Displacement (every 2nd cycle) ──────
+        if self._cycle_count % 2 == 0:
             r = await self._hunt_x_category("displacement")
             results["x_displacement"] = r.get("found", 0)
             results["auto_responded"] += r.get("responded", 0)
 
-        # ── Phase 4: Trigger Events (every 4th cycle) ───────────────
-        if self._cycle_count % 4 == 0:
+        # ── Phase 4: Trigger Events (every 2nd cycle, offset) ───────
+        if self._cycle_count % 2 == 1:
             r = await self._hunt_x_category("triggers")
             results["x_triggers"] = r.get("found", 0)
             results["auto_responded"] += r.get("responded", 0)
 
-        # ── Phase 5: Reddit Scanning (every 6th cycle) ──────────────
-        if self._cycle_count % 6 == 0:
+        # ── Phase 5: Watering Holes (every 3rd cycle) ───────────────
+        if self._cycle_count % 3 == 0:
+            r = await self._hunt_x_category("watering_holes")
+            results["x_watering_holes"] = r.get("found", 0)
+            results["auto_responded"] += r.get("responded", 0)
+
+        # ═══ ROTATED SOURCES (hit 2-3 per cycle) ═══════════════════
+
+        # ── Phase 6: Reddit Scanning (every 3rd cycle) ──────────────
+        if self._cycle_count % 3 == 0:
             r = await self._scan_reddit()
             results["reddit"] = r.get("found", 0)
             results["auto_responded"] += r.get("responded", 0)
 
-        # ── Phase 6: Freelance Platforms (every 8th cycle) ──────────
-        if self._cycle_count % 8 == 0:
+        # ── Phase 7: Freelance Platforms (every 4th cycle) ──────────
+        if self._cycle_count % 4 == 0:
             r = await self._scan_freelance()
             results["freelance"] = r.get("found", 0)
 
-        # ── Phase 7: Hacker News (every 12th cycle) ─────────────────
-        if self._cycle_count % 12 == 0:
+        # ── Phase 8: Hacker News (every 6th cycle) ──────────────────
+        if self._cycle_count % 6 == 0:
             r = await self._scan_hackernews()
             results["hn"] = r.get("found", 0)
 
+        # ── Phase 9: Product Hunt (every 4th cycle, offset) ─────────
+        if self._cycle_count % 4 == 2:
+            r = await self._scan_product_hunt()
+            results["product_hunt"] = r.get("found", 0)
+
+        # ── Phase 10: Indie Hackers (every 6th cycle, offset) ───────
+        if self._cycle_count % 6 == 3:
+            r = await self._scan_indie_hackers()
+            results["indie_hackers"] = r.get("found", 0)
+
+        # ── Phase 11: Job Boards (every 8th cycle) ──────────────────
+        if self._cycle_count % 8 == 0:
+            r = await self._scan_job_boards()
+            results["job_boards"] = r.get("found", 0)
+
+        # ── Phase 12: Google Alerts (every 4th cycle, offset) ───────
+        if self._cycle_count % 4 == 1:
+            r = await self._scan_google_alerts()
+            results["google_alerts"] = r.get("found", 0)
+
         # ── Tally ───────────────────────────────────────────────────
-        results["total_found"] = (
-            results["x_inbound"] + results["x_pain"] + results["x_displacement"]
-            + results["x_triggers"] + results["reddit"] + results["freelance"]
-            + results["hn"]
+        results["total_found"] = sum(
+            results[k] for k in results
+            if k not in ("cycle", "total_found", "auto_responded", "escalated")
         )
 
         # Update metrics
@@ -415,9 +675,13 @@ class OpportunityScanner:
                     )
                     escalated += 1
 
-                # Auto-respond with value
-                if opp.get("reply") and score >= 35:
-                    await self.x.reply_to(tweet.get("id", ""), opp["reply"])
+                # Auto-respond with value (use templates for high-score)
+                reply = opp.get("reply")
+                if score >= 70 and category in RESPONSE_TEMPLATES:
+                    # Use battle-tested template for high-value leads
+                    reply = random.choice(RESPONSE_TEMPLATES[category])
+                if reply and score >= 35:
+                    await self.x.reply_to(tweet.get("id", ""), reply)
                     responded += 1
                     await asyncio.sleep(random.uniform(45, 120))
 
@@ -704,6 +968,234 @@ class OpportunityScanner:
             max_tokens=100,
         )
         return result
+
+    # ════════════════════════════════════════════════════════════════
+    # PRODUCT HUNT SCANNING
+    # ════════════════════════════════════════════════════════════════
+
+    async def _scan_product_hunt(self) -> dict[str, Any]:
+        """Scan Product Hunt for new launches that need ARCANA's services.
+
+        New products launching = they need UGC, marketing, chatbots, SEO.
+        Every PH launch is a potential client.
+        """
+        found = 0
+
+        try:
+            http = await self._get_http()
+            # Product Hunt API or RSS
+            resp = await http.get(
+                "https://www.producthunt.com/feed?category=tech",
+                headers={"User-Agent": "ARCANA-AI/1.0"},
+            )
+            if resp.status_code != 200:
+                # Try alternative: PH daily feed
+                resp = await http.get("https://www.producthunt.com/feed")
+
+            if resp.status_code == 200:
+                content = resp.text[:6000]
+                opps = await self.llm.ask_json(
+                    f"Extract Product Hunt launches that need ARCANA's services.\n\n"
+                    f"Feed content:\n{content}\n\n"
+                    f"For each launch, identify if they likely need:\n"
+                    f"- UGC video production (for social ads)\n"
+                    f"- AI chatbot (for customer support)\n"
+                    f"- Social media management (to grow awareness)\n"
+                    f"- SEO content (to rank organically)\n"
+                    f"- Cold email setup (for B2B outreach)\n"
+                    f"- Landing page optimization\n\n"
+                    f"Return JSON: {{\"launches\": [\n"
+                    f'  {{"name": str, "description": str, "url": str, '
+                    f'"service_need": str, "estimated_value": int, '
+                    f'"score": int (0-100), "approach_angle": str}}\n'
+                    f"]}}",
+                    tier=Tier.HAIKU,
+                    max_tokens=500,
+                )
+                for launch in opps.get("launches", []):
+                    if launch.get("score", 0) < 30:
+                        continue
+                    name = launch.get("name", "")
+                    if self._is_seen(name):
+                        continue
+
+                    found += 1
+                    self.metrics["by_source"]["product_hunt"] = self.metrics["by_source"].get("product_hunt", 0) + 1
+
+                    self._save_opportunity(
+                        source="product_hunt",
+                        identifier=name[:30],
+                        text=f"{name}: {launch.get('description', '')[:200]}",
+                        score=launch.get("score", 50),
+                        service=launch.get("service_need", "general"),
+                        details=launch,
+                    )
+
+        except Exception as exc:
+            logger.debug("Product Hunt scan failed: %s", exc)
+
+        return {"found": found}
+
+    # ════════════════════════════════════════════════════════════════
+    # INDIE HACKERS SCANNING
+    # ════════════════════════════════════════════════════════════════
+
+    async def _scan_indie_hackers(self) -> dict[str, Any]:
+        """Scan Indie Hackers for founders who need services."""
+        found = 0
+
+        try:
+            http = await self._get_http()
+            resp = await http.get(
+                "https://www.indiehackers.com/feed.xml",
+                headers={"User-Agent": "ARCANA-AI/1.0"},
+            )
+            if resp.status_code == 200:
+                content = resp.text[:5000]
+                opps = await self.llm.ask_json(
+                    f"Extract posts from Indie Hackers where founders need help.\n\n"
+                    f"Feed:\n{content}\n\n"
+                    f"Look for: marketing struggles, growth problems, need for automation, "
+                    f"content creation, customer support scaling, SEO questions.\n\n"
+                    f"Return JSON: {{\"posts\": [\n"
+                    f'  {{"title": str, "problem": str, "service_match": str, '
+                    f'"score": int (0-100), "estimated_value": int, "url": str}}\n'
+                    f"]}}",
+                    tier=Tier.HAIKU,
+                    max_tokens=400,
+                )
+                for post in opps.get("posts", []):
+                    if post.get("score", 0) < 30 or self._is_seen(post.get("title", "")):
+                        continue
+                    found += 1
+                    self.metrics["by_source"]["indie_hackers"] = self.metrics["by_source"].get("indie_hackers", 0) + 1
+                    self._save_opportunity(
+                        source="indie_hackers",
+                        identifier=post.get("title", "")[:30],
+                        text=f"{post.get('title', '')}: {post.get('problem', '')}",
+                        score=post.get("score", 50),
+                        service=post.get("service_match", "general"),
+                        details=post,
+                    )
+
+        except Exception as exc:
+            logger.debug("Indie Hackers scan failed: %s", exc)
+
+        return {"found": found}
+
+    # ════════════════════════════════════════════════════════════════
+    # JOB BOARD SCANNING (Companies hiring = budget available)
+    # ════════════════════════════════════════════════════════════════
+
+    async def _scan_job_boards(self) -> dict[str, Any]:
+        """Scan job boards for companies hiring roles ARCANA can replace.
+
+        If a company is hiring a "social media coordinator" at $50K/yr,
+        ARCANA can do it for $1,500/mo. That's a direct pitch.
+        """
+        found = 0
+
+        term = random.choice(JOB_BOARD_TERMS)
+
+        # Check Indeed RSS / Google Jobs
+        for geo in GEO_TARGETS.get("local", [])[:1] + ["remote"]:
+            try:
+                http = await self._get_http()
+                encoded = term.replace(" ", "+")
+                geo_enc = geo.replace(" ", "+")
+                resp = await http.get(
+                    f"https://www.indeed.com/rss?q={encoded}&l={geo_enc}&sort=date&limit=10",
+                    headers={"User-Agent": "ARCANA-AI/1.0 (job-scanner)"},
+                )
+                if resp.status_code != 200:
+                    continue
+
+                content = resp.text[:4000]
+                opps = await self.llm.ask_json(
+                    f"These companies are hiring for '{term}'. Can ARCANA AI replace or supplement this hire?\n\n"
+                    f"Listings:\n{content}\n\n"
+                    f"For each, calculate:\n"
+                    f"- Salary they'd pay: ~$40-80K/yr for this role\n"
+                    f"- ARCANA's price: $500-3000/mo for the same output\n"
+                    f"- Savings: 50-80%\n\n"
+                    f"Return JSON: {{\"jobs\": [\n"
+                    f'  {{"company": str, "title": str, "salary_estimate": int, '
+                    f'"arcana_price_monthly": int, "savings_pct": int, '
+                    f'"service_match": str, "score": int (0-100), "pitch": str}}\n'
+                    f"]}}",
+                    tier=Tier.HAIKU,
+                    max_tokens=400,
+                )
+                for job in opps.get("jobs", []):
+                    if job.get("score", 0) < 40 or self._is_seen(job.get("company", "")):
+                        continue
+                    found += 1
+                    self.metrics["by_source"]["job_boards"] = self.metrics["by_source"].get("job_boards", 0) + 1
+                    self._save_opportunity(
+                        source="job_boards",
+                        identifier=f"{job.get('company', '')[:20]}-{term[:10]}",
+                        text=f"{job.get('company', '')} hiring {term} — ARCANA can do it for ${job.get('arcana_price_monthly', 0)}/mo",
+                        score=job.get("score", 50),
+                        service=job.get("service_match", "social"),
+                        details=job,
+                    )
+
+                await asyncio.sleep(random.uniform(2, 5))
+
+            except Exception as exc:
+                logger.debug("Job board scan failed: %s", exc)
+
+        return {"found": found}
+
+    # ════════════════════════════════════════════════════════════════
+    # GOOGLE ALERTS SCANNING
+    # ════════════════════════════════════════════════════════════════
+
+    async def _scan_google_alerts(self) -> dict[str, Any]:
+        """Check Google Alerts RSS feeds for relevant opportunities."""
+        found = 0
+
+        keyword = random.choice(GOOGLE_ALERT_KEYWORDS)
+        encoded = keyword.replace(" ", "+")
+
+        try:
+            http = await self._get_http()
+            resp = await http.get(
+                f"https://www.google.com/alerts/feeds/{encoded}",
+                headers={"User-Agent": "ARCANA-AI/1.0"},
+            )
+            if resp.status_code == 200:
+                content = resp.text[:4000]
+                opps = await self.llm.ask_json(
+                    f"Extract business opportunities from these Google Alert results.\n\n"
+                    f"Keyword: {keyword}\nContent:\n{content}\n\n"
+                    f"Look for: businesses seeking services, RFPs, partnership opportunities, "
+                    f"companies with problems ARCANA solves.\n\n"
+                    f"Return JSON: {{\"alerts\": [\n"
+                    f'  {{"title": str, "url": str, "opportunity": str, '
+                    f'"service_match": str, "score": int (0-100), "estimated_value": int}}\n'
+                    f"]}}",
+                    tier=Tier.HAIKU,
+                    max_tokens=300,
+                )
+                for alert in opps.get("alerts", []):
+                    if alert.get("score", 0) < 30 or self._is_seen(alert.get("title", "")):
+                        continue
+                    found += 1
+                    self.metrics["by_source"]["google_alerts"] = self.metrics["by_source"].get("google_alerts", 0) + 1
+                    self._save_opportunity(
+                        source="google_alerts",
+                        identifier=alert.get("title", "")[:30],
+                        text=f"{alert.get('title', '')}: {alert.get('opportunity', '')}",
+                        score=alert.get("score", 50),
+                        service=alert.get("service_match", "general"),
+                        details=alert,
+                    )
+
+        except Exception as exc:
+            logger.debug("Google Alerts scan failed: %s", exc)
+
+        return {"found": found}
 
     # ════════════════════════════════════════════════════════════════
     # QUALIFICATION ENGINE
@@ -998,13 +1490,24 @@ class OpportunityScanner:
     def format_scanner_report(self) -> str:
         """Format scanner metrics for morning/nightly report."""
         summary = self.get_pipeline_summary()
+        active_sources = sum(1 for v in self.metrics['by_source'].values() if v > 0)
+        total_queries = sum(len(q) for q in X_HUNT_QUERIES.values()) + len(PAIN_QUERIES)
         return (
-            f"**Opportunity Scanner**\n"
+            f"**Opportunity Scanner** (Cycle #{self._cycle_count})\n"
             f"Pipeline: {summary['total_opportunities']} opportunities "
             f"(${summary['estimated_pipeline_value_monthly']:,.0f}/mo est. value)\n"
             f"Today: {self.metrics['opportunities_found']} found, "
             f"{self.metrics['auto_responded']} responded, "
-            f"{self.metrics['escalated_to_humans']} escalated\n"
-            f"Top sources: {', '.join(f'{k}({v})' for k, v in sorted(self.metrics['by_source'].items(), key=lambda x: -x[1])[:3]) or 'N/A'}\n"
-            f"Top services: {', '.join(f'{k}({v})' for k, v in sorted(self.metrics['by_service'].items(), key=lambda x: -x[1])[:3]) or 'N/A'}"
+            f"{self.metrics['escalated_to_humans']} escalated, "
+            f"{self.metrics['proposals_sent']} proposals\n"
+            f"Active sources: {active_sources}/12 | Query library: {total_queries} queries\n"
+            f"Sources: X({self.metrics['by_source'].get('x_ugc', 0) + self.metrics['by_source'].get('x_chatbot', 0) + self.metrics['by_source'].get('x_social', 0) + self.metrics['by_source'].get('x_pain', 0)}) "
+            f"Reddit({self.metrics['by_source'].get('reddit', 0)}) "
+            f"Freelance({self.metrics['by_source'].get('freelance', 0)}) "
+            f"HN({self.metrics['by_source'].get('hn', 0)}) "
+            f"PH({self.metrics['by_source'].get('product_hunt', 0)}) "
+            f"IH({self.metrics['by_source'].get('indie_hackers', 0)}) "
+            f"Jobs({self.metrics['by_source'].get('job_boards', 0)}) "
+            f"Alerts({self.metrics['by_source'].get('google_alerts', 0)})\n"
+            f"Top services: {', '.join(f'{k}({v})' for k, v in sorted(self.metrics['by_service'].items(), key=lambda x: -x[1])[:5]) or 'N/A'}"
         )
