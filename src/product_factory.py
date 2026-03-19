@@ -3,11 +3,14 @@
 Creates and lists digital products without human involvement:
 1. Identify demand signals from audience/scanner
 2. Generate product content (guides, templates, prompts, courses)
-3. Package as PDF / Notion template / ZIP
+3. Package as professional PDF with QR codes
 4. List on Gumroad with copy and pricing
-5. Create checkout links on Stripe
-6. Announce on X + newsletter
-7. Deliver to purchasers automatically
+5. Create Stripe products with payment links (one-time + subscriptions)
+6. Generate HTML landing pages
+7. Generate email sequences for nurturing
+8. Announce on X + newsletter
+9. Generate Excel reports of product performance
+10. Create service packages with scope documents
 
 Products ARCANA can create:
 - PDF guides ($29-99)
@@ -15,14 +18,19 @@ Products ARCANA can create:
 - Template packs ($29-79)
 - Automation playbooks ($49-149)
 - Video courses ($99-299)
-- Service packages (custom priced)
+- Service packages ($2K-10K/mo)
+- Consulting proposals (custom priced)
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+import httpx
 
 from src.llm import LLM, Tier
 from src.memory import Memory
@@ -257,3 +265,547 @@ class ProductFactory:
         )
 
         return listing
+
+    # ── PDF Packaging ─────────────────────────────────────────────────
+
+    async def package_as_pdf(
+        self, content: dict[str, Any], output_dir: str = "data/products",
+    ) -> dict[str, str | None]:
+        """Convert generated product content into a professional PDF + QR code.
+
+        Accepts output from generate_guide(), generate_prompt_library(), or
+        generate_template_pack() and produces a downloadable PDF.
+        """
+        from src.toolkit import generate_pdf, generate_qr_code, slugify
+
+        title = content.get("title", "Untitled Product")
+        slug = slugify(title)
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Build content blocks for PDF
+        blocks: list[dict[str, str]] = []
+
+        if content.get("subtitle"):
+            blocks.append({"type": "paragraph", "text": f"<i>{content['subtitle']}</i>"})
+
+        # Handle guide/playbook format (chapters)
+        for chapter in content.get("chapters", []):
+            blocks.append({"type": "heading", "text": chapter.get("title", "")})
+            blocks.append({"type": "paragraph", "text": chapter.get("content", "")})
+            for takeaway in chapter.get("takeaways", []):
+                blocks.append({"type": "bullet", "text": takeaway})
+
+        # Handle prompt library format (categories → prompts)
+        for category in content.get("categories", []):
+            blocks.append({"type": "heading", "text": category.get("name", "")})
+            for prompt in category.get("prompts", []):
+                blocks.append({"type": "heading", "text": f"→ {prompt.get('title', '')}"})
+                blocks.append({"type": "paragraph", "text": prompt.get("prompt", "")})
+                if prompt.get("use_case"):
+                    blocks.append({"type": "paragraph", "text": f"Use case: {prompt['use_case']}"})
+
+        # Handle template pack format (templates)
+        for tmpl in content.get("templates", []):
+            blocks.append({"type": "heading", "text": tmpl.get("name", "")})
+            if tmpl.get("type"):
+                blocks.append({"type": "paragraph", "text": f"Type: {tmpl['type']}"})
+            blocks.append({"type": "paragraph", "text": tmpl.get("content", "")})
+            if tmpl.get("instructions"):
+                blocks.append({"type": "paragraph", "text": f"Instructions: {tmpl['instructions']}"})
+
+        # Footer
+        blocks.append({"type": "heading", "text": "About Arcana Operations"})
+        blocks.append({"type": "paragraph", "text": (
+            "Arcana Operations LLC is an AI consulting firm based in Portland, OR. "
+            "We build autonomous AI agents, marketing systems, and business automations. "
+            "Visit arcanaoperations.com for consulting inquiries."
+        )})
+
+        # Generate PDF
+        pdf_path = out_dir / f"{slug}.pdf"
+        success = generate_pdf(title, blocks, pdf_path, author="Arcana Operations LLC")
+
+        # Generate QR code
+        qr_path = out_dir / f"{slug}-qr.png"
+        generate_qr_code(f"https://arcanaoperations.com/products/{slug}", qr_path)
+
+        result = {
+            "pdf_path": str(pdf_path) if success else None,
+            "qr_path": str(qr_path),
+            "slug": slug,
+            "word_count": content.get("total_word_count", 0),
+        }
+
+        self.memory.log(f"[Product] PDF packaged: {title} → {pdf_path}", "Products")
+        return result
+
+    # ── Stripe Product + Payment Link Creation ────────────────────────
+
+    async def create_stripe_product(
+        self,
+        name: str,
+        price_cents: int,
+        description: str = "",
+        recurring: bool = False,
+        interval: str = "month",
+    ) -> dict[str, Any]:
+        """Create a product + price on Stripe with a payment link.
+
+        Works for both one-time purchases (digital products) and
+        recurring subscriptions (service packages).
+        """
+        stripe_key = self.payments.config.stripe_secret_key if hasattr(self.payments, 'config') else ""
+        if not stripe_key:
+            return {"status": "dry_run", "note": "No Stripe key"}
+
+        headers = {"Authorization": f"Bearer {stripe_key}"}
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # Create product
+                prod_resp = await client.post(
+                    "https://api.stripe.com/v1/products",
+                    headers=headers,
+                    data={"name": name, "description": description or name},
+                )
+                prod_resp.raise_for_status()
+                product_id = prod_resp.json().get("id")
+
+                # Create price
+                price_data: dict[str, Any] = {
+                    "product": product_id,
+                    "unit_amount": price_cents,
+                    "currency": "usd",
+                }
+                if recurring:
+                    price_data["recurring[interval]"] = interval
+
+                price_resp = await client.post(
+                    "https://api.stripe.com/v1/prices",
+                    headers=headers,
+                    data=price_data,
+                )
+                price_resp.raise_for_status()
+                price_id = price_resp.json().get("id")
+
+                # Create payment link
+                link_resp = await client.post(
+                    "https://api.stripe.com/v1/payment_links",
+                    headers=headers,
+                    data={
+                        "line_items[0][price]": price_id,
+                        "line_items[0][quantity]": 1,
+                    },
+                )
+                link_resp.raise_for_status()
+                payment_url = link_resp.json().get("url", "")
+
+                self.memory.log(
+                    f"[Product] Stripe product: {name} (${price_cents/100}, "
+                    f"{'recurring' if recurring else 'one-time'}) → {payment_url}",
+                    "Products",
+                )
+                self.memory.save_knowledge(
+                    "projects", f"stripe-{name[:30].lower().replace(' ', '-')}",
+                    f"# Stripe Product: {name}\n\n"
+                    f"- Product ID: {product_id}\n"
+                    f"- Price ID: {price_id}\n"
+                    f"- Payment Link: {payment_url}\n"
+                    f"- Amount: ${price_cents/100}\n"
+                    f"- Type: {'Subscription (' + interval + ')' if recurring else 'One-time'}\n"
+                    f"- Created: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n",
+                )
+
+                return {
+                    "status": "live",
+                    "product_id": product_id,
+                    "price_id": price_id,
+                    "payment_url": payment_url,
+                }
+        except Exception as exc:
+            logger.error("Stripe product creation failed: %s", exc)
+            return {"status": "error", "error": str(exc)}
+
+    # ── Service Package Creation ──────────────────────────────────────
+
+    async def create_service_package(
+        self,
+        service_name: str,
+        price_monthly: int,
+        scope: str,
+        deliverables: list[str],
+    ) -> dict[str, Any]:
+        """Create a consulting service package: scope doc PDF + Stripe subscription."""
+        # Generate professional scope document
+        scope_doc = await self.llm.ask_json(
+            f"Create a professional service package for Arcana Operations.\n\n"
+            f"Service: {service_name}\n"
+            f"Monthly price: ${price_monthly:,}\n"
+            f"Scope: {scope}\n"
+            f"Deliverables: {json.dumps(deliverables)}\n\n"
+            f"Return JSON: {{\n"
+            f'  "title": str,\n'
+            f'  "tagline": str,\n'
+            f'  "description": str (2-3 paragraphs),\n'
+            f'  "deliverables": [str],\n'
+            f'  "timeline": str,\n'
+            f'  "whats_included": [str],\n'
+            f'  "whats_not_included": [str],\n'
+            f'  "ideal_for": str\n'
+            f"}}",
+            tier=Tier.SONNET,
+        )
+
+        # Create Stripe subscription product
+        stripe_result = await self.create_stripe_product(
+            name=service_name,
+            price_cents=price_monthly * 100,
+            description=scope_doc.get("description", scope),
+            recurring=True,
+            interval="month",
+        )
+
+        # Generate PDF scope document
+        from src.toolkit import generate_pdf, slugify
+        slug = slugify(service_name)
+        pdf_dir = Path("data/services")
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+
+        blocks = [
+            {"type": "paragraph", "text": scope_doc.get("tagline", "")},
+            {"type": "paragraph", "text": scope_doc.get("description", "")},
+            {"type": "heading", "text": "Deliverables"},
+        ]
+        for d in scope_doc.get("deliverables", deliverables):
+            blocks.append({"type": "bullet", "text": d})
+        blocks.append({"type": "heading", "text": "What's Included"})
+        for item in scope_doc.get("whats_included", []):
+            blocks.append({"type": "bullet", "text": item})
+        if scope_doc.get("whats_not_included"):
+            blocks.append({"type": "heading", "text": "Out of Scope"})
+            for item in scope_doc["whats_not_included"]:
+                blocks.append({"type": "bullet", "text": item})
+        blocks.append({"type": "heading", "text": "Investment"})
+        blocks.append({"type": "paragraph", "text": f"${price_monthly:,}/month"})
+        blocks.append({"type": "paragraph", "text": f"Ideal for: {scope_doc.get('ideal_for', '')}"})
+
+        pdf_path = pdf_dir / f"{slug}-scope.pdf"
+        generate_pdf(scope_doc.get("title", service_name), blocks, pdf_path)
+
+        self.memory.log(
+            f"[Product] Service package: {service_name} (${price_monthly:,}/mo) → {pdf_path}",
+            "Products",
+        )
+
+        return {
+            "scope_doc": scope_doc,
+            "stripe": stripe_result,
+            "pdf_path": str(pdf_path),
+        }
+
+    # ── Landing Page Generation ───────────────────────────────────────
+
+    async def generate_landing_page(
+        self,
+        product_name: str,
+        description: str,
+        price: str,
+        purchase_url: str,
+        bullet_points: list[str] | None = None,
+    ) -> str:
+        """Generate a complete HTML landing page for a product."""
+        result = await self.llm.ask(
+            f"Create a complete, modern HTML landing page.\n\n"
+            f"Product: {product_name}\n"
+            f"Description: {description}\n"
+            f"Price: {price}\n"
+            f"Purchase URL: {purchase_url}\n"
+            f"Key benefits: {json.dumps(bullet_points or [])}\n\n"
+            f"Requirements:\n"
+            f"- Single HTML file with inline CSS\n"
+            f"- Hero section with headline, subheadline, CTA button\n"
+            f"- Benefits section (3-4 key benefits)\n"
+            f"- What's included section\n"
+            f"- FAQ section (4-5 questions)\n"
+            f"- Final CTA with money-back guarantee\n"
+            f"- Footer with Arcana Operations branding\n"
+            f"- Mobile responsive, clean professional design\n\n"
+            f"Return ONLY the HTML code.",
+            tier=Tier.SONNET,
+            temperature=0.5,
+        )
+
+        from src.toolkit import slugify
+        slug = slugify(product_name)
+        page_dir = Path("data/landing_pages")
+        page_dir.mkdir(parents=True, exist_ok=True)
+        page_path = page_dir / f"{slug}.html"
+        page_path.write_text(result)
+
+        self.memory.log(
+            f"[Product] Landing page: {product_name} → {page_path}", "Products",
+        )
+        return str(page_path)
+
+    # ── Email Sequence Generation ─────────────────────────────────────
+
+    async def generate_email_sequence(
+        self,
+        product_name: str,
+        price: str,
+        purchase_url: str,
+        sequence_type: str = "launch",
+    ) -> list[dict[str, str]]:
+        """Generate an email sequence for product launch or nurturing.
+
+        Types: "launch" (announce + urgency), "welcome" (post-purchase),
+               "nurture" (warm leads), "abandoned" (cart recovery)
+        """
+        result = await self.llm.ask_json(
+            f"Create a {sequence_type} email sequence for this product.\n\n"
+            f"Product: {product_name}\n"
+            f"Price: {price}\n"
+            f"Purchase URL: {purchase_url}\n\n"
+            f"Sequence type: {sequence_type}\n"
+            f"Write in ARCANA's voice — confident, analytical, practical.\n\n"
+            f"Return JSON: {{\n"
+            f'  "emails": [{{\n'
+            f'    "subject": str,\n'
+            f'    "preview_text": str (email preview text),\n'
+            f'    "body_html": str (email body with HTML formatting),\n'
+            f'    "send_delay_hours": int (hours after trigger to send),\n'
+            f'    "purpose": str (what this email achieves)\n'
+            f"  }}]\n"
+            f"}}",
+            tier=Tier.SONNET,
+        )
+
+        emails = result.get("emails", [])
+        self.memory.log(
+            f"[Product] Email sequence ({sequence_type}): {len(emails)} emails for {product_name}",
+            "Products",
+        )
+        return emails
+
+    # ── Affiliate Link Generator ──────────────────────────────────────
+
+    async def generate_affiliate_links(
+        self,
+        product_topic: str,
+    ) -> list[dict[str, str]]:
+        """Identify relevant affiliate products to recommend alongside our product."""
+        result = await self.llm.ask_json(
+            f"Identify 5-10 tools/products related to '{product_topic}' that have "
+            f"affiliate programs. ARCANA can earn commission by recommending these.\n\n"
+            f"Focus on: SaaS tools, AI platforms, hosting, courses, books.\n\n"
+            f"Return JSON: {{\n"
+            f'  "affiliates": [{{\n'
+            f'    "product_name": str,\n'
+            f'    "category": str,\n'
+            f'    "typical_commission": str,\n'
+            f'    "relevance": str (why it fits),\n'
+            f'    "signup_url": str (affiliate program page)\n'
+            f"  }}]\n"
+            f"}}",
+            tier=Tier.HAIKU,
+        )
+        return result.get("affiliates", [])
+
+    # ── Product Performance Report ────────────────────────────────────
+
+    async def generate_product_report(self, output_path: str = "data/reports/products.xlsx") -> str | None:
+        """Generate an Excel report of all products and their performance."""
+        from src.toolkit import generate_excel
+
+        catalog = self.get_product_catalog()
+        if not catalog:
+            return None
+
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        success = generate_excel(catalog, output_path, sheet_name="Product Catalog")
+        return output_path if success else None
+
+    # ── Product Catalog ───────────────────────────────────────────────
+
+    def get_product_catalog(self) -> list[dict[str, str]]:
+        """Get all products from memory."""
+        products = []
+        projects_dir = Path("memory/life/projects")
+        if projects_dir.exists():
+            for f in sorted(projects_dir.glob("product-*.md")):
+                content = f.read_text()
+                name = f.stem.replace("product-", "").replace("-", " ").title()
+                # Extract key fields
+                price = ""
+                url = ""
+                for line in content.splitlines():
+                    if "price:" in line.lower():
+                        price = line.split(":", 1)[1].strip()
+                    if "url:" in line.lower() or "link:" in line.lower():
+                        url = line.split(":", 1)[1].strip()
+                products.append({
+                    "Name": name,
+                    "Price": price,
+                    "URL": url,
+                    "File": f.name,
+                })
+        return products
+
+    # ── Full Pipeline v2: Idea → Content → PDF → Listing → Landing → Emails ──
+
+    async def create_product_full_pipeline(
+        self,
+        name: str | None = None,
+        product_type: str = "guide",
+        price_cents: int = 4900,
+        platform: str = "gumroad",
+    ) -> dict[str, Any]:
+        """Complete autonomous product creation — from idea to sellable product.
+
+        If no name given, auto-identifies the best product opportunity.
+        Creates: content, PDF, platform listing, landing page, email sequence, launch tweets.
+        """
+        logger.info("Starting full product pipeline%s", f": {name}" if name else "")
+
+        # 1. Identify opportunity if no name given
+        if not name:
+            opportunity = await self.identify_product_opportunity()
+            name = opportunity.get("product_name", "Arcana AI Guide")
+            product_type = opportunity.get("product_type", "guide")
+            price_cents = opportunity.get("price_cents", 4900)
+            topics = opportunity.get("key_topics", [])
+            audience = opportunity.get("target_audience", "business owners")
+        else:
+            topics = []
+            audience = "business owners and operators"
+
+        # 2. Generate content
+        if product_type in ("guide", "playbook"):
+            content = await self.generate_guide(name, topics or [name], audience)
+        elif product_type == "prompt_library":
+            content = await self.generate_prompt_library(audience)
+        elif product_type == "template_pack":
+            content = await self.generate_template_pack(audience, topics or [name])
+        else:
+            content = await self.generate_guide(name, topics or [name], audience)
+
+        # 3. Package as PDF
+        pdf_result = await self.package_as_pdf(content)
+
+        # 4. Generate listing copy
+        copy = await self.llm.ask_json(
+            f"Generate product listing copy for this product.\n\n"
+            f"Product: {name}\n"
+            f"Type: {product_type}\n"
+            f"Price: ${price_cents/100:.0f}\n\n"
+            f"Return JSON: {{"
+            f'"title": str, "subtitle": str, '
+            f'"description_html": str, '
+            f'"bullet_points": [str], '
+            f'"cta_text": str, '
+            f'"guarantee": str}}',
+            tier=Tier.SONNET,
+        )
+
+        # 5. List on platform
+        listing: dict[str, Any] = {"name": name, "price": price_cents / 100}
+        description = copy.get("description_html", "")
+
+        if platform == "gumroad":
+            gumroad = await self.payments.create_gumroad_product(
+                name=name, description=description, price_cents=price_cents,
+            )
+            if gumroad:
+                listing["gumroad_url"] = gumroad.get("short_url")
+                listing["gumroad_id"] = gumroad.get("id")
+
+        if platform in ("stripe", "both"):
+            stripe = await self.create_stripe_product(
+                name=name, price_cents=price_cents, description=description,
+            )
+            listing["stripe"] = stripe
+
+        purchase_url = listing.get("gumroad_url") or listing.get("stripe", {}).get("payment_url", "")
+
+        # 6. Generate landing page
+        landing_page = await self.generate_landing_page(
+            product_name=name,
+            description=description,
+            price=f"${price_cents/100:.0f}",
+            purchase_url=purchase_url or "https://arcanaoperations.com",
+            bullet_points=copy.get("bullet_points", []),
+        )
+
+        # 7. Generate email sequences
+        launch_emails = await self.generate_email_sequence(
+            product_name=name,
+            price=f"${price_cents/100:.0f}",
+            purchase_url=purchase_url or "https://arcanaoperations.com",
+            sequence_type="launch",
+        )
+        welcome_emails = await self.generate_email_sequence(
+            product_name=name,
+            price=f"${price_cents/100:.0f}",
+            purchase_url=purchase_url or "https://arcanaoperations.com",
+            sequence_type="welcome",
+        )
+
+        # 8. Generate launch tweet
+        launch_tweet = await self.llm.ask(
+            f"Write a product launch tweet for ARCANA AI.\n\n"
+            f"Product: {name} (${price_cents/100:.0f})\n"
+            f"Type: {product_type}\n\n"
+            f"Rules: Under 280 chars, ARCANA voice, create urgency.\n"
+            f"No link in main tweet (goes in reply).",
+            tier=Tier.HAIKU, max_tokens=100,
+        )
+
+        # 9. Identify affiliate opportunities
+        affiliates = await self.generate_affiliate_links(name)
+
+        # 10. Save comprehensive product record
+        self.memory.save_knowledge(
+            "projects", f"product-{name[:30].lower().replace(' ', '-')}",
+            f"# Product: {name}\n\n"
+            f"- Type: {product_type}\n"
+            f"- Price: ${price_cents/100:.0f}\n"
+            f"- PDF: {pdf_result.get('pdf_path', 'N/A')}\n"
+            f"- Landing: {landing_page}\n"
+            f"- Gumroad: {listing.get('gumroad_url', 'N/A')}\n"
+            f"- Stripe: {listing.get('stripe', {}).get('payment_url', 'N/A')}\n"
+            f"- Launch emails: {len(launch_emails)}\n"
+            f"- Welcome emails: {len(welcome_emails)}\n"
+            f"- Affiliates identified: {len(affiliates)}\n"
+            f"- Created: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n",
+        )
+
+        self.memory.log(
+            f"[Product] FULL PIPELINE COMPLETE: {name} @ ${price_cents/100:.0f}\n"
+            f"  PDF: {pdf_result.get('pdf_path')}\n"
+            f"  Landing: {landing_page}\n"
+            f"  Emails: {len(launch_emails)} launch + {len(welcome_emails)} welcome\n"
+            f"  Affiliates: {len(affiliates)}",
+            "Products",
+        )
+
+        return {
+            "status": "created",
+            "name": name,
+            "type": product_type,
+            "price": price_cents / 100,
+            "content": {
+                "chapters": len(content.get("chapters", content.get("categories", content.get("templates", [])))),
+                "word_count": content.get("total_word_count", 0),
+            },
+            "pdf": pdf_result,
+            "copy": copy,
+            "listing": listing,
+            "landing_page": landing_page,
+            "emails": {
+                "launch": launch_emails,
+                "welcome": welcome_emails,
+            },
+            "launch_tweet": launch_tweet.strip(),
+            "affiliates": affiliates,
+        }
