@@ -171,39 +171,43 @@ class UGCEngine:
         num_variants: int = 3,
     ) -> list[dict[str, Any]]:
         """Generate multiple script variants for a product. The hook is everything."""
-        result = await self.llm.ask_json(
-            f"Generate {num_variants} UGC video scripts for this product.\n\n"
-            f"Product: {product_name}\n"
-            f"Description: {product_description}\n"
-            f"Target audience: {target_audience}\n"
-            f"Key benefits: {', '.join(key_benefits)}\n"
-            f"Style: {style.value}\n\n"
-            f"UGC RULES (critical for performance):\n"
-            f"- HOOK (first 3 seconds): Must stop the scroll. Pattern interrupt.\n"
-            f"  Best hooks: 'Stop scrolling if you...', 'POV: you just discovered...', \n"
-            f"  'I was today years old when...', controversial opinion, shocking stat\n"
-            f"- BODY (15-30 seconds): One benefit at a time. Show, don't tell.\n"
-            f"  Social proof > features. 'I've been using this for 2 weeks and...'\n"
-            f"- CTA (5 seconds): Clear, urgent, specific. 'Link in bio', \n"
-            f"  'Use code X for 20% off', 'Comment WANT and I'll DM you'\n"
-            f"- Total length: 30-60 seconds (45s optimal for most platforms)\n"
-            f"- Speak naturally — NOT like a commercial. Conversational, real.\n"
-            f"- Include pauses, filler words, slight imperfections = more authentic\n"
-            f"- Each variant should have a DIFFERENT hook angle\n\n"
-            f"Return JSON: {{\"scripts\": [\n"
-            f"  {{\n"
-            f"    \"variant\": int,\n"
-            f"    \"hook_type\": str (controversy/shock/pov/question/story),\n"
-            f"    \"hook\": str (first 3 seconds — the scroll-stopper),\n"
-            f"    \"body\": str (main content, 15-30 seconds),\n"
-            f"    \"cta\": str (call to action, 5 seconds),\n"
-            f"    \"full_script\": str (complete script for TTS),\n"
-            f"    \"estimated_seconds\": int,\n"
-            f"    \"platform_notes\": str (which platform this variant is best for)\n"
-            f"  }}\n"
-            f"]}}",
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Generate {num_variants} UGC video scripts for this product.\n\n"
+                f"Product: {product_name}\n"
+                f"Description: {product_description}\n"
+                f"Target audience: {target_audience}\n"
+                f"Key benefits: {', '.join(key_benefits)}\n"
+                f"Style: {style.value}\n\n"
+                f"UGC RULES (critical for performance):\n"
+                f"- HOOK (first 3 seconds): Must stop the scroll. Pattern interrupt.\n"
+                f"  Best hooks: 'Stop scrolling if you...', 'POV: you just discovered...', \n"
+                f"  'I was today years old when...', controversial opinion, shocking stat\n"
+                f"- BODY (15-30 seconds): One benefit at a time. Show, don't tell.\n"
+                f"  Social proof > features. 'I've been using this for 2 weeks and...'\n"
+                f"- CTA (5 seconds): Clear, urgent, specific. 'Link in bio', \n"
+                f"  'Use code X for 20% off', 'Comment WANT and I'll DM you'\n"
+                f"- Total length: 30-60 seconds (45s optimal for most platforms)\n"
+                f"- Speak naturally — NOT like a commercial. Conversational, real.\n"
+                f"- Include pauses, filler words, slight imperfections = more authentic\n"
+                f"- Each variant should have a DIFFERENT hook angle\n\n"
+                f"Return JSON: {{\"scripts\": [\n"
+                f"  {{\n"
+                f"    \"variant\": int,\n"
+                f"    \"hook_type\": str (controversy/shock/pov/question/story),\n"
+                f"    \"hook\": str (first 3 seconds — the scroll-stopper),\n"
+                f"    \"body\": str (main content, 15-30 seconds),\n"
+                f"    \"cta\": str (call to action, 5 seconds),\n"
+                f"    \"full_script\": str (complete script for TTS),\n"
+                f"    \"estimated_seconds\": int,\n"
+                f"    \"platform_notes\": str (which platform this variant is best for)\n"
+                f"  }}\n"
+                f"]}}",
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("generate_scripts ask_json failed: %s", exc)
+            return []
 
         scripts = result.get("scripts", [])
         self.memory.log(

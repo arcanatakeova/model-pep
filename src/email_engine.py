@@ -90,6 +90,10 @@ class EmailEngine:
         if reply_to:
             payload["reply_to"] = {"email": reply_to}
 
+        if not payload.get("content"):
+            logger.error("Cannot send email with empty content to %s", to_email)
+            return False
+
         client = await self._get_client()
         resp = await client.post(
             "https://api.sendgrid.com/v3/mail/send",
@@ -100,12 +104,10 @@ class EmailEngine:
             json=payload,
         )
         resp.raise_for_status()
-        success = resp.status_code in (200, 201, 202)
-        if success:
-            self.memory.log(f"[Email] Sent to {to_email}: {subject}", "Email")
-        else:
-            logger.error("SendGrid failed: %s %s", resp.status_code, resp.text[:200])
-        return success
+        # If we get here, it's 2xx
+        logger.info("Email sent to %s", to_email)
+        self.memory.log(f"[Email] Sent to {to_email}: {subject}", "Email")
+        return True
 
     async def send_product_delivery(
         self, to_email: str, product_name: str, download_url: str,
@@ -229,12 +231,10 @@ class EmailEngine:
             json=payload,
         )
         resp.raise_for_status()
-        if resp.status_code in (200, 201):
-            data = resp.json()
-            self.memory.log(f"[Outreach] Campaign created: {name}", "Outreach")
-            return data
-        logger.error("Instantly create failed: %s", resp.text[:200])
-        return None
+        # If we get here, it's 2xx
+        data = resp.json()
+        self.memory.log(f"[Outreach] Campaign created: {name}", "Outreach")
+        return data
 
     @retry()
     async def add_leads_to_campaign(
@@ -254,12 +254,11 @@ class EmailEngine:
             },
         )
         resp.raise_for_status()
-        success = resp.status_code in (200, 201)
-        if success:
-            self.memory.log(
-                f"[Outreach] Added {len(leads)} leads to campaign {campaign_id}", "Outreach"
-            )
-        return success
+        # If we get here, it's 2xx
+        self.memory.log(
+            f"[Outreach] Added {len(leads)} leads to campaign {campaign_id}", "Outreach"
+        )
+        return True
 
     async def get_campaign_stats(self, campaign_id: str) -> dict[str, Any]:
         """Get campaign performance stats from Instantly."""

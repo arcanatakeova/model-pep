@@ -122,6 +122,9 @@ class ArcanaBot(discord.Client):
         logger.info("Slash commands synced")
 
     async def on_ready(self) -> None:
+        if not self.user:
+            logger.error("Bot user not set in on_ready")
+            return
         logger.info("ARCANA Discord bot online as %s (ID: %s)", self.user, self.user.id)
         await self._resolve_channels()
         await self._resolve_components()
@@ -396,6 +399,8 @@ class ArcanaBot(discord.Client):
                 entries: list[tuple[int, str, str]] = []
                 for key in lead_keys:
                     data = self.memory.get_knowledge("projects", key)
+                    if not data:
+                        continue
                     score = 0
                     summary_parts: list[str] = []
                     for line in data.splitlines():

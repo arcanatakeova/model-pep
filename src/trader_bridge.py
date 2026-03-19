@@ -84,14 +84,14 @@ class TraderBridge:
     def get_equity_curve(self) -> list[dict[str, Any]]:
         """Read equity curve snapshots."""
         data = self._read_json(EQUITY_FILE)
-        if not data:
+        if data is None:
             return []
         return data if isinstance(data, list) else data.get("snapshots", [])
 
     def get_dex_positions(self) -> list[dict[str, Any]]:
         """Read open DEX/memecoin positions."""
         data = self._read_json(DEX_POSITIONS_FILE)
-        if not data:
+        if data is None:
             return []
         return data if isinstance(data, list) else []
 
@@ -161,9 +161,14 @@ class TraderBridge:
     def get_monthly_trading_revenue(self) -> float:
         """Calculate trading revenue for current month."""
         data = self._read_json(TRADES_FILE)
-        if not data:
+        if data is None:
             return 0.0
-        history = data.get("history", [])
+        if isinstance(data, list):
+            history = data
+        elif isinstance(data, dict):
+            history = data.get("history", [])
+        else:
+            return 0.0
         now = datetime.now(timezone.utc)
         month_prefix = now.strftime("%Y-%m")
         month_pnl = sum(
