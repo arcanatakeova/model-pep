@@ -556,17 +556,21 @@ class UGCEngine:
 
     async def repurpose_tweet_to_video(self, tweet_text: str) -> dict[str, Any]:
         """Turn a high-performing tweet into a UGC video."""
-        script_result = await self.llm.ask_json(
-            f"Convert this tweet into a 30-second UGC video script.\n\n"
-            f"Tweet: {tweet_text}\n\n"
-            f"Rules:\n"
-            f"- Start with a hook that captures the tweet's insight\n"
-            f"- Expand the tweet into conversational speech (not reading it verbatim)\n"
-            f"- End with a CTA to follow for more insights\n"
-            f"- Keep ARCANA's voice: confident, pattern-focused, no hype\n\n"
-            f"Return JSON: {{\"script\": str, \"hook\": str, \"estimated_seconds\": int}}",
-            tier=Tier.HAIKU,
-        )
+        try:
+            script_result = await self.llm.ask_json(
+                f"Convert this tweet into a 30-second UGC video script.\n\n"
+                f"Tweet: {tweet_text}\n\n"
+                f"Rules:\n"
+                f"- Start with a hook that captures the tweet's insight\n"
+                f"- Expand the tweet into conversational speech (not reading it verbatim)\n"
+                f"- End with a CTA to follow for more insights\n"
+                f"- Keep ARCANA's voice: confident, pattern-focused, no hype\n\n"
+                f"Return JSON: {{\"script\": str, \"hook\": str, \"estimated_seconds\": int}}",
+                tier=Tier.HAIKU,
+            )
+        except Exception as exc:
+            logger.error("repurpose_tweet_to_video ask_json failed: %s", exc)
+            return {"script": "", "hook": "", "estimated_seconds": 0}
         return script_result
 
     async def generate_ad_creative_set(
@@ -705,20 +709,24 @@ class UGCEngine:
                     client_name = line.replace("# UGC Client:", "").strip()
 
         # Use LLM to parse revision notes into actionable changes
-        revision_plan = await self.llm.ask_json(
-            f"A UGC video client has requested revisions.\n\n"
-            f"Client: {client_name}\n"
-            f"Video ID: {video_id}\n"
-            f"Revision notes: {notes}\n\n"
-            f"Categorize the requested changes and create an action plan.\n\n"
-            f"Return JSON: {{"
-            f'"changes": [{{"type": "script"|"avatar"|"voice"|"pacing"|"cta"|"hook"|"other", '
-            f'"description": str, "difficulty": "easy"|"medium"|"hard"}}], '
-            f'"requires_re_render": bool, '
-            f'"estimated_time_minutes": int, '
-            f'"summary": str}}',
-            tier=Tier.HAIKU,
-        )
+        try:
+            revision_plan = await self.llm.ask_json(
+                f"A UGC video client has requested revisions.\n\n"
+                f"Client: {client_name}\n"
+                f"Video ID: {video_id}\n"
+                f"Revision notes: {notes}\n\n"
+                f"Categorize the requested changes and create an action plan.\n\n"
+                f"Return JSON: {{"
+                f'"changes": [{{"type": "script"|"avatar"|"voice"|"pacing"|"cta"|"hook"|"other", '
+                f'"description": str, "difficulty": "easy"|"medium"|"hard"}}], '
+                f'"requires_re_render": bool, '
+                f'"estimated_time_minutes": int, '
+                f'"summary": str}}',
+                tier=Tier.HAIKU,
+            )
+        except Exception as exc:
+            logger.error("request_revision ask_json failed: %s", exc)
+            revision_plan = {"changes": [], "requires_re_render": False, "estimated_time_minutes": 0, "summary": "Failed to parse revision notes"}
 
         self.memory.log(
             f"[UGC] Revision requested by {client_name}\n"
