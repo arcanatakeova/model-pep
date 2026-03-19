@@ -74,7 +74,9 @@ class LLM:
             from cachetools import TTLCache
             self._response_cache: dict[str, str] = TTLCache(maxsize=100, ttl=300)  # 5-min TTL
         except ImportError:
-            self._response_cache = {}
+            # Bounded fallback: simple dict capped at 100 entries (FIFO eviction)
+            self._response_cache: dict[str, str] = {}
+            self._cache_maxsize = 100
 
         # Rate limiting
         self._call_timestamps: deque[float] = deque(maxlen=1000)
@@ -167,13 +169,18 @@ class LLM:
         # Cache low-temperature responses
         if temperature <= 0.3:
             try:
+                # Evict oldest entries if using unbounded fallback dict
+                if hasattr(self, '_cache_maxsize') and len(self._response_cache) >= self._cache_maxsize:
+                    # Remove first (oldest) entry
+                    oldest_key = next(iter(self._response_cache))
+                    del self._response_cache[oldest_key]
                 self._response_cache[cache_key] = result
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, StopIteration):
                 pass  # Cache full or invalid
 
         return result
 
-    async def ask_json(self, prompt: str, tier: Tier = Tier.SONNET) -> dict[str, Any]:
+    async def ask_json(self, prompt: str, tier: Tier = Tier.SONNET) -> dict[str, Any] | list:
         """Ask and parse response as JSON with repair for malformed responses."""
         raw = await self.ask(prompt, tier=tier, json_mode=True, temperature=0.3)
         return self._parse_json(raw)

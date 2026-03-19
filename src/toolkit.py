@@ -19,7 +19,6 @@ Capabilities:
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import re
 from datetime import datetime, timezone
@@ -94,11 +93,10 @@ def extract_keywords(text: str, top_n: int = 10) -> list[str]:
 
 
 def detect_language(text: str) -> str:
-    """Detect text language using TextBlob."""
+    """Detect text language."""
     try:
-        from textblob import TextBlob
-        blob = TextBlob(text[:500])
-        return str(blob.detect_language())
+        from langdetect import detect
+        return detect(text[:500])
     except Exception:
         logger.debug("Language detection failed, defaulting to English")
         return "en"  # Default to English
@@ -308,8 +306,8 @@ def add_watermark(
 
         bbox = draw.textbbox((0, 0), text, font=font)
         text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        x = img.width - text_w - 10
-        y = img.height - text_h - 10
+        x = max(0, img.width - text_w - 10)
+        y = max(0, img.height - text_h - 10)
         draw.text((x, y), text, font=font, fill=(255, 255, 255, opacity))
 
         result = Image.alpha_composite(img, overlay).convert("RGB")
@@ -342,10 +340,23 @@ _memory_caches: dict[str, Any] = {}
 
 
 def get_cache(name: str = "default", maxsize: int = 256, ttl: int = 3600) -> Any:
-    """Get or create a TTL cache. Items expire after ttl seconds."""
+    """Get or create a TTL cache. Items expire after ttl seconds.
+
+    If a cache with this name already exists, it is returned as-is.
+    Use a unique name if you need different maxsize/ttl settings.
+    """
     from cachetools import TTLCache
-    if name not in _memory_caches:
-        _memory_caches[name] = TTLCache(maxsize=maxsize, ttl=ttl)
+    existing = _memory_caches.get(name)
+    if existing is not None:
+        # Warn if caller expects different settings than what exists
+        if hasattr(existing, 'maxsize') and (existing.maxsize != maxsize or existing.ttl != ttl):
+            logger.warning(
+                "Cache %r already exists with maxsize=%d/ttl=%d, "
+                "ignoring requested maxsize=%d/ttl=%d",
+                name, existing.maxsize, existing.ttl, maxsize, ttl,
+            )
+        return existing
+    _memory_caches[name] = TTLCache(maxsize=maxsize, ttl=ttl)
     return _memory_caches[name]
 
 
@@ -366,7 +377,8 @@ def cached_set(cache_name: str, key: str, value: Any, maxsize: int = 256, ttl: i
 def get_disk_cache(name: str = "arcana") -> Any:
     """Get a persistent disk-based cache."""
     from diskcache import Cache
-    cache_dir = Path("data") / "cache" / name
+    from src.config import DB_DIR
+    cache_dir = DB_DIR / "cache" / name
     cache_dir.mkdir(parents=True, exist_ok=True)
     return Cache(str(cache_dir))
 
@@ -497,11 +509,15 @@ def gauge(name: str, description: str = "") -> Any:
 # TOKEN COUNTING
 # ═══════════════════════════════════════════════
 
-def count_tokens(text: str, model: str = "cl100k_base") -> int:
-    """Count tokens for cost estimation."""
+def count_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
+    """Count tokens for cost estimation.
+
+    Args:
+        encoding_name: tiktoken encoding name (e.g., 'cl100k_base' for GPT-4).
+    """
     try:
         import tiktoken
-        enc = tiktoken.get_encoding(model)
+        enc = tiktoken.get_encoding(encoding_name)
         return len(enc.encode(text))
     except Exception:
         logger.debug("tiktoken encoding failed, using char/4 approximation")

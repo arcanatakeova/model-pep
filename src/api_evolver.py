@@ -14,11 +14,8 @@ This is how ARCANA stays on the cutting edge — always pulling in new capabilit
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
-import os
-import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -159,6 +156,8 @@ class APIEvolver:
                 json_start = data.find("[")
             if json_start >= 0:
                 parsed = json.loads(data[json_start:])
+                if isinstance(parsed, list):
+                    parsed = {item.get("name", f"api_{i}"): item for i, item in enumerate(parsed) if isinstance(item, dict)}
                 if isinstance(parsed, dict):
                     for name, api_data in parsed.items():
                         self.apis[name] = APIEndpoint.from_dict(api_data)
@@ -458,7 +457,7 @@ class APIEvolver:
                     status = "down"
                     results["down"] += 1
 
-                api.avg_latency_ms = (api.avg_latency_ms * 0.7) + (latency * 0.3)
+                api.avg_latency_ms = (api.avg_latency_ms * 0.8) + (latency * 0.2)
                 api.last_checked = datetime.now(timezone.utc).isoformat()
 
                 results["details"].append({

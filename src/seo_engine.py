@@ -42,6 +42,24 @@ class SEOEngine:
         self.memory = memory
         self.fulfillment = fulfillment
         self._published: list[dict[str, Any]] = []
+        self._load_published()
+
+    def _load_published(self) -> None:
+        """Load published articles from memory."""
+        data = self.memory.get_tacit("seo-published")
+        if data:
+            import json
+            json_start = data.find("[")
+            if json_start >= 0:
+                try:
+                    self._published = json.loads(data[json_start:])
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+    def _save_published(self) -> None:
+        """Persist published articles to memory."""
+        import json
+        self.memory.save_tacit("seo-published", json.dumps(self._published, indent=2))
 
     async def generate_article(
         self, keyword: str, intent: str = "informational", word_count: int = 1500
@@ -202,6 +220,7 @@ class SEOEngine:
             "url": publish_result.get("url", ""),
         }
         self._published.append(record)
+        self._save_published()
 
         self.memory.log(
             f"[SEO] Published: {record['title']} → {publish_result.get('status')}",

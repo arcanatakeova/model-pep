@@ -56,6 +56,15 @@ IMPORTANT_KEYS = [
 ]
 
 
+def _safe_int(value: str, default: int) -> int:
+    """Parse int from string, returning default if invalid."""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        logger.warning("Invalid integer value %r, using default %d", value, default)
+        return default
+
+
 class Config(BaseModel):
     """Validated configuration with service readiness checks."""
 
@@ -138,10 +147,10 @@ class Config(BaseModel):
     nightly_review_hour: int = 7    # 11 PM PT = 07:00 UTC next day
     ops_cycle_minutes: int = 15     # Daily ops cycle interval
     max_llm_calls_per_hour: int = Field(
-        default_factory=lambda: int(os.getenv("MAX_LLM_CALLS_PER_HOUR", "200")),
+        default_factory=lambda: _safe_int(os.getenv("MAX_LLM_CALLS_PER_HOUR", "200"), 200),
     )
     max_x_posts_per_day: int = Field(
-        default_factory=lambda: int(os.getenv("MAX_X_POSTS_PER_DAY", "50")),
+        default_factory=lambda: _safe_int(os.getenv("MAX_X_POSTS_PER_DAY", "50"), 50),
     )
 
     # ── Validation ───────────────────────────────────────────────

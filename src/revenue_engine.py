@@ -178,7 +178,7 @@ class RevenueEngine:
         }
 
         self.memory.log(
-            f"Revenue Snapshot: ${total:,.2f} / ${target:,} target "
+            f"Revenue Snapshot: ${total:,.2f} / ${target:,.0f} target "
             f"({snapshot['pct_of_target']:.1f}%) — {active_channels} channels active",
             "Revenue",
         )
@@ -214,7 +214,7 @@ class RevenueEngine:
         lines = [
             f"**Revenue Dashboard — {snapshot.get('month', 'N/A')}**",
             f"**Total: ${snapshot.get('total_monthly_revenue', 0):,.2f} / "
-            f"${snapshot.get('monthly_target', 0):,} "
+            f"${snapshot.get('monthly_target', 0):,.0f} "
             f"({snapshot.get('pct_of_target', 0):.1f}%)**",
             f"Active channels: {snapshot.get('active_channels', 0)}/"
             f"{snapshot.get('total_channels', 10)}\n",
@@ -225,7 +225,7 @@ class RevenueEngine:
             pct = ch.get("pct_of_target", 0)
             lines.append(
                 f"{status} {ch.get('name', '?')}: "
-                f"${ch.get('revenue', 0):,.2f} / ${ch.get('target', 0):,} ({pct:.0f}%)"
+                f"${ch.get('revenue', 0):,.2f} / ${ch.get('target', 0):,.0f} ({pct:.0f}%)"
             )
 
         return "\n".join(lines)
@@ -245,14 +245,14 @@ class RevenueEngine:
                 rows.append({
                     "Channel": ch.get("name", ""),
                     "Revenue": f"${ch.get('revenue', 0):,.2f}",
-                    "Target": f"${ch.get('target', 0):,}",
+                    "Target": f"${ch.get('target', 0):,.0f}",
                     "% of Target": f"{ch.get('pct_of_target', 0):.1f}%",
                     "Active": "Yes" if ch.get("active") else "No",
                 })
             rows.append({
                 "Channel": "TOTAL",
                 "Revenue": f"${snapshot.get('total_monthly_revenue', 0):,.2f}",
-                "Target": f"${snapshot.get('monthly_target', 0):,}",
+                "Target": f"${snapshot.get('monthly_target', 0):,.0f}",
                 "% of Target": f"{snapshot.get('pct_of_target', 0):.1f}%",
                 "Active": "",
             })

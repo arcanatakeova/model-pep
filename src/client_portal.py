@@ -54,7 +54,10 @@ class ClientPortal:
         # Try to extract JSON block
         if "```json" in raw:
             start = raw.index("```json") + 7
-            end = raw.index("```", start)
+            try:
+                end = raw.index("```", start)
+            except ValueError:
+                end = len(raw)
             data: dict[str, Any] = json.loads(raw[start:end].strip())
             data["_raw"] = raw
             data.setdefault("client_key", client_key)
@@ -65,7 +68,7 @@ class ClientPortal:
 
     def _save_client(self, client_key: str, data: dict[str, Any]) -> None:
         """Persist updated client data back to memory."""
-        raw_notes = data.pop("_raw", "")
+        raw_notes = data.get("_raw", "")
         client_json = json.dumps(
             {k: v for k, v in data.items() if not k.startswith("_")},
             indent=2, default=str,
@@ -73,11 +76,19 @@ class ClientPortal:
         content = f"```json\n{client_json}\n```\n\n{raw_notes}"
         self.memory.save_knowledge("projects", client_key, content)
 
-    def _get_client_history(self, client_key: str, days: int = 7) -> str:
+    def _get_client_history(self, client_key: str) -> str:
         """Search recent daily logs for entries mentioning this client."""
         results = self.memory.search(client_key, scope="daily")
         lines = [line for _, line in results[:50]]
         return "\n".join(lines) if lines else "No recent activity found."
+
+    @staticmethod
+    def _parse_rate(value: Any) -> float:
+        """Parse a monthly rate that may be a string like '$2,500' into a float."""
+        try:
+            return float(str(value).replace("$", "").replace(",", ""))
+        except (ValueError, TypeError):
+            return 0.0
 
     # ── 1. Weekly Performance Report ─────────────────────────────────
 
@@ -87,7 +98,7 @@ class ClientPortal:
         Returns the HTML string.  Also logs the generation to daily notes.
         """
         client = self._load_client(client_key)
-        history = self._get_client_history(client_key, days=7)
+        history = self._get_client_history(client_key)
         deliverables = await self.track_deliverables(client_key)
         roi = await self.calculate_roi(client_key)
 
@@ -123,7 +134,7 @@ class ClientPortal:
         Returns the HTML string.
         """
         client = self._load_client(client_key)
-        history = self._get_client_history(client_key, days=30)
+        history = self._get_client_history(client_key)
         deliverables = await self.track_deliverables(client_key)
         roi = await self.calculate_roi(client_key)
         satisfaction = self._get_satisfaction_history(client_key)
@@ -164,7 +175,7 @@ class ClientPortal:
         and compliance status.
         """
         client = self._load_client(client_key)
-        history = self._get_client_history(client_key, days=30)
+        history = self._get_client_history(client_key)
 
         sla = client.get("sla", {})
         deliverables = client.get("deliverables", [])
@@ -203,7 +214,7 @@ class ClientPortal:
         """
         client = self._load_client(client_key)
         baseline = client.get("baseline_metrics", {})
-        history = self._get_client_history(client_key, days=30)
+        history = self._get_client_history(client_key)
 
         if not baseline:
             return {
@@ -254,7 +265,7 @@ class ClientPortal:
             "client_name": client.get("name", client_key),
             "client_email": client.get("email", ""),
             "service": client.get("service", ""),
-            "monthly_rate": client.get("monthly_rate", 0),
+            "monthly_rate": self._parse_rate(client.get("monthly_rate", 0)),
             "deliverables_summary": deliverables,
             "period": f"{(now - timedelta(days=30)).strftime('%Y-%m-%d')} to {now.strftime('%Y-%m-%d')}",
         }
@@ -283,7 +294,7 @@ class ClientPortal:
                 to_email=client["email"],
                 client_name=client.get("name", client_key),
                 service=client.get("service", "AI Services"),
-                amount=float(client.get("monthly_rate", 0)),
+                amount=self._parse_rate(client.get("monthly_rate", 0)),
                 due_date=invoice["due_date"],
                 payment_link=client.get("payment_link", "https://arcanaoperations.com/pay"),
             )

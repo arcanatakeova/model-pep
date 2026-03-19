@@ -43,6 +43,7 @@ class Memory:
         self.daily = self.base / "daily"
         self.tacit = self.base / "tacit"
         self._lock = threading.Lock()
+        self._async_lock: Any = None  # Lazy-init asyncio.Lock
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
@@ -253,6 +254,9 @@ class Memory:
             ])
         if scope in ("all", "tacit"):
             dirs.append(self.tacit)
+            skills_dir = self.tacit / "skills"
+            if skills_dir.exists():
+                dirs.append(skills_dir)
 
         for d in dirs:
             if not d.exists():
@@ -296,10 +300,19 @@ class Memory:
         archive_dir = self.life / "archives" / "daily"
         archive_dir.mkdir(parents=True, exist_ok=True)
 
+        import re as _re
+        date_pattern = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
         for f in self.daily.glob("*.md"):
+            if not date_pattern.match(f.stem):
+                continue  # Skip non-date filenames
             if f.stem < cutoff_str:
                 dest = archive_dir / f.name
-                f.rename(dest)
+                try:
+                    f.rename(dest)
+                except OSError:
+                    # Cross-filesystem: copy + delete
+                    import shutil
+                    shutil.move(str(f), str(dest))
                 archived += 1
 
         if archived:

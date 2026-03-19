@@ -113,9 +113,10 @@ class AffiliateManager:
         if prog not in AFFILIATE_PROGRAMS or prog not in self._codes:
             return None
         code = self._codes[prog]
-        # Validate code doesn't contain injection characters
-        if not code or any(c in code for c in [" ", "<", ">", '"', "'"]):
-            logger.warning("Invalid affiliate code for %s: %s", prog, code[:20])
+        # Validate code uses only safe characters (allowlist)
+        import re as _re
+        if not code or not _re.match(r'^[a-zA-Z0-9_-]+$', code):
+            logger.warning("Invalid affiliate code for %s: %s", prog, code[:20] if code else "")
             return None
         template = AFFILIATE_PROGRAMS[prog]["link_template"]
         link = template.format(code=code)

@@ -11,6 +11,7 @@ Reports to ARCANA nightly. Hot leads escalated to Ian/Tan immediately.
 
 from __future__ import annotations
 
+import html as _html
 import logging
 from typing import Any, TYPE_CHECKING
 
@@ -45,6 +46,7 @@ class Remy:
     async def follow_up(self, handle: str, context: str) -> dict[str, Any]:
         """Generate a follow-up message for a qualified lead."""
         lead_info = self.memory.get_knowledge("projects", f"lead-{handle}")
+        lead_info = lead_info or ""
 
         result = await self.llm.ask_json(
             f"You are Remy, the sales agent for Arcana Operations.\n"
@@ -72,6 +74,9 @@ class Remy:
             tier=Tier.SONNET,
         )
 
+        if not result or not isinstance(result, dict):
+            return {"message_x": "", "message_email": "", "suggested_service": "", "next_step": "", "sent_via": []}
+
         self.memory.log(
             f"[Remy] Follow-up: @{handle} — {result.get('suggested_service', 'TBD')}",
             "Sales",
@@ -82,14 +87,13 @@ class Remy:
 
         # Send email follow-up if email_engine is wired and lead has email
         if self.email_engine and result.get("message_email"):
-            lead_info = lead_info or ""
             # Extract email from lead file if available
             email = self._extract_email(lead_info)
             if email:
                 sent = await self.email_engine.send(
                     to_email=email,
                     subject=f"Following up — Arcana Operations",
-                    html_body=result["message_email"],
+                    html_body=f"<p>{_html.escape(result.get('message_email', ''))}</p>",
                 )
                 if sent:
                     sent_via.append("email")

@@ -46,6 +46,12 @@ class OutreachEngine:
             self._http = httpx.AsyncClient(timeout=30)
         return self._http
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        await self.close()
+
     async def close(self) -> None:
         if self._http:
             await self._http.aclose()
@@ -86,7 +92,7 @@ class OutreachEngine:
                 "https://api.apollo.io/v1/mixed_people/search",
                 json=payload,
             )
-            if resp.status_code == 200:
+            if 200 <= resp.status_code < 300:
                 people = resp.json().get("people", [])
                 prospects = []
                 for p in people:
@@ -130,7 +136,7 @@ class OutreachEngine:
                 "https://api.apollo.io/v1/people/match",
                 json=payload,
             )
-            if resp.status_code == 200:
+            if 200 <= resp.status_code < 300:
                 return resp.json().get("person", {})
         except Exception as exc:
             logger.error("Apollo enrich error: %s", exc)
@@ -177,7 +183,7 @@ class OutreachEngine:
 
         # 4. Add prospects to campaign
         leads = [
-            {"email": p["email"], "first_name": p["name"].split()[0] if p["name"] else "",
+            {"email": p["email"], "first_name": p["name"].split()[0] if p.get("name", "").strip() else "",
              "company_name": p["company"]}
             for p in prospects if p.get("email")
         ]
@@ -276,8 +282,8 @@ class OutreachEngine:
             return {"status": "planning_failed"}
 
         return await self.launch_campaign(
-            service=result["service"],
-            target_role=result["target_role"],
-            target_industry=result["target_industry"],
-            pain_point=result["pain_point"],
+            service=result.get("service", "consulting"),
+            target_role=result.get("target_role", "CEO"),
+            target_industry=result.get("target_industry", "technology"),
+            pain_point=result.get("pain_point", ""),
         )

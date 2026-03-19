@@ -11,6 +11,7 @@ Escalation: Simple issues → Iris handles. Complex → escalate to ARCANA. Trul
 
 from __future__ import annotations
 
+import html as _html
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -69,6 +70,9 @@ class Iris:
             tier=Tier.SONNET,
         )
 
+        if not result or not isinstance(result, dict):
+            return {"response": "I'll look into this and get back to you shortly.", "action": "escalate"}
+
         # Log the interaction
         self.memory.log(
             f"[Iris] Support: {customer} — {message[:100]}\n"
@@ -77,8 +81,8 @@ class Iris:
             "Support",
         )
 
-        # Append to customer history (preserve previous interactions)
-        existing = self.memory.get_knowledge("resources", f"customer-{customer}") or ""
+        # Append to customer history (reuse earlier lookup)
+        existing = customer_history or ""
         datetime_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         new_entry = (
             f"\n\n---\n## {datetime_now} — Support Inquiry\n"
@@ -94,7 +98,7 @@ class Iris:
             await self.email_engine.send(
                 to_email=customer,
                 subject="Re: Your inquiry — Arcana Operations",
-                html_body=f"<p>{response_text}</p>",
+                html_body=f"<p>{_html.escape(response_text)}</p>",
                 text_body=response_text,
             )
 
@@ -205,7 +209,7 @@ class Iris:
             await self.email_engine.send(
                 to_email=customer,
                 subject=f"Re: Refund request — {product}",
-                html_body=f"<p>{response_text}</p>",
+                html_body=f"<p>{_html.escape(response_text)}</p>",
                 text_body=response_text,
             )
 
@@ -238,9 +242,9 @@ class Iris:
         results: list[dict[str, Any]] = []
         while self._pending_inquiries:
             inquiry = self._pending_inquiries.pop(0)
-            channel = inquiry.pop("channel", "email")
-            customer = inquiry.pop("customer", "")
-            message = inquiry.pop("message", "")
+            channel = inquiry.get("channel", "email")
+            customer = inquiry.get("customer", "")
+            message = inquiry.get("message", "")
 
             try:
                 if channel == "email":

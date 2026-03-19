@@ -60,7 +60,7 @@ class ProductManager:
             }
         except Exception as exc:
             logger.error("Stripe check failed: %s", exc)
-            return {"revenue": 0, "charges": 0, "error": str(exc)}
+            return {"revenue": 0, "charges": 0, "error": "Internal processing error"}
 
     async def check_gumroad_revenue(self) -> dict[str, Any]:
         """Check Gumroad sales (safe price parsing)."""
@@ -88,7 +88,7 @@ class ProductManager:
             return {"revenue": revenue, "sales": len(sales)}
         except Exception as exc:
             logger.error("Gumroad check failed: %s", exc)
-            return {"revenue": 0, "sales": 0, "error": str(exc)}
+            return {"revenue": 0, "sales": 0, "error": "Internal processing error"}
 
     async def get_revenue_summary(self) -> dict[str, Any]:
         """Combined revenue summary for morning report."""
@@ -138,13 +138,13 @@ class ProductManager:
             product = resp.json().get("product", {})
             url = product.get("short_url", "")
 
-            self.memory.log(f"Created Gumroad product: {name} (${price_cents/100}) — {url}", "Products")
-            self.memory.save_knowledge("projects", name, f"Digital product on Gumroad.\nPrice: ${price_cents/100}\nURL: {url}")
+            self.memory.log(f"Created Gumroad product: {name} (${price_cents/100:.2f}) — {url}", "Products")
+            self.memory.save_knowledge("projects", name, f"Digital product on Gumroad.\nPrice: ${price_cents/100:.2f}\nURL: {url}")
 
             return {"url": url, "id": product.get("id")}
         except Exception as exc:
             logger.error("Gumroad create failed: %s", exc)
-            return {"error": str(exc)}
+            return {"error": "Internal processing error"}
 
     async def generate_product_pdf(
         self, title: str, content_blocks: list[dict[str, str]],

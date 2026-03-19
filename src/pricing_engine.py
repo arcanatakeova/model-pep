@@ -18,7 +18,6 @@ Capabilities:
 from __future__ import annotations
 
 import logging
-import random
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -271,6 +270,8 @@ class PricingEngine:
             monthly = svc.min_price
         if svc.max_price and monthly > svc.max_price * SIZE_MULTIPLIERS.get(client_size, 1.0):
             monthly = round(svc.max_price * SIZE_MULTIPLIERS.get(client_size, 1.0), 2)
+        if svc.max_price:
+            setup_fee = min(setup_fee, svc.max_price * size_mult)
 
         return {
             "service": svc.service_name,
@@ -569,7 +570,10 @@ class PricingEngine:
         name = prospect_data.get("name", "Prospect")
         company = prospect_data.get("company", "")
         industry = prospect_data.get("industry", "default")
-        size = ClientSize(prospect_data.get("size", "medium"))
+        try:
+            size = ClientSize(prospect_data.get("size", "medium"))
+        except ValueError:
+            size = ClientSize.MEDIUM
         scope = prospect_data.get("scope", 3)
         requested = prospect_data.get("services", [])
         annual = prospect_data.get("annual_payment", False)

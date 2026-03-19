@@ -14,6 +14,7 @@ Tracks:
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from datetime import datetime, timezone
@@ -45,9 +46,10 @@ class Analytics:
 
     def track(self, event: str, properties: dict[str, Any] | None = None) -> None:
         """Track any event with properties."""
+        import json as _json
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
         props = properties or {}
-        entry = f"{ts} | {event} | {props}"
+        entry = f"{ts} | {event} | {_json.dumps(props)}"
 
         # Append to daily analytics log (locked to prevent race conditions)
         with self._track_lock:
@@ -91,21 +93,25 @@ class Analytics:
             "revenue": 0.0,
         }
 
+        import json as _json
         for line in log.splitlines():
-            if "content_posted" in line:
+            parts = line.split(" | ", 2)
+            if len(parts) < 2:
+                continue
+            event_name = parts[1].strip()
+            if event_name == "content_posted":
                 counts["content_posted"] += 1
-            elif "lead_created" in line:
+            elif event_name == "lead_created":
                 counts["lead_created"] += 1
-            elif "conversion" in line:
+            elif event_name == "conversion":
                 counts["conversion"] += 1
-            elif "revenue" in line:
-                try:
-                    # Extract amount from the properties
-                    if "'amount':" in line:
-                        amount_str = line.split("'amount':")[1].split(",")[0].split("}")[0].strip()
-                        counts["revenue"] += float(amount_str)
-                except (ValueError, IndexError):
-                    pass
+            elif event_name == "revenue":
+                if len(parts) >= 3:
+                    try:
+                        props = _json.loads(parts[2])
+                        counts["revenue"] += float(props.get("amount", 0))
+                    except (json.JSONDecodeError, ValueError):
+                        pass
 
         # Calculate conversion rates
         content_to_lead = (counts["lead_created"] / counts["content_posted"] * 100) if counts["content_posted"] else 0
@@ -128,30 +134,32 @@ class Analytics:
 
         channels: dict[str, dict[str, Any]] = {}
 
+        import json as _json
         for line in log.splitlines():
-            if "lead_created" in line or "conversion" in line:
-                # Extract source
-                source = "unknown"
-                if "'source':" in line:
-                    try:
-                        source = line.split("'source':")[1].split(",")[0].split("'")[1]
-                    except (IndexError, ValueError):
-                        pass
+            parts = line.split(" | ", 2)
+            if len(parts) < 2:
+                continue
+            event_name = parts[1].strip()
+            if event_name not in ("lead_created", "conversion"):
+                continue
 
-                if source not in channels:
-                    channels[source] = {"leads": 0, "conversions": 0, "revenue": 0.0}
+            # Parse properties
+            props: dict[str, Any] = {}
+            if len(parts) >= 3:
+                try:
+                    props = _json.loads(parts[2])
+                except (json.JSONDecodeError, ValueError):
+                    pass
 
-                if "lead_created" in line:
-                    channels[source]["leads"] += 1
-                elif "conversion" in line:
-                    channels[source]["conversions"] += 1
-                    # Try to extract value
-                    if "'value':" in line:
-                        try:
-                            val = float(line.split("'value':")[1].split(",")[0].split("}")[0].strip())
-                            channels[source]["revenue"] += val
-                        except (ValueError, IndexError):
-                            pass
+            source = props.get("source", "unknown")
+            if source not in channels:
+                channels[source] = {"leads": 0, "conversions": 0, "revenue": 0.0}
+
+            if event_name == "lead_created":
+                channels[source]["leads"] += 1
+            elif event_name == "conversion":
+                channels[source]["conversions"] += 1
+                channels[source]["revenue"] += float(props.get("value", 0))
 
         return channels
 
@@ -163,17 +171,18 @@ class Analytics:
         channels = self.get_channel_attribution()
 
         # Get cost data (safe parsing)
+        import json as _json
         log = self.memory.get_tacit("analytics-log") or ""
         total_costs = 0.0
         for line in log.splitlines():
-            parts = line.split("|")
-            if len(parts) >= 2 and "cost" in parts[1].strip().lower():
-                try:
-                    if "'amount':" in line:
-                        amount_str = line.split("'amount':")[1].split(",")[0].split("}")[0].strip()
-                        total_costs += max(0, float(amount_str))
-                except (ValueError, IndexError):
-                    pass
+            parts = line.split(" | ", 2)
+            if len(parts) >= 2 and parts[1].strip() == "cost":
+                if len(parts) >= 3:
+                    try:
+                        props = _json.loads(parts[2])
+                        total_costs += max(0, float(props.get("amount", 0)))
+                    except (json.JSONDecodeError, ValueError):
+                        pass
 
         result = await self.llm.ask_json(
             f"Generate an ROI analysis for ARCANA AI's operations.\n\n"

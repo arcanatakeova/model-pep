@@ -12,6 +12,7 @@ Content is the marketing. The agent IS the pitch.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 from datetime import datetime, timezone
@@ -26,13 +27,6 @@ if TYPE_CHECKING:
     from src.x_client import XClient
 
 logger = logging.getLogger("arcana.content")
-
-# Content suit types mapped to generation methods
-SUIT_SCHEDULE = {
-    "wands": {"method": "analysis_tweet", "daily_count": 4, "type": "tweet"},
-    "cups": {"method": "bts_tweet", "daily_count": 0, "weekly_count": 3, "type": "tweet"},
-    "swords": {"method": "case_file", "daily_count": 0, "weekly_count": 2, "type": "thread"},
-}
 
 
 class ContentEngine:
@@ -221,7 +215,7 @@ class ContentEngine:
             return {"should_reply": False, "reply": None, "is_lead": False, "lead_reason": None}
         return result
 
-    async def generate_product_copy(self, product_name: str, description: str) -> dict[str, str]:
+    async def generate_product_copy(self, product_name: str, description: str) -> dict[str, Any]:
         """Generate product page copy (title, subtitle, description, CTA)."""
         try:
             result = await self.llm.ask_json(
@@ -382,7 +376,7 @@ class ContentEngine:
             except Exception as exc:
                 logger.error("BTS tweet failed: %s", exc)
 
-        # Analysis tweets — 3-5 per day, spaced out (caller should await between)
+        # Analysis tweets — 3-5 per day, spaced out with anti-bot jitter
         analysis_count = random.randint(3, 5)
         for i in range(analysis_count):
             try:
@@ -390,6 +384,7 @@ class ContentEngine:
                 results.append(r)
             except Exception as exc:
                 logger.error("Analysis tweet %d failed: %s", i + 1, exc)
+            await asyncio.sleep(random.uniform(60, 180))  # Anti-bot jitter
 
         self.memory.log(
             f"Daily content scheduled: {len(results)} pieces posted",

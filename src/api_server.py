@@ -11,7 +11,6 @@ Rate limited: 100 requests/minute per IP.
 
 from __future__ import annotations
 
-import asyncio
 import hmac
 import logging
 import os
@@ -22,7 +21,7 @@ from typing import Any
 
 from aiohttp import web
 
-from src.config import HEARTBEAT_PATH, STOP_FILE, get_config
+from src.config import HEARTBEAT_PATH, STOP_FILE
 
 logger = logging.getLogger("arcana.api")
 
@@ -51,6 +50,17 @@ class RateLimiter:
         if len(self._hits[ip]) >= self.max_requests:
             return False
         self._hits[ip].append(now)
+
+        # Periodically clean stale IPs (every 100 checks)
+        if hasattr(self, '_check_count'):
+            self._check_count += 1
+        else:
+            self._check_count = 1
+        if self._check_count % 100 == 0:
+            stale_ips = [ip for ip, times in self._hits.items() if not times]
+            for ip in stale_ips:
+                del self._hits[ip]
+
         return True
 
 
@@ -209,7 +219,7 @@ async def handle_revenue(request: web.Request) -> web.Response:
         })
     except Exception as exc:
         logger.error("Revenue endpoint failed: %s", exc)
-        return _error(f"Failed to fetch revenue: {exc}", status=500)
+        return _error("Internal server error", status=500)
 
 
 async def handle_opportunities(request: web.Request) -> web.Response:
@@ -219,8 +229,11 @@ async def handle_opportunities(request: web.Request) -> web.Response:
         return _error("Scanner not available", status=503)
 
     pipeline_keys = orch.scanner.get_pipeline()
-    limit = int(request.query.get("limit", "50"))
-    offset = int(request.query.get("offset", "0"))
+    try:
+        limit = int(request.query.get("limit", "50"))
+        offset = int(request.query.get("offset", "0"))
+    except ValueError:
+        return _error("Invalid limit or offset parameter", status=400)
 
     opportunities: list[dict[str, Any]] = []
     for key in pipeline_keys[offset : offset + limit]:
@@ -259,7 +272,7 @@ async def handle_content(request: web.Request) -> web.Response:
     # Include today's completed content from orchestrator
     completed = []
     if orch:
-        completed = [c for c in getattr(orch, "_completed_today", []) if "ontent" in c or "tweet" in c.lower() or "post" in c.lower()]
+        completed = [c for c in getattr(orch, "_completed_today", []) if "content" in c.lower() or "tweet" in c.lower() or "post" in c.lower()]
 
     return _ok({
         "recent_posts": content_entries[:100],
@@ -294,7 +307,7 @@ async def handle_metrics(request: web.Request) -> web.Response:
         return _ok({"metric": metric_name, "values": result})
     except Exception as exc:
         logger.error("Metric '%s' failed: %s", metric_name, exc)
-        return _error(f"Failed to compute metric: {exc}", status=500)
+        return _error("Internal server error", status=500)
 
 
 async def handle_contacts(request: web.Request) -> web.Response:
@@ -304,7 +317,10 @@ async def handle_contacts(request: web.Request) -> web.Response:
         return _error("Memory not available", status=503)
 
     query = request.query.get("q", "").lower()
-    limit = int(request.query.get("limit", "50"))
+    try:
+        limit = int(request.query.get("limit", "50"))
+    except ValueError:
+        return _error("Invalid limit or offset parameter", status=400)
 
     all_keys = orch.memory.list_knowledge("resources")
     contact_keys = [k for k in all_keys if k.startswith("contact-")]
@@ -386,7 +402,7 @@ async def handle_scan(request: web.Request) -> web.Response:
         return _ok(results)
     except Exception as exc:
         logger.error("Manual scan failed: %s", exc)
-        return _error(f"Scan failed: {exc}", status=500)
+        return _error("Internal server error", status=500)
 
 
 async def handle_content_generate(request: web.Request) -> web.Response:
@@ -427,7 +443,7 @@ async def handle_content_generate(request: web.Request) -> web.Response:
         return _ok(result)
     except Exception as exc:
         logger.error("Content generation failed: %s", exc)
-        return _error(f"Content generation failed: {exc}", status=500)
+        return _error("Internal server error", status=500)
 
 
 async def handle_leads_qualify(request: web.Request) -> web.Response:
@@ -457,7 +473,7 @@ async def handle_leads_qualify(request: web.Request) -> web.Response:
         return _ok(result)
     except Exception as exc:
         logger.error("Lead qualification failed: %s", exc)
-        return _error(f"Qualification failed: {exc}", status=500)
+        return _error("Internal server error", status=500)
 
 
 async def handle_search(request: web.Request) -> web.Response:

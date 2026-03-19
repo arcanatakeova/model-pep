@@ -240,6 +240,8 @@ class Orchestrator:
             self.memory, self.payments_engine,
             stripe_webhook_secret=os.getenv("STRIPE_WEBHOOK_SECRET", ""),
         )
+        if not os.getenv("STRIPE_WEBHOOK_SECRET", ""):
+            logger.warning("STRIPE_WEBHOOK_SECRET not set — Stripe webhooks will be rejected")
         await self.webhook_server.start()
 
         logger.info("Orchestrator initialized — all channels online")
@@ -494,7 +496,7 @@ class Orchestrator:
             "Active",
             "Monitoring all channels",
             completed=self._completed_today,
-            upcoming=[p for p in self._priorities if p not in self._completed_today],
+            upcoming=self._priorities[len(self._completed_today):],
         )
 
     async def _process_mentions(self) -> None:

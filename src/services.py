@@ -47,13 +47,13 @@ class ServiceEngine:
     async def generate_review_response(
         self, business_name: str, reviewer: str, rating: int, review_text: str, platform: str = "google"
     ) -> str:
+        """Generate a professional response to a customer review."""
         # Input validation
         if not business_name or not business_name.strip():
             raise ValueError("business_name is required")
         rating = max(1, min(5, rating))  # Clamp to 1-5
         review_text = review_text[:2000] if review_text else "No review text"
         platform = platform.lower() if platform else "google"
-        """Generate a professional response to a customer review."""
         response = await self.llm.ask(
             f"Generate a business owner response to this {platform} review.\n\n"
             f"Business: {business_name}\n"
@@ -228,7 +228,6 @@ class ServiceEngine:
             raise ValueError("Client name is required")
         if monthly_rate < 0:
             raise ValueError(f"Monthly rate must be non-negative, got {monthly_rate}")
-        service_lower = service.lower().replace(" ", "_")
 
         self.memory.save_knowledge(
             "projects",

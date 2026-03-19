@@ -136,11 +136,12 @@ class FulfillmentEngine:
             )
             if resp.status_code == 200:
                 data = resp.json()
+                STAR_RATING_MAP = {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5}
                 return [
                     {
                         "review_id": r.get("reviewId", ""),
                         "reviewer": r.get("reviewer", {}).get("displayName", ""),
-                        "rating": r.get("starRating", 5),
+                        "rating": STAR_RATING_MAP.get(str(r.get("starRating", "")), r.get("starRating", 5)),
                         "text": r.get("comment", ""),
                         "platform": "google",
                     }

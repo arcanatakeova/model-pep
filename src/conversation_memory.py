@@ -277,9 +277,14 @@ class ConversationMemory:
             # Update lead score if signals found
             if signals:
                 score_bump = len(signals) * 5
+                conv_score_row = conn.execute(
+                    "SELECT lead_score FROM conversations WHERE id = ?", (conv_id,),
+                ).fetchone()
+                conv_score = (conv_score_row["lead_score"] if conv_score_row else 0) + score_bump
+                conv_score = min(conv_score, 100)
                 conn.execute(
-                    "UPDATE conversations SET lead_score = lead_score + ? WHERE id = ?",
-                    (score_bump, conv_id),
+                    "UPDATE conversations SET lead_score = ? WHERE id = ?",
+                    (conv_score, conv_id),
                 )
                 # Also bump contact lead score
                 conn.execute(
@@ -406,6 +411,8 @@ class ConversationMemory:
 
     def get_stale_conversations(self, hours: int = 48) -> list[dict[str, Any]]:
         """Find conversations waiting for ARCANA's reply for too long."""
+        if hours <= 0:
+            raise ValueError("hours must be positive")
         conn = self.db._get_conn()
         rows = conn.execute(
             "SELECT c.*, ct.name, ct.email, ct.x_handle "

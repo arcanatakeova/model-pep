@@ -191,8 +191,11 @@ class SkillExecutor:
             "results": [],
         }
 
-        for skill_info in sorted(triggered, key=lambda s: s.get("priority", 5)):
-            name = skill_info["name"]
+        for skill_info in sorted(triggered, key=lambda s: int(s.get("priority", 5)) if str(s.get("priority", 5)).isdigit() else 5):
+            skill_name = skill_info.get("name")
+            if not skill_name:
+                continue
+            name = skill_name
             try:
                 result = await self.execute_skill(name)
                 results["executed"] += 1
@@ -246,7 +249,14 @@ class SkillExecutor:
                 # Mark as disabled
                 path = self.skills_dir / f"{skill['name']}.md"
                 content = path.read_text()
-                content = content.replace("## Status\nactive", "## Status\ndisabled (low success rate)")
+                import re as _re
+                content = _re.sub(
+                    r"(## Status\s*\n\s*)active",
+                    r"\1disabled (low success rate)",
+                    content,
+                    count=1,
+                    flags=_re.IGNORECASE,
+                )
                 path.write_text(content)
                 disabled.append(skill["name"])
                 logger.info("Disabled failing skill: %s (%.0f%% success rate)",

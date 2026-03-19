@@ -251,8 +251,12 @@ class PaymentsEngine:
     def get_mrr(self) -> float:
         """Calculate Monthly Recurring Revenue from active subscriptions."""
         subs = self.get_active_subscriptions()
-        total_cents = sum(s["amount_cents"] for s in subs if s["interval"] == "month")
-        return total_cents / 100
+        mrr = sum(s["amount_cents"] for s in subs if s["interval"] == "month")
+        # Include annual subscriptions at their monthly equivalent
+        for s in subs:
+            if s["interval"] == "year":
+                mrr += s["amount_cents"] / 12
+        return mrr / 100
 
     # ── Gumroad: Product Creation ───────────────────────────────────
 
@@ -362,7 +366,7 @@ class PaymentsEngine:
                 return {"status": "error", "reason": "invalid_signature"}
             except Exception as exc:
                 logger.error("Webhook construction error: %s", exc)
-                return {"status": "error", "reason": str(exc)}
+                return {"status": "error", "reason": "Internal processing error"}
         else:
             logger.critical("STRIPE_WEBHOOK_SECRET not configured — rejecting unverified webhook")
             return {"status": "error", "reason": "webhook_secret_not_configured"}
@@ -392,7 +396,7 @@ class PaymentsEngine:
 
         except Exception as exc:
             logger.error("Webhook handler error for %s: %s", event_type, exc)
-            return {"status": "error", "event_type": event_type, "reason": str(exc)}
+            return {"status": "error", "event_type": event_type, "reason": "Internal processing error"}
 
     def _handle_checkout_completed(self, session: dict[str, Any]) -> dict[str, Any]:
         """Fulfill order after successful checkout."""
@@ -627,7 +631,7 @@ class PaymentsEngine:
             # Re-send the invoice email via Stripe
             stripe.Invoice.send_invoice(invoice_id)
 
-            customer_email = invoice.get("customer_email", "unknown")
+            customer_email = getattr(invoice, "customer_email", "unknown")
             amount = invoice.amount_due / 100
 
             self.memory.log(
@@ -675,7 +679,7 @@ class PaymentsEngine:
             # Attempt to pay the invoice
             paid_invoice = stripe.Invoice.pay(invoice_id)
 
-            customer_email = paid_invoice.get("customer_email", "unknown")
+            customer_email = getattr(paid_invoice, "customer_email", "unknown")
             amount = paid_invoice.amount_due / 100
 
             self.memory.log(
@@ -700,7 +704,7 @@ class PaymentsEngine:
             return {
                 "invoice_id": invoice_id,
                 "status": "retry_failed",
-                "reason": str(exc),
+                "reason": "Payment method declined",
             }
 
         except Exception as exc:

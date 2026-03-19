@@ -81,8 +81,16 @@ class PromptEvolver:
         if not data:
             return
         try:
-            parsed = json.loads(data.split("\n", 2)[-1]) if "\n" in data else {}
-            for op, variants in parsed.items():
+            # Strip markdown header added by save_tacit
+            json_start = max(data.find("{"), data.find("["))
+            if json_start < 0:
+                return
+            json_data = data[json_start:]
+            try:
+                variant_data = json.loads(json_data)
+            except (json.JSONDecodeError, ValueError):
+                return
+            for op, variants in variant_data.items():
                 self.variants[op] = []
                 for v in variants:
                     pv = PromptVariant(

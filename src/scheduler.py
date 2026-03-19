@@ -104,7 +104,7 @@ class ScheduledTask:
         if self.status in ("disabled", "running"):
             return False
         if not self.last_run:
-            return True  # Never run = overdue
+            return False  # Not overdue on first run — let is_due handle scheduling
 
         try:
             last = datetime.strptime(self.last_run, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
@@ -134,7 +134,7 @@ class ScheduledTask:
         self.last_error = error[:200]
 
         # Auto-disable after too many consecutive failures
-        if self.consecutive_failures >= self.max_retries:
+        if self.consecutive_failures > self.max_retries:
             self.status = "disabled"
             logger.error(
                 "Task '%s' disabled after %d consecutive failures",
@@ -323,7 +323,7 @@ class TaskScheduler:
                 continue
 
             task.status = "running"
-            start_time = asyncio.get_event_loop().time()
+            start_time = asyncio.get_running_loop().time()
 
             try:
                 # Execute with timeout
@@ -331,7 +331,7 @@ class TaskScheduler:
                     handler(),
                     timeout=task.timeout_seconds,
                 )
-                duration = asyncio.get_event_loop().time() - start_time
+                duration = asyncio.get_running_loop().time() - start_time
                 task.mark_completed(duration)
                 results["executed"] += 1
                 results["tasks"].append({
@@ -340,7 +340,7 @@ class TaskScheduler:
                 })
 
             except asyncio.TimeoutError:
-                duration = asyncio.get_event_loop().time() - start_time
+                duration = asyncio.get_running_loop().time() - start_time
                 task.mark_failed(f"Timed out after {task.timeout_seconds}s")
                 results["timed_out"] += 1
                 results["tasks"].append({
@@ -350,7 +350,7 @@ class TaskScheduler:
                 logger.error("Task '%s' timed out after %ds", task.name, task.timeout_seconds)
 
             except Exception as exc:
-                duration = asyncio.get_event_loop().time() - start_time
+                duration = asyncio.get_running_loop().time() - start_time
                 task.mark_failed(str(exc))
                 results["failed"] += 1
                 results["tasks"].append({

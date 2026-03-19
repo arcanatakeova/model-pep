@@ -13,6 +13,7 @@ Automated actions at each stage. No lead falls through the cracks.
 from __future__ import annotations
 
 import logging
+import random
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Any
@@ -105,7 +106,7 @@ class CRM:
     ) -> str:
         """Create a new deal in the pipeline."""
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        deal_key = f"deal-{contact_key.replace('contact-', '')}-{ts}"
+        deal_key = f"deal-{contact_key.replace('contact-', '')}-{ts}-{random.randint(100,999)}"
 
         self.memory.save_knowledge(
             "projects", deal_key,
@@ -144,6 +145,8 @@ class CRM:
             PipelineStage.WON: 100,
             PipelineStage.ONBOARDING: 100,
             PipelineStage.ACTIVE: 100,
+            PipelineStage.UPSELL: 60,
+            PipelineStage.RENEWAL: 75,
             PipelineStage.LOST: 0,
             PipelineStage.CHURNED: 0,
         }

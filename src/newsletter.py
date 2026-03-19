@@ -55,7 +55,7 @@ class Newsletter:
             f"{self.base_url}/publications/{self.publication_id}",
         )
         resp.raise_for_status()
-        if resp.status_code == 200:
+        if 200 <= resp.status_code < 300:
             data = resp.json().get("data", {})
             stats = data.get("stats", {})
             return {
@@ -86,7 +86,7 @@ class Newsletter:
             },
         )
         resp.raise_for_status()
-        if resp.status_code in (200, 201):
+        if 200 <= resp.status_code < 300:
             post = resp.json().get("data", {})
             self.memory.log(f"Newsletter post created: {subject} ({status})", "Newsletter")
             return post
@@ -108,7 +108,7 @@ class Newsletter:
             json={"post": {"status": "confirmed"}},
         )
         resp.raise_for_status()
-        if resp.status_code == 200:
+        if 200 <= resp.status_code < 300:
             post = resp.json().get("data", {})
             self.memory.log(f"Newsletter published: {post_id}", "Newsletter")
             return post
@@ -141,7 +141,7 @@ class Newsletter:
             },
         )
         resp.raise_for_status()
-        if resp.status_code == 200:
+        if 200 <= resp.status_code < 300:
             post = resp.json().get("data", {})
             self.memory.log(
                 f"Newsletter scheduled: {post_id} for {scheduled_at}", "Newsletter"
@@ -201,26 +201,30 @@ class Newsletter:
             f"### {date}\n{notes[:300]}" for date, notes in recent[:7]
         )
 
-        result = await self.llm.ask_json(
-            f"Generate a weekly newsletter issue for ARCANA AI's audience.\n\n"
-            f"This week's activity:\n{content_summary}\n\n"
-            f"The newsletter covers: AI business automation, autonomous agents, "
-            f"real case studies from Arcana Operations, and actionable insights.\n\n"
-            f"Format requirements:\n"
-            f"- Subject line (compelling, under 60 chars)\n"
-            f"- 3-4 sections with headers\n"
-            f"- Each section: 2-3 paragraphs\n"
-            f"- Include one CTA for Arcana Operations consulting\n"
-            f"- Include one product mention (guide, template, etc.)\n"
-            f"- ARCANA's voice: insightful, pattern-focused, no hype\n\n"
-            f"Return JSON: {{"
-            f'"subject": str, '
-            f'"preview_text": str (under 100 chars), '
-            f'"sections": [{{"title": str, "content_html": str}}], '
-            f'"cta_text": str, '
-            f'"cta_url": str}}',
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Generate a weekly newsletter issue for ARCANA AI's audience.\n\n"
+                f"This week's activity:\n{content_summary}\n\n"
+                f"The newsletter covers: AI business automation, autonomous agents, "
+                f"real case studies from Arcana Operations, and actionable insights.\n\n"
+                f"Format requirements:\n"
+                f"- Subject line (compelling, under 60 chars)\n"
+                f"- 3-4 sections with headers\n"
+                f"- Each section: 2-3 paragraphs\n"
+                f"- Include one CTA for Arcana Operations consulting\n"
+                f"- Include one product mention (guide, template, etc.)\n"
+                f"- ARCANA's voice: insightful, pattern-focused, no hype\n\n"
+                f"Return JSON: {{"
+                f'"subject": str, '
+                f'"preview_text": str (under 100 chars), '
+                f'"sections": [{{"title": str, "content_html": str}}], '
+                f'"cta_text": str, '
+                f'"cta_url": str}}',
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("generate_weekly_issue ask_json failed: %s", exc)
+            return {"subject": None, "preview": None, "sections": 0, "post_id": None, "published": False}
 
         # Assemble HTML
         html_parts = []
@@ -266,14 +270,11 @@ class Newsletter:
         }
 
     @retry()
-    async def get_subscriber_growth(self, days: int = 30) -> list[dict[str, Any]]:
+    async def get_subscriber_growth(self) -> list[dict[str, Any]]:
         """Track subscriber count over time.
 
         Fetches current subscriber data and logs a snapshot to memory
         for historical trend analysis.
-
-        Args:
-            days: Number of days of history to consider (for future use).
         """
         if not self.api_key or not self.publication_id:
             return []
@@ -284,7 +285,7 @@ class Newsletter:
             params={"limit": 100, "status": "active"},
         )
         resp.raise_for_status()
-        if resp.status_code != 200:
+        if not (200 <= resp.status_code < 300):
             logger.error("Beehiiv subscriber growth fetch failed: %s", resp.status_code)
             return []
 
@@ -322,7 +323,7 @@ class Newsletter:
             params={"limit": limit, "status": "confirmed"},
         )
         resp.raise_for_status()
-        if resp.status_code != 200:
+        if not (200 <= resp.status_code < 300):
             logger.error("Beehiiv performance fetch failed: %s", resp.status_code)
             return {"issues": [], "aggregate": {}}
 

@@ -45,9 +45,6 @@ class XClient:
         self._daily_reset_date = ""
         self._max_daily = self.config.max_x_posts_per_day
         self._last_mention_poll = 0.0
-        # Rate limit tracking from API responses
-        self._rate_limit_remaining = 100
-        self._rate_limit_reset = 0.0
 
     def _get_client(self):
         """Lazy-init tweepy client."""
@@ -121,7 +118,7 @@ class XClient:
             if "429" in error_msg or "Too Many" in error_msg:
                 logger.warning("X rate limited — waiting 60s")
                 await asyncio.sleep(60)
-                raise  # Let retry decorator handle it
+                raise TimeoutError(str(exc)) from exc  # Wrap so @retry catches it
             elif "403" in error_msg or "Forbidden" in error_msg:
                 logger.error("X 403 Forbidden — check API permissions: %s", error_msg[:100])
                 return {"id": None, "text": text, "error": "forbidden"}
@@ -227,12 +224,10 @@ class XClient:
                 logger.error("Get mentions failed: %s", exc)
             return []
 
-    @retry()
     async def reply_to(self, tweet_id: str, text: str) -> dict[str, Any]:
         """Reply to a specific tweet."""
         return await self.post_tweet(text, reply_to=tweet_id)
 
-    @retry()
     async def search_recent(self, query: str, max_results: int = 10) -> list[dict[str, Any]]:
         """Search recent tweets with error handling."""
         client = self._get_client()

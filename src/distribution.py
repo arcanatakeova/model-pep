@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import random
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -61,45 +62,53 @@ class ContentDistributor:
 
     async def repurpose_tweet(self, tweet_text: str) -> dict[str, Any]:
         """Take a tweet and repurpose it for every platform."""
-        result = await self.llm.ask_json(
-            f"Repurpose this tweet for multiple platforms.\n\n"
-            f"Original tweet: {tweet_text}\n\n"
-            f"Generate platform-optimized versions:\n"
-            f"1. LinkedIn: Professional, 1-3 paragraphs, add industry insight, include CTA\n"
-            f"2. Reddit (r/entrepreneur): Community-appropriate, no self-promo, add value\n"
-            f"3. Blog intro: First 2 paragraphs of a full article expanding on this idea\n"
-            f"4. YouTube Shorts script: 30-second spoken version, hook-first\n"
-            f"5. Instagram caption: Engaging, include line breaks, end with question\n"
-            f"6. Newsletter segment: 1-2 paragraphs with deeper analysis\n\n"
-            f"Return JSON: {{"
-            f'"linkedin": str, "reddit": str, "blog_intro": str, '
-            f'"youtube_script": str, "instagram": str, "newsletter": str, '
-            f'"hashtags": {{str: [str]}} (platform-specific hashtags)}}',
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Repurpose this tweet for multiple platforms.\n\n"
+                f"Original tweet: {tweet_text}\n\n"
+                f"Generate platform-optimized versions:\n"
+                f"1. LinkedIn: Professional, 1-3 paragraphs, add industry insight, include CTA\n"
+                f"2. Reddit (r/entrepreneur): Community-appropriate, no self-promo, add value\n"
+                f"3. Blog intro: First 2 paragraphs of a full article expanding on this idea\n"
+                f"4. YouTube Shorts script: 30-second spoken version, hook-first\n"
+                f"5. Instagram caption: Engaging, include line breaks, end with question\n"
+                f"6. Newsletter segment: 1-2 paragraphs with deeper analysis\n\n"
+                f"Return JSON: {{"
+                f'"linkedin": str, "reddit": str, "blog_intro": str, '
+                f'"youtube_script": str, "instagram": str, "newsletter": str, '
+                f'"hashtags": {{str: [str]}} (platform-specific hashtags)}}',
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("repurpose_tweet ask_json failed: %s", exc)
+            return {"linkedin": "", "reddit": "", "blog_intro": "", "youtube_script": "", "instagram": "", "newsletter": "", "hashtags": {}}
         return result
 
     async def repurpose_thread(self, thread_tweets: list[str]) -> dict[str, Any]:
         """Repurpose a full thread into long-form content."""
         combined = "\n\n".join(f"Tweet {i+1}: {t}" for i, t in enumerate(thread_tweets))
 
-        result = await self.llm.ask_json(
-            f"Repurpose this X thread into multiple formats.\n\n"
-            f"Thread:\n{combined}\n\n"
-            f"Generate:\n"
-            f"1. LinkedIn article (800-1200 words, professional)\n"
-            f"2. Blog post (1000-1500 words, SEO-optimized with headers)\n"
-            f"3. Newsletter issue (3-4 sections)\n"
-            f"4. YouTube video script (3-5 minutes, conversational)\n"
-            f"5. Carousel slides (8-10 slides, one key point each)\n\n"
-            f"Return JSON: {{"
-            f'"linkedin_article": str, '
-            f'"blog_post": {{\"title\": str, \"meta_description\": str, \"content_html\": str}}, '
-            f'"newsletter": {{\"subject\": str, \"body_html\": str}}, '
-            f'"youtube_script": str, '
-            f'"carousel_slides": [str]}}',
-            tier=Tier.SONNET,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Repurpose this X thread into multiple formats.\n\n"
+                f"Thread:\n{combined}\n\n"
+                f"Generate:\n"
+                f"1. LinkedIn article (800-1200 words, professional)\n"
+                f"2. Blog post (1000-1500 words, SEO-optimized with headers)\n"
+                f"3. Newsletter issue (3-4 sections)\n"
+                f"4. YouTube video script (3-5 minutes, conversational)\n"
+                f"5. Carousel slides (8-10 slides, one key point each)\n\n"
+                f"Return JSON: {{"
+                f'"linkedin_article": str, '
+                f'"blog_post": {{\"title\": str, \"meta_description\": str, \"content_html\": str}}, '
+                f'"newsletter": {{\"subject\": str, \"body_html\": str}}, '
+                f'"youtube_script": str, '
+                f'"carousel_slides": [str]}}',
+                tier=Tier.SONNET,
+            )
+        except Exception as exc:
+            logger.error("repurpose_thread ask_json failed: %s", exc)
+            return {"linkedin_article": "", "blog_post": {}, "newsletter": {}, "youtube_script": "", "carousel_slides": []}
         return result
 
     # ── Platform Posting ────────────────────────────────────────────
@@ -281,7 +290,7 @@ class ContentDistributor:
         # Save blog content for publishing
         if repurposed.get("blog_intro"):
             self.memory.save_knowledge(
-                "resources", f"blog-draft-{random.randint(1000, 9999)}",
+                "resources", f"blog-draft-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}",
                 repurposed["blog_intro"],
             )
             results["platforms"]["blog"] = "draft_saved"

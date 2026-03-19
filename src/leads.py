@@ -159,7 +159,8 @@ class LeadPipeline:
 
     def get_open_leads(self) -> list[str]:
         """Get all open leads from knowledge graph."""
-        return self.memory.list_knowledge("projects")
+        all_keys = self.memory.list_knowledge("projects")
+        return [k for k in all_keys if k.startswith("lead-")]
 
     def get_lead_details(self, handle: str) -> str:
         """Get details for a specific lead (checks both projects and resources)."""

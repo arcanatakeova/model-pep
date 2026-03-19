@@ -72,7 +72,18 @@ class Heartbeat:
 
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(content, encoding="utf-8")
+            import tempfile, os
+            fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp, str(self.path))
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
         except OSError as exc:
             logger.error("Failed to write heartbeat to %s: %s", self.path, exc)
 
@@ -93,7 +104,7 @@ class Heartbeat:
     def is_stale(self, max_seconds: int = 1800) -> bool:
         """Check if heartbeat is stale (no update in max_seconds)."""
         if self._last_update == 0:
-            return True
+            return False  # Not stale on startup — haven't started yet
         return (time.monotonic() - self._last_update) > max_seconds
 
     def get_health(self) -> dict[str, Any]:

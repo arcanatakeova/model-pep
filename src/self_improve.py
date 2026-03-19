@@ -362,7 +362,7 @@ class SelfImprover:
 
         result = await self.llm.ask_json(
             f"You are ARCANA AI learning from successful deals.\n\n"
-            f"Won deals:\n{'---'.join(won_deals[-5:])}\n\n"
+            f"Won deals:\n{'\n---\n'.join(won_deals[-5:])}\n\n"
             f"Existing winning patterns (avoid duplicates):\n{(existing_patterns or 'None yet.')[-2000:]}\n\n"
             f"For each won deal, trace the success path and extract reusable patterns.\n"
             f"Return JSON: {{\n"
@@ -486,12 +486,14 @@ class SelfImprover:
 
         # Step 2: Consolidate — extract knowledge from daily notes
         for item in analysis.get("knowledge_to_extract", []):
+            if not item.get("name"):
+                continue
             self.memory.save_knowledge(
                 item.get("category", "resources"),
-                item["name"],
+                item.get("name", ""),
                 item["content"],
             )
-            logger.info("Consolidated: %s -> %s", item["name"], item.get("category"))
+            logger.info("Consolidated: %s -> %s", item.get("name", ""), item.get("category"))
 
         # Step 3: Update tacit knowledge with lessons learned
         lessons = analysis.get("lessons_learned", [])
@@ -632,7 +634,7 @@ class SelfImprover:
 
         result = await self.llm.ask_json(
             f"You are ARCANA AI learning from failures to avoid repeating them.\n\n"
-            f"Lost/churned deals:\n{'---'.join(lost_deals[-5:]) if lost_deals else 'None'}\n\n"
+            f"Lost/churned deals:\n{'\n---\n'.join(lost_deals[-5:]) if lost_deals else 'None'}\n\n"
             f"Failed skill executions:\n{chr(10).join(failures[-10:]) if failures else 'None'}\n\n"
             f"Existing anti-patterns (avoid duplicates):\n{(existing_anti or 'None yet.')[-1500:]}\n\n"
             f"For each failure, trace the failure path and extract anti-patterns.\n"

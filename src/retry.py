@@ -32,10 +32,12 @@ TRANSIENT_EXCEPTIONS = (
 F = TypeVar("F", bound=Callable[..., Any])
 
 
+_TRANSIENT_HTTP_CODES = {500, 502, 503, 504}
+
 def _is_transient_http_error(exc: Exception) -> bool:
-    """Check if an httpx.HTTPStatusError is a transient (5xx) error."""
+    """Check if an httpx.HTTPStatusError is a transient server error."""
     if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code >= 500
+        return exc.response.status_code in _TRANSIENT_HTTP_CODES
     return False
 
 
@@ -59,6 +61,10 @@ def retry(
     """
 
     def decorator(fn: F) -> F:
+        if not asyncio.iscoroutinefunction(fn):
+            raise TypeError(
+                f"@retry() can only decorate async functions, got {fn.__qualname__}"
+            )
         @functools.wraps(fn)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             last_exc: Exception | None = None
