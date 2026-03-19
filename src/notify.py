@@ -1,9 +1,9 @@
 """ARCANA AI — Notification system with production-grade reliability.
 
 Features:
-- Multi-channel delivery (Discord webhook, Telegram bot)
+- Multi-channel delivery (Discord webhook, Telegram bot, iMessage via Sendblue)
 - Message queue with rate limiting (prevent Discord 429s)
-- Automatic message chunking (Discord 2000 char, Telegram 4096 char)
+- Automatic message chunking (Discord 2000 char, Telegram 4096 char, iMessage 2000 char)
 - Retry with exponential backoff on transient failures
 - Priority levels with different routing
 - Graceful degradation (one channel down doesn't block others)
@@ -28,7 +28,11 @@ logger = logging.getLogger("arcana.notify")
 # Rate limits
 DISCORD_RATE_LIMIT = 30       # Max messages per minute
 TELEGRAM_RATE_LIMIT = 20      # Max messages per minute
+SENDBLUE_RATE_LIMIT = 10      # Max messages per minute (conservative for iMessage)
 DEDUP_WINDOW_SECONDS = 300    # 5 min dedup window
+
+# Sendblue API
+SENDBLUE_API_URL = "https://api.sendblue.co/api/send-message"
 
 
 class Notifier:
@@ -40,6 +44,7 @@ class Notifier:
         # Rate limiting
         self._discord_timestamps: deque[float] = deque(maxlen=DISCORD_RATE_LIMIT)
         self._telegram_timestamps: deque[float] = deque(maxlen=TELEGRAM_RATE_LIMIT)
+        self._sendblue_timestamps: deque[float] = deque(maxlen=SENDBLUE_RATE_LIMIT)
         # Deduplication
         self._recent_hashes: dict[str, float] = {}
         # Stats
@@ -167,6 +172,75 @@ class Notifier:
 
         return True
 
+    @retry(max_retries=2, base_delay=1.0)
+    async def _send_imessage(self, text: str, number: str | None = None) -> bool:
+        """Send iMessage via Sendblue API.
+
+        Sends to a specific number, or broadcasts to both Ian & Tan if no
+        number is provided.  Sendblue docs: POST /api/send-message with
+        {number, content} and Basic auth (api_key:api_secret).
+        """
+        if not (self.config.sendblue_api_key and self.config.sendblue_api_secret):
+            return False
+
+        recipients: list[str] = []
+        if number:
+            recipients.append(number)
+        else:
+            if self.config.imessage_ian_number:
+                recipients.append(self.config.imessage_ian_number)
+            if self.config.imessage_tan_number:
+                recipients.append(self.config.imessage_tan_number)
+
+        if not recipients:
+            return False
+
+        await self._wait_for_rate_limit(self._sendblue_timestamps, SENDBLUE_RATE_LIMIT)
+
+        auth = (self.config.sendblue_api_key, self.config.sendblue_api_secret)
+        headers = {"content-type": "application/json"}
+
+        # iMessage has no hard char limit but Sendblue recommends ≤2000
+        chunks = self._chunk_message(text, 2000)
+
+        for recipient in recipients:
+            for chunk in chunks:
+                resp = await self._client.post(
+                    SENDBLUE_API_URL,
+                    json={"number": recipient, "content": chunk},
+                    auth=auth,
+                    headers=headers,
+                )
+                if resp.status_code == 429:
+                    retry_after = float(resp.headers.get("retry-after", "5"))
+                    logger.warning("Sendblue rate limited, waiting %ss", retry_after)
+                    await asyncio.sleep(retry_after)
+                    resp = await self._client.post(
+                        SENDBLUE_API_URL,
+                        json={"number": recipient, "content": chunk},
+                        auth=auth,
+                        headers=headers,
+                    )
+                resp.raise_for_status()
+
+                if len(chunks) > 1:
+                    await asyncio.sleep(0.5)
+
+            # Small gap between recipients to avoid burst
+            if len(recipients) > 1:
+                await asyncio.sleep(0.3)
+
+        return True
+
+    async def send_imessage_to(self, number: str, message: str) -> bool:
+        """Send a direct iMessage to a specific number (for conversations)."""
+        try:
+            return await self._send_imessage(message, number=number)
+        except Exception as exc:
+            self._error_count += 1
+            logger.error("Direct iMessage to %s failed: %s", number, exc)
+            return False
+
     # ── Public API ───────────────────────────────────────────────
 
     async def send(self, message: str, level: str = "info") -> None:
@@ -184,6 +258,7 @@ class Notifier:
         # Send to each channel independently — one failure doesn't block others
         discord_ok = False
         telegram_ok = False
+        imessage_ok = False
 
         try:
             discord_ok = await self._send_discord(text)
@@ -197,9 +272,19 @@ class Notifier:
             self._error_count += 1
             logger.error("Telegram notification failed: %s", exc)
 
-        if discord_ok or telegram_ok:
+        try:
+            imessage_ok = await self._send_imessage(text)
+        except Exception as exc:
+            self._error_count += 1
+            logger.error("iMessage notification failed: %s", exc)
+
+        if discord_ok or telegram_ok or imessage_ok:
             self._sent_count += 1
-        elif not self.config.discord_webhook_url and not self.config.telegram_bot_token:
+        elif (
+            not self.config.discord_webhook_url
+            and not self.config.telegram_bot_token
+            and not self.config.sendblue_api_key
+        ):
             logger.debug("No notification channels configured")
 
     async def lead_alert(self, handle: str, need: str, score: int) -> None:

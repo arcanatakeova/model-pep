@@ -3,11 +3,12 @@
 Lightweight async HTTP server for incoming webhooks and health monitoring.
 
 Endpoints:
-- POST /webhooks/stripe   — Stripe payment events (signature-verified)
-- POST /webhooks/gumroad  — Gumroad IPN sale notifications
-- POST /webhooks/beehiiv  — Beehiiv subscriber events
-- GET  /health            — Liveness probe with uptime
-- GET  /dashboard         — Revenue & ops dashboard as JSON
+- POST /webhooks/stripe    — Stripe payment events (signature-verified)
+- POST /webhooks/gumroad   — Gumroad IPN sale notifications
+- POST /webhooks/beehiiv   — Beehiiv subscriber events
+- POST /webhooks/sendblue  — Inbound iMessages from Ian & Tan via Sendblue
+- GET  /health             — Liveness probe with uptime
+- GET  /dashboard          — Revenue & ops dashboard as JSON
 
 Runs as a background task alongside the main orchestrator loop.
 """
@@ -23,6 +24,7 @@ from typing import Any
 
 from aiohttp import web
 
+from src.config import Config, get_config
 from src.memory import Memory
 from src.payments import PaymentsEngine
 
@@ -39,13 +41,18 @@ class WebhookServer:
         *,
         port: int | None = None,
         stripe_webhook_secret: str = "",
+        config: Config | None = None,
+        imessage_callback: Any | None = None,
     ) -> None:
         self.memory = memory
         self.payments = payments
+        self.config = config or get_config()
         self.port = port or int(os.getenv("WEBHOOK_PORT", "8080"))
         self.stripe_webhook_secret = stripe_webhook_secret or os.getenv(
             "STRIPE_WEBHOOK_SECRET", ""
         )
+        # Called with (sender_number, message_text) when an iMessage arrives
+        self._imessage_callback = imessage_callback
         self._start_time: float = time.monotonic()
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
@@ -57,6 +64,7 @@ class WebhookServer:
         app.router.add_post("/webhooks/stripe", self._handle_stripe)
         app.router.add_post("/webhooks/gumroad", self._handle_gumroad)
         app.router.add_post("/webhooks/beehiiv", self._handle_beehiiv)
+        app.router.add_post("/webhooks/sendblue", self._handle_sendblue)
         app.router.add_get("/health", self._handle_health)
         app.router.add_get("/dashboard", self._handle_dashboard)
         return app
@@ -208,6 +216,69 @@ class WebhookServer:
             )
 
         return web.json_response({"status": "received", "event": event_type})
+
+    # ── Sendblue Inbound iMessage ────────────────────────────────────
+
+    async def _handle_sendblue(self, request: web.Request) -> web.Response:
+        """Handle inbound iMessages relayed by Sendblue.
+
+        Sendblue sends:
+          {
+            "accountEmail": "...",
+            "content": "message text",
+            "media_url": "...",
+            "number": "+1XXXXXXXXXX",
+            "was_downgraded": false,
+            ...
+          }
+
+        We identify the sender (Ian or Tan), log the message, and invoke the
+        callback so the orchestrator can process the instruction.
+        """
+        try:
+            data = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        sender_number = data.get("number", "")
+        content = data.get("content", "")
+        media_url = data.get("media_url", "")
+
+        if not content and not media_url:
+            return web.json_response({"status": "empty_message"})
+
+        # Identify sender
+        sender_name = "unknown"
+        if sender_number == self.config.imessage_ian_number:
+            sender_name = "Ian"
+        elif sender_number == self.config.imessage_tan_number:
+            sender_name = "Tan"
+
+        log_entry = (
+            f"[iMessage] From {sender_name} ({sender_number}):\n"
+            f"  {content[:500]}"
+        )
+        if media_url:
+            log_entry += f"\n  Media: {media_url}"
+
+        self.memory.log(log_entry, "iMessage")
+        logger.info("Inbound iMessage from %s: %s", sender_name, content[:100])
+
+        # Fire callback for orchestrator to process the message
+        if self._imessage_callback and content:
+            try:
+                import asyncio
+                if asyncio.iscoroutinefunction(self._imessage_callback):
+                    await self._imessage_callback(sender_number, sender_name, content)
+                else:
+                    self._imessage_callback(sender_number, sender_name, content)
+            except Exception as exc:
+                logger.error("iMessage callback failed for %s: %s", sender_name, exc)
+
+        return web.json_response({
+            "status": "received",
+            "sender": sender_name,
+        })
 
     # ── Health Check ─────────────────────────────────────────────────
 

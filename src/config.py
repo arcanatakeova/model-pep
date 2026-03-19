@@ -39,6 +39,7 @@ SERVICE_GROUPS = {
     "stripe": ["stripe_secret_key"],
     "discord": ["discord_webhook_url"],
     "telegram": ["telegram_bot_token", "telegram_chat_id"],
+    "imessage": ["sendblue_api_key", "sendblue_api_secret", "imessage_ian_number"],
     "email": ["sendgrid_api_key"],
     "outreach": ["apollo_api_key", "instantly_api_key"],
     "newsletter": ["beehiiv_api_key", "beehiiv_publication_id"],
@@ -82,6 +83,12 @@ class Config(BaseModel):
     discord_guild_id: str = Field(default_factory=lambda: os.getenv("DISCORD_GUILD_ID", ""))
     telegram_bot_token: str = Field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
     telegram_chat_id: str = Field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
+
+    # ── iMessage (Sendblue) ────────────────────────────────────
+    sendblue_api_key: str = Field(default_factory=lambda: os.getenv("SENDBLUE_API_KEY", ""))
+    sendblue_api_secret: str = Field(default_factory=lambda: os.getenv("SENDBLUE_API_SECRET", ""))
+    imessage_ian_number: str = Field(default_factory=lambda: os.getenv("IMESSAGE_IAN_NUMBER", ""))
+    imessage_tan_number: str = Field(default_factory=lambda: os.getenv("IMESSAGE_TAN_NUMBER", ""))
 
     # ── Content Production / UGC ────────────────────────────────
     heygen_api_key: str = Field(default_factory=lambda: os.getenv("HEYGEN_API_KEY", ""))

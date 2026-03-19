@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger("arcana.toolkit")
+
 # ═══════════════════════════════════════════════
 # NLP & TEXT PROCESSING
 # ═══════════════════════════════════════════════
@@ -74,6 +76,7 @@ def extract_keywords(text: str, top_n: int = 10) -> list[str]:
             freq[p] = freq.get(p, 0) + 1
         return sorted(freq.keys(), key=lambda k: -freq[k])[:top_n]
     except Exception:
+        logger.debug("TextBlob keyword extraction failed, using fallback tokenizer")
         # Fallback: extract frequent non-stopword tokens
         stopwords = {"the", "a", "an", "is", "are", "was", "were", "be", "been",
                      "being", "have", "has", "had", "do", "does", "did", "will",
@@ -97,6 +100,7 @@ def detect_language(text: str) -> str:
         blob = TextBlob(text[:500])
         return str(blob.detect_language())
     except Exception:
+        logger.debug("Language detection failed, defaulting to English")
         return "en"  # Default to English
 
 
@@ -157,6 +161,7 @@ def parse_rss_feed(xml_content: str) -> list[dict[str, str]]:
             for item in feed.items
         ]
     except Exception:
+        logger.debug("RSS parsing failed, trying Atom format")
         try:
             feed = atoma.parse_atom_bytes(xml_content.encode())
             return [
@@ -169,6 +174,7 @@ def parse_rss_feed(xml_content: str) -> list[dict[str, str]]:
                 for entry in feed.entries
             ]
         except Exception:
+            logger.debug("Atom parsing also failed, returning empty feed")
             return []
 
 
@@ -178,6 +184,7 @@ def random_user_agent() -> str:
         from fake_useragent import UserAgent
         return UserAgent().random
     except Exception:
+        logger.debug("fake_useragent failed, using default user-agent")
         return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
@@ -263,6 +270,7 @@ def resize_image(
         img.save(str(output_path), quality=quality, optimize=True)
         return True
     except Exception:
+        logger.warning("Failed to resize image %s -> %s", input_path, output_path)
         return False
 
 
@@ -278,6 +286,7 @@ def create_thumbnail(
         img.save(str(output_path), quality=80, optimize=True)
         return True
     except Exception:
+        logger.warning("Failed to create thumbnail %s -> %s", input_path, output_path)
         return False
 
 
@@ -307,6 +316,7 @@ def add_watermark(
         result.save(str(output_path), quality=85)
         return True
     except Exception:
+        logger.warning("Failed to add watermark to %s", input_path)
         return False
 
 
@@ -442,6 +452,7 @@ def parse_date(text: str) -> datetime | None:
     try:
         return arrow.get(text).datetime
     except Exception:
+        logger.debug("Failed to parse date from text: %s", text[:100])
         return None
 
 
@@ -493,6 +504,7 @@ def count_tokens(text: str, model: str = "cl100k_base") -> int:
         enc = tiktoken.get_encoding(model)
         return len(enc.encode(text))
     except Exception:
+        logger.debug("tiktoken encoding failed, using char/4 approximation")
         return len(text) // 4  # Fallback approximation
 
 
@@ -514,6 +526,7 @@ def extract_domain(url: str) -> str:
     try:
         return furl(url).host or ""
     except Exception:
+        logger.debug("Failed to extract domain from URL: %s", url[:200])
         return ""
 
 
@@ -592,6 +605,7 @@ def generate_pdf(
         doc.build(story)
         return True
     except Exception:
+        logger.warning("Failed to generate PDF: %s -> %s", title, output_path)
         return False
 
 
@@ -647,6 +661,7 @@ def generate_qr_code(
         img.save(str(output_path))
         return True
     except Exception:
+        logger.warning("Failed to generate QR code for: %s", data[:100])
         return False
 
 
@@ -658,6 +673,7 @@ def generate_micro_qr(data: str, output_path: str | Path) -> bool:
         qr.save(str(output_path), scale=8, border=2)
         return True
     except Exception:
+        logger.warning("Failed to generate micro QR code for: %s", data[:100])
         return False
 
 
@@ -705,6 +721,7 @@ def generate_excel(
         wb.save(str(output_path))
         return True
     except Exception:
+        logger.warning("Failed to generate Excel file: %s", output_path)
         return False
 
 
@@ -792,6 +809,7 @@ def send_notification(
                 ap.add(url)
         return ap.notify(title=title, body=body)
     except Exception:
+        logger.warning("Apprise notification failed: title=%s", title)
         return False
 
 
@@ -812,7 +830,7 @@ def geocode_location(location: str) -> dict[str, Any] | None:
                 "longitude": result.longitude,
             }
     except Exception:
-        pass
+        logger.debug("Geocoding failed for location: %s", location[:100])
     return None
 
 
@@ -856,6 +874,7 @@ def check_mx_records(domain: str) -> list[str]:
         answers = dns.resolver.resolve(domain, "MX")
         return [str(r.exchange).rstrip(".") for r in answers]
     except Exception:
+        logger.debug("MX record lookup failed for domain: %s", domain)
         return []
 
 
@@ -933,6 +952,7 @@ def parse_sitemap(sitemap_url: str) -> list[str]:
         tree = sitemap_tree_for_homepage(sitemap_url)
         return [page.url for page in tree.all_pages() if page.url]
     except Exception:
+        logger.debug("Sitemap parsing failed for: %s", sitemap_url[:200])
         return []
 
 
@@ -970,6 +990,7 @@ def extract_colors(image_path: str | Path, count: int = 5) -> list[tuple[int, in
         ct = ColorThief(str(image_path))
         return ct.get_palette(color_count=count, quality=10)
     except Exception:
+        logger.debug("Color extraction failed for image: %s", image_path)
         return []
 
 
@@ -980,6 +1001,7 @@ def dominant_color(image_path: str | Path) -> tuple[int, int, int] | None:
         ct = ColorThief(str(image_path))
         return ct.get_color(quality=10)
     except Exception:
+        logger.debug("Dominant color extraction failed for image: %s", image_path)
         return None
 
 

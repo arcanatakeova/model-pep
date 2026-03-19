@@ -715,6 +715,7 @@ class ConversationMemory:
             from src.toolkit import sentiment_score
             return sentiment_score(text).get("label", "neutral")
         except Exception:
+            logger.debug("TextBlob sentiment analysis unavailable, using rule-based fallback")
             # Fallback to simple rule-based if TextBlob unavailable
             lower = text.lower()
             pos_words = {"thanks", "great", "awesome", "love", "perfect", "excellent", "amazing", "appreciate"}
