@@ -25,8 +25,10 @@ from src.agents.iris import Iris
 from src.agents.remy import Remy
 from src.analytics import Analytics
 from src.api_evolver import APIEvolver
+from src.client_portal import ClientPortal
 from src.config import STOP_FILE, Config, get_config
 from src.content_engine import ContentEngine
+from src.conversation_memory import ConversationMemory
 from src.crm import CRM
 from src.database import Database
 from src.distribution import ContentDistributor
@@ -34,7 +36,9 @@ from src.email_engine import EmailEngine
 from src.evolution_tracker import EvolutionTracker
 from src.fulfillment import FulfillmentEngine
 from src.heartbeat import Heartbeat
+from src.intel_engine import IntelEngine
 from src.leads import LeadPipeline
+from src.live_integrator import LiveIntegrator
 from src.llm import LLM, Tier
 from src.memory import Memory
 from src.newsletter import Newsletter
@@ -42,9 +46,11 @@ from src.notify import Notifier
 from src.opportunity_scanner import OpportunityScanner
 from src.outreach import OutreachEngine
 from src.payments import PaymentsEngine
+from src.pricing_engine import PricingEngine
 from src.product_factory import ProductFactory
 from src.prompt_evolver import PromptEvolver
 from src.revenue_engine import RevenueEngine
+from src.scanners import ScannerOrchestrator
 from src.scheduler import TaskScheduler
 from src.self_improve import SelfImprover
 from src.seo_engine import SEOEngine
@@ -102,6 +108,13 @@ class Orchestrator:
         self.analytics: Analytics | None = None
         self.db: Database | None = None
         self.webhook_server: WebhookServer | None = None
+        # Missing integrations now wired
+        self.intel: IntelEngine | None = None
+        self.client_portal: ClientPortal | None = None
+        self.conv_memory: ConversationMemory | None = None
+        self.pricing: PricingEngine | None = None
+        self.scanner_orchestrator: ScannerOrchestrator | None = None
+        self.live_integrator: LiveIntegrator | None = None
         # Evolution engine
         self.skill_executor: SkillExecutor | None = None
         self.evolution_tracker: EvolutionTracker | None = None
@@ -146,6 +159,7 @@ class Orchestrator:
             self.config.makeugc_api_key,
         )
         self.scanner = OpportunityScanner(self.llm, self.memory, self.x, self.notifier, db=self.db)
+        self.scanner_orchestrator = ScannerOrchestrator(self.llm, self.memory, db=self.db)
 
         # Execution layer — close deals, collect money, deliver services
         self.email = EmailEngine(
@@ -172,6 +186,13 @@ class Orchestrator:
         self.scheduler = TaskScheduler(self.memory)
         self.analytics = Analytics(self.llm, self.memory, db=self.db)
         self.revenue = RevenueEngine(self.memory, self.payments_engine, self.trader)
+
+        # Newly wired integrations — competitive intel, client portal, conversation memory, pricing
+        self.intel = IntelEngine(self.config, self.llm, self.memory)
+        self.client_portal = ClientPortal(self.llm, self.memory, self.email)
+        self.conv_memory = ConversationMemory(self.db, self.llm)
+        self.pricing = PricingEngine(self.llm, self.memory)
+        self.live_integrator = LiveIntegrator(self.llm, self.memory)
 
         # Evolution engine — ARCANA gets smarter every cycle
         self.skill_executor = SkillExecutor(self.llm, self.memory)
@@ -207,6 +228,10 @@ class Orchestrator:
         self.scheduler.register_handler("weekly_pipeline_nurture", self.scanner.nurture_pipeline)
         self.scheduler.register_handler("monthly_product_creation", self.product_factory.create_and_list_product)
         self.scheduler.register_handler("monthly_analytics", self.analytics.generate_roi_report)
+        # Newly wired integration handlers
+        self.scheduler.register_handler("weekly_intel_briefing", self.intel.weekly_intel_briefing)
+        self.scheduler.register_handler("weekly_client_reports", self.client_portal.run_scheduled_reports)
+        self.scheduler.register_handler("scanner_optimization", self.scanner_orchestrator.nightly_optimization)
         # Evolution engine handlers
         self.scheduler.register_handler("run_skills", self.skill_executor.run_due_skills)
         self.scheduler.register_handler("api_evolution", self.api_evolver.hourly_cycle)
@@ -321,9 +346,11 @@ class Orchestrator:
             f"**Newsletter:** {nl_stats.get('subscribers', 0)} subscribers\n"
             f"**Open Leads:** {len(open_leads)}\n\n"
             f"{scanner_report}\n\n"
+            f"{self.scanner_orchestrator.format_orchestrator_report()}\n\n"
             f"{crm_report}\n\n"
             f"{analytics_report}\n\n"
             f"{scheduler_report}\n\n"
+            f"{self.live_integrator.format_report()}\n\n"
             f"{db_dashboard}\n\n"
             f"**Revenue Actions:**\n"
             + "\n".join(f"- {a}" for a in result.get("revenue_actions", []))
@@ -363,20 +390,20 @@ class Orchestrator:
         # 1. HIGHEST PRIORITY: Check mentions → qualify leads
         await self._process_mentions()
 
-        # 2. HUNT FOR MONEY: Scan X, Reddit, freelance, HN for opportunities
+        # 2. HUNT FOR MONEY: Coordinated multi-platform scan
         try:
-            scan_results = await self.scanner.scan_cycle()
+            scan_results = await self.scanner_orchestrator.coordinated_scan(self.scanner)
             if scan_results.get("total_found", 0) > 0:
                 self._completed_today.append(
                     f"Scanner: {scan_results['total_found']} opportunities, "
-                    f"{scan_results['auto_responded']} responded"
+                    f"{scan_results['total_responded']} responded, "
+                    f"{scan_results.get('duplicates_filtered', 0)} deduped"
                 )
                 if self.db:
                     self.db.log_event("scan_cycle_complete", "scanner", {
                         "total_found": scan_results["total_found"],
-                        "auto_responded": scan_results.get("auto_responded", 0),
-                        "escalated": scan_results.get("escalated", 0),
-                        "cycle": scan_results.get("cycle", 0),
+                        "total_responded": scan_results.get("total_responded", 0),
+                        "platforms": scan_results.get("platforms_scanned", []),
                     })
         except Exception as exc:
             logger.error("Opportunity scan failed: %s", exc)
@@ -451,18 +478,54 @@ class Orchestrator:
 
         self._last_mention_id = mentions[0].get("id")
 
+        # Track conversations in ConversationMemory for cross-channel context
+        for mention in mentions:
+            try:
+                author = mention.get("author_id", mention.get("username", "unknown"))
+                text = mention.get("text", "")
+                contact_id = self.db.upsert_contact(
+                    handle=author, source="x",
+                ) if self.db else None
+                if contact_id:
+                    conv = self.conv_memory.find_conversation(contact_id, "x")
+                    conv_id = conv["id"] if conv else self.conv_memory.start_conversation(
+                        contact_id=contact_id, channel="x",
+                        subject=f"X mention from @{author}",
+                    )
+                    self.conv_memory.add_message(
+                        conv_id=conv_id if isinstance(conv_id, str) else str(conv_id),
+                        role="user", content=text, sender=author,
+                    )
+            except Exception as exc:
+                logger.debug("Conv memory tracking failed: %s", exc)
+
         # Process for leads
         lead_results = await self.leads.process_mentions(mentions)
 
-        # Reply to qualified leads immediately
+        # Reply to qualified leads immediately — with pricing context
         for lead in lead_results.get("qualified", []):
-            if lead.get("suggested_reply"):
+            reply = lead.get("suggested_reply", "")
+            # Enrich with pricing if they asked about services
+            if lead.get("service_interest"):
+                try:
+                    quote = await self.pricing.generate_quote(
+                        service=lead.get("service_interest", "consulting"),
+                        client_name=lead.get("handle", ""),
+                        requirements=lead.get("context", "")[:300],
+                    )
+                    # Append price hint to reply if appropriate
+                    if quote.get("starting_at"):
+                        reply = f"{reply}\n\nStarting at {quote['starting_at']}/mo — DM for a custom quote."
+                except Exception:
+                    pass
+
+            if reply:
                 mention_id = next(
                     (m["id"] for m in mentions if m.get("author_id") == lead["handle"]),
                     None,
                 )
                 if mention_id:
-                    await self.x.reply_to(mention_id, lead["suggested_reply"])
+                    await self.x.reply_to(mention_id, reply)
 
         # Generate replies for non-lead mentions
         for mention in mentions:
@@ -657,7 +720,7 @@ class Orchestrator:
         except Exception as exc:
             logger.error("Fulfillment failed: %s", exc)
 
-        # 7. Follow up on warm leads
+        # 7. Follow up on warm leads — with conversation context + pricing
         try:
             open_leads = [
                 n for n in self.memory.list_knowledge("projects")
@@ -667,11 +730,71 @@ class Orchestrator:
                 handle = lead_key.replace("lead-", "")
                 context = self.memory.get_knowledge("projects", lead_key)
                 if context:
-                    await self.remy.follow_up(handle, context[:300])
+                    # Get conversation history for better follow-ups
+                    conv_context = ""
+                    if self.db:
+                        contact = self.db.find_contacts(handle=handle)
+                        if contact:
+                            conv_context = self.conv_memory.get_context_for_reply(
+                                contact[0]["id"]
+                            )
+                    enriched = f"{context[:300]}\n\nConversation history:\n{conv_context[:500]}"
+                    await self.remy.follow_up(handle, enriched)
             if open_leads:
                 self._completed_today.append(f"Followed up on {min(len(open_leads), 5)} leads")
         except Exception as exc:
             logger.error("Lead follow-up failed: %s", exc)
+
+        # 8. Competitive intelligence (weekly scan)
+        try:
+            intel_briefing = await self.intel.weekly_intel_briefing()
+            self.memory.log(f"Intel briefing: {intel_briefing[:300]}", "Competitive Intel")
+            self._completed_today.append("Generated competitive intel briefing")
+        except Exception as exc:
+            logger.error("Intel briefing failed: %s", exc)
+
+        # 9. Client portal — send weekly reports to all active clients
+        try:
+            portal_results = await self.client_portal.run_scheduled_reports()
+            if portal_results:
+                self._completed_today.append(
+                    f"Sent {len(portal_results)} client reports"
+                )
+        except Exception as exc:
+            logger.error("Client reports failed: %s", exc)
+
+        # 10. Hot-reload any new API integrations
+        try:
+            reload_result = await self.live_integrator.hot_reload_all()
+            if reload_result.get("loaded"):
+                self._completed_today.append(
+                    f"Hot-reloaded {len(reload_result['loaded'])} new integrations"
+                )
+        except Exception as exc:
+            logger.error("Hot-reload failed: %s", exc)
+
+        # 11. Scanner orchestrator optimization
+        try:
+            scanner_opt = await self.scanner_orchestrator.nightly_optimization()
+            self._completed_today.append("Scanner budgets optimized")
+        except Exception as exc:
+            logger.error("Scanner optimization failed: %s", exc)
+
+        # 12. Process stale conversations — auto-follow-up
+        try:
+            stale = self.conv_memory.get_stale_conversations(hours=48)
+            for conv in stale[:5]:
+                contact_id = conv.get("contact_id")
+                if contact_id:
+                    contacts = self.db.find_contacts(id=contact_id) if self.db else []
+                    if contacts:
+                        handle = contacts[0].get("handle", "")
+                        if handle:
+                            await self.remy.follow_up(handle, f"Stale conversation: {conv.get('subject', '')}")
+            if stale:
+                self._completed_today.append(f"Re-engaged {min(len(stale), 5)} stale conversations")
+        except Exception as exc:
+            logger.error("Stale conversation processing failed: %s", exc)
 
     # ── Nightly Self-Improvement ────────────────────────────────────
 
@@ -702,6 +825,35 @@ class Orchestrator:
         scanner_analysis = await self.scanner.nightly_analysis()
         scanner_report = self.scanner.format_scanner_report()
         self.memory.log(f"Scanner analysis: {scanner_analysis}", "Scanner")
+
+        # Conversation memory daily summary — log to daily notes
+        try:
+            conv_summary = self.conv_memory.format_daily_summary()
+            self.memory.log(conv_summary, "Conversations")
+            # Check for hot conversations that need attention
+            hot_convs = self.conv_memory.get_hot_conversations(min_score=40)
+            if hot_convs:
+                hot_summary = ", ".join(
+                    f"{c.get('contact_handle', '?')} (score={c.get('lead_score', 0)})"
+                    for c in hot_convs[:5]
+                )
+                await self.notifier.send(
+                    f"🔥 Hot conversations needing attention: {hot_summary}",
+                    "alert",
+                )
+        except Exception as exc:
+            logger.error("Conversation summary failed: %s", exc)
+
+        # Competitive intelligence — log displacement opportunities
+        try:
+            displacements = await self.intel.identify_displacement_opportunities()
+            if displacements.get("opportunities"):
+                self.memory.log(
+                    f"Displacement opportunities: {len(displacements['opportunities'])} found",
+                    "Competitive Intel",
+                )
+        except Exception as exc:
+            logger.error("Displacement analysis failed: %s", exc)
 
         # Run self-improvement analysis
         analysis = await self.improver.run_nightly_review()
@@ -872,6 +1024,8 @@ class Orchestrator:
             await self.webhook_server.stop()
         if self.api_evolver:
             await self.api_evolver.close()
+        if self.intel:
+            await self.intel.close()
         if self.db:
             self.db.close()
 
