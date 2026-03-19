@@ -541,6 +541,16 @@ class ProductFactory:
         page_dir = Path("data/landing_pages")
         page_dir.mkdir(parents=True, exist_ok=True)
         page_path = page_dir / f"{slug}.html"
+        # Strip markdown code fences if present
+        result = result.strip()
+        if result.startswith("```"):
+            lines = result.split("\n")
+            # Remove first line (```html or ```) and last line (```)
+            if lines[-1].strip() == "```":
+                lines = lines[1:-1]
+            else:
+                lines = lines[1:]
+            result = "\n".join(lines)
         page_path.write_text(result)
 
         self.memory.log(

@@ -89,7 +89,11 @@ class Database:
             self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.execute("PRAGMA cache_size=-64000")     # 64MB cache
             self._conn.execute("PRAGMA synchronous=NORMAL")     # Faster with WAL
-            self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+            # auto_vacuum must be set before any tables exist
+            cur = self._conn.execute("PRAGMA auto_vacuum")
+            if cur.fetchone()[0] == 0:  # NONE
+                logger.info("Setting auto_vacuum=INCREMENTAL (requires VACUUM)")
+                self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
         return self._conn
 
     def close(self) -> None:
@@ -437,8 +441,8 @@ class Database:
                 cur = conn.execute(
                     f"INSERT INTO contacts ({col_names}) VALUES ({placeholders})", vals,
                 )
+                contact_id = cur.lastrowid
                 conn.commit()
-            contact_id = cur.lastrowid
 
             # Index in FTS
             text = f"{kwargs.get('name', '')} {kwargs.get('company', '')} {kwargs.get('email', '')} {kwargs.get('notes', '')}"
@@ -487,8 +491,9 @@ class Database:
             cur = conn.execute(
                 f"INSERT INTO deals ({col_names}) VALUES ({placeholders})", vals,
             )
+            deal_id = cur.lastrowid
             conn.commit()
-        return cur.lastrowid
+        return deal_id
 
     def update_deal(self, deal_id: int, **kwargs: Any) -> None:
         _validate_columns(set(kwargs.keys()), _DEALS_COLUMNS, "deals")
@@ -496,7 +501,7 @@ class Database:
         updates = {k: v for k, v in kwargs.items() if v is not None}
         if not updates:
             return
-        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        updates["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         with self._lock:
             conn.execute(f"UPDATE deals SET {set_clause} WHERE id = ?", (*updates.values(), deal_id))

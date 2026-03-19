@@ -54,7 +54,7 @@ class Notifier:
     def _is_duplicate(self, message: str) -> bool:
         """Check if this message was sent recently (dedup window)."""
         from src.toolkit import fast_hash
-        msg_hash = fast_hash(message[:200])
+        msg_hash = fast_hash(message)
         now = time.monotonic()
 
         # Clean old entries
@@ -117,18 +117,6 @@ class Notifier:
                 self.config.discord_webhook_url,
                 json={"content": chunk},
             )
-            if resp.status_code == 429:
-                # Discord rate limit — wait and retry
-                try:
-                    retry_after = resp.json().get("retry_after", 5)
-                except Exception:
-                    retry_after = 5
-                logger.warning("Discord rate limited, waiting %ss", retry_after)
-                await asyncio.sleep(retry_after)
-                resp = await self._client.post(
-                    self.config.discord_webhook_url,
-                    json={"content": chunk},
-                )
             resp.raise_for_status()
 
             if len(chunks) > 1:
@@ -215,7 +203,10 @@ class Notifier:
                     headers=headers,
                 )
                 if resp.status_code == 429:
-                    retry_after = float(resp.headers.get("retry-after", "5"))
+                    try:
+                        retry_after = float(resp.headers.get("retry-after", "5"))
+                    except (ValueError, TypeError):
+                        retry_after = 5.0
                     logger.warning("Sendblue rate limited, waiting %ss", retry_after)
                     await asyncio.sleep(retry_after)
                     resp = await self._client.post(
@@ -281,8 +272,9 @@ class Notifier:
             self._error_count += 1
             logger.error("iMessage notification failed: %s", exc)
 
-        if discord_ok or telegram_ok or imessage_ok:
-            self._sent_count += 1
+        for ok in (discord_ok, telegram_ok, imessage_ok):
+            if ok:
+                self._sent_count += 1
         elif (
             not self.config.discord_webhook_url
             and not self.config.telegram_bot_token

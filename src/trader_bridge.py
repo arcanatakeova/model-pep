@@ -42,12 +42,22 @@ class TraderBridge:
     def get_portfolio_state(self) -> dict[str, Any]:
         """Read current trader portfolio state."""
         data = self._read_json(TRADES_FILE)
-        if not data:
+        if data is None:
+            # File doesn't exist or couldn't be read
             return {"active": False, "equity": 0, "positions": 0, "trades_today": 0}
 
-        positions = data.get("positions", {})
-        history = data.get("history", [])
-        equity = data.get("equity", 0)
+        # Empty data structure means trader exists but has no trades yet
+        if isinstance(data, list):
+            # Handle list format - treat as history
+            positions = {}
+            history = data
+            equity = 0
+        elif isinstance(data, dict):
+            positions = data.get("positions", {})
+            history = data.get("history", [])
+            equity = data.get("equity", 0)
+        else:
+            return {"active": False, "equity": 0, "positions": 0, "trades_today": 0}
 
         # Count today's trades
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -88,9 +98,14 @@ class TraderBridge:
     def get_recent_winners(self, n: int = 5) -> list[dict[str, Any]]:
         """Get the N most profitable recent trades for content."""
         data = self._read_json(TRADES_FILE)
-        if not data:
+        if data is None:
             return []
-        history = data.get("history", [])
+        if isinstance(data, list):
+            history = data
+        elif isinstance(data, dict):
+            history = data.get("history", [])
+        else:
+            return []
         winners = sorted(
             [t for t in history if t.get("pnl_usd", 0) > 0],
             key=lambda t: t.get("pnl_usd", 0),
@@ -156,4 +171,4 @@ class TraderBridge:
             for t in history
             if t.get("timestamp", "").startswith(month_prefix)
         )
-        return max(month_pnl, 0)
+        return month_pnl  # Report actual P&L including losses

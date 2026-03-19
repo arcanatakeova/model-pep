@@ -138,19 +138,23 @@ class UGCEngine:
             for a in avatars[:50]  # Cap at 50 for context
         )
 
-        result = await self.llm.ask_json(
-            f"Select the best UGC avatar for this brand.\n\n"
-            f"Brand: {brand_name}\n"
-            f"Target demographic: {target_demo}\n"
-            f"Product type: {product_type}\n\n"
-            f"Available avatars:\n{avatar_list}\n\n"
-            f"Rules:\n"
-            f"- Match avatar to target demographic (age, gender, vibe)\n"
-            f"- UGC performs best when the presenter looks like the target customer\n"
-            f"- Authentic > polished for UGC\n\n"
-            f"Return JSON: {{\"avatar_id\": str, \"reason\": str}}",
-            tier=Tier.HAIKU,
-        )
+        try:
+            result = await self.llm.ask_json(
+                f"Select the best UGC avatar for this brand.\n\n"
+                f"Brand: {brand_name}\n"
+                f"Target demographic: {target_demo}\n"
+                f"Product type: {product_type}\n\n"
+                f"Available avatars:\n{avatar_list}\n\n"
+                f"Rules:\n"
+                f"- Match avatar to target demographic (age, gender, vibe)\n"
+                f"- UGC performs best when the presenter looks like the target customer\n"
+                f"- Authentic > polished for UGC\n\n"
+                f"Return JSON: {{\"avatar_id\": str, \"reason\": str}}",
+                tier=Tier.HAIKU,
+            )
+        except Exception as exc:
+            logger.error("select_avatar_for_brand ask_json failed: %s", exc)
+            return avatars[0] if avatars else None
 
         avatar_id = result.get("avatar_id")
         return next((a for a in avatars if a.get("avatar_id") == avatar_id), avatars[0])
@@ -365,7 +369,7 @@ class UGCEngine:
 
         # 4. Render video
         render = await self.generate_video(
-            script["full_script"], avatar_id, voice_id, video_format,
+            script.get("full_script", ""), avatar_id, voice_id, video_format,
         )
 
         video_id = render.get("video_id")

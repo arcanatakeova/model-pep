@@ -90,9 +90,18 @@ class LiveIntegrator:
         if not data:
             return
         try:
-            json_start = data.find("{")
-            if json_start >= 0:
-                parsed = json.loads(data[json_start:])
+            # Find the last complete JSON object/array in the data
+            parsed = None
+            for marker in ("{", "["):
+                idx = data.rfind(marker)
+                if idx >= 0:
+                    candidate = data[idx:]
+                    try:
+                        parsed = json.loads(candidate)
+                        break
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+            if parsed and isinstance(parsed, dict):
                 for name, rec_data in parsed.items():
                     rec = IntegrationRecord(
                         rec_data["module_name"],
@@ -138,7 +147,7 @@ class LiveIntegrator:
         return {
             rec.module_name.rsplit(".", 1)[-1]
             for rec in self._registry.values()
-            if rec.status in ("loaded", "active", "integrated")
+            if rec.status in ("loaded", "active", "integrated", "pending_review")
         }
 
     def load_module(self, name: str) -> IntegrationRecord | None:
@@ -256,6 +265,16 @@ class LiveIntegrator:
         failed = []
 
         for name in new_modules:
+            # Auto-register new modules as pending review
+            if name not in self._registry:
+                self._registry[name] = IntegrationRecord(
+                    module_name=f"src.integrations.{name}",
+                    class_name=name.rsplit(".", 1)[-1].title().replace("_", ""),
+                    category="",
+                    api_name=name,
+                )
+                self._registry[name].status = "pending_review"
+                self._registry[name].loaded_at = datetime.now(timezone.utc).isoformat()
             record = self.load_module(name)
             if record:
                 await self.categorize_integration(name)
