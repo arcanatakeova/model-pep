@@ -174,8 +174,11 @@ class TaskScheduler:
             return
 
         import json as _json
+        # save_tacit wraps content with "# schedule\n\n...", strip header
+        json_start = data.find("[")
+        json_data = data[json_start:] if json_start >= 0 else data
         try:
-            task_list = _json.loads(data)
+            task_list = _json.loads(json_data)
         except (ValueError, TypeError):
             task_list = None
 

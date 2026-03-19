@@ -187,6 +187,7 @@ class Memory:
 
     def list_knowledge(self, category: str) -> list[str]:
         """List all files in a PARA category."""
+        self._validate_category(category)
         path = self.life / category
         if path.exists():
             return sorted(f.stem for f in path.glob("*.md"))
