@@ -553,8 +553,20 @@ class Orchestrator:
                 if mention_id:
                     await self.x.reply_to(mention_id, reply)
 
+        # Track IDs already replied to during lead qualification
+        replied_ids: set[str] = set()
+        for lead in lead_results.get("qualified", []):
+            mid = next(
+                (m["id"] for m in mentions if m.get("author_id") == lead["handle"]),
+                None,
+            )
+            if mid:
+                replied_ids.add(mid)
+
         # Generate replies for non-lead mentions
         for mention in mentions:
+            if mention["id"] in replied_ids:
+                continue
             text = mention.get("text", "")
             reply_decision = await self.content.reply_to_mention(text)
 
@@ -1116,13 +1128,13 @@ def main() -> None:
     os.makedirs("logs", exist_ok=True)
     orchestrator = Orchestrator()
 
-    def handle_signal(signum, frame):
-        asyncio.get_event_loop().create_task(orchestrator.shutdown())
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, lambda: loop.create_task(orchestrator.shutdown()))
+        await orchestrator.run_forever()
 
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-
-    asyncio.run(orchestrator.run_forever())
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

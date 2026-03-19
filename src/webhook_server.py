@@ -51,6 +51,7 @@ class WebhookServer:
         self.stripe_webhook_secret = stripe_webhook_secret or os.getenv(
             "STRIPE_WEBHOOK_SECRET", ""
         )
+        self._webhook_auth_token = os.getenv("WEBHOOK_AUTH_TOKEN", "")
         # Called with (sender_number, message_text) when an iMessage arrives
         self._imessage_callback = imessage_callback
         self._start_time: float = time.monotonic()
@@ -100,14 +101,34 @@ class WebhookServer:
             )
             return response
 
+    # ── Auth Helpers ──────────────────────────────────────────────────
+
+    def _verify_auth_token(self, request: web.Request) -> bool:
+        """Verify the shared webhook auth token from query param or header."""
+        if not self._webhook_auth_token:
+            return False
+        token = request.query.get("token", "") or request.headers.get(
+            "X-Webhook-Token", ""
+        )
+        return token == self._webhook_auth_token
+
     # ── Stripe Webhook ───────────────────────────────────────────────
 
     async def _handle_stripe(self, request: web.Request) -> web.Response:
         """Verify Stripe signature and delegate to PaymentsEngine.handle_webhook."""
+        if not self.stripe_webhook_secret:
+            logger.warning(
+                "Stripe webhook received but STRIPE_WEBHOOK_SECRET is not configured. "
+                "Rejecting request."
+            )
+            return web.json_response(
+                {"error": "Webhook secret not configured"}, status=503,
+            )
+
         raw_body = await request.read()
         signature = request.headers.get("Stripe-Signature", "")
 
-        if self.stripe_webhook_secret and not signature:
+        if not signature:
             return web.json_response(
                 {"error": "Missing Stripe-Signature header"}, status=400,
             )
@@ -117,11 +138,11 @@ class WebhookServer:
         except (json.JSONDecodeError, ValueError):
             return web.json_response({"error": "Invalid JSON"}, status=400)
 
-        # PaymentsEngine.handle_webhook does signature verification internally
-        # when a webhook secret is provided.  Pass the raw body (bytes decoded
-        # to str) so stripe.Webhook.construct_event can verify against it.
+        # PaymentsEngine.handle_webhook does signature verification internally.
+        # Pass the raw body (bytes decoded to str) so
+        # stripe.Webhook.construct_event can verify against it.
         result = self.payments.handle_webhook(
-            payload=raw_body.decode("utf-8") if self.stripe_webhook_secret else payload,
+            payload=raw_body.decode("utf-8"),
             signature=signature,
             webhook_secret=self.stripe_webhook_secret,
         )
@@ -138,6 +159,15 @@ class WebhookServer:
 
     async def _handle_gumroad(self, request: web.Request) -> web.Response:
         """Parse Gumroad Instant Payment Notification and log the sale."""
+        if not self._verify_auth_token(request):
+            logger.warning(
+                "Gumroad webhook rejected: missing or invalid auth token. "
+                "Set WEBHOOK_AUTH_TOKEN and pass ?token=<value> in the webhook URL."
+            )
+            return web.json_response(
+                {"error": "Unauthorized: invalid or missing webhook auth token"},
+                status=403,
+            )
         try:
             # Gumroad sends form-encoded data by default
             if request.content_type == "application/json":
@@ -190,6 +220,15 @@ class WebhookServer:
 
     async def _handle_beehiiv(self, request: web.Request) -> web.Response:
         """Handle Beehiiv webhook events (subscribe, unsubscribe, etc.)."""
+        if not self._verify_auth_token(request):
+            logger.warning(
+                "Beehiiv webhook rejected: missing or invalid auth token. "
+                "Set WEBHOOK_AUTH_TOKEN and pass ?token=<value> in the webhook URL."
+            )
+            return web.json_response(
+                {"error": "Unauthorized: invalid or missing webhook auth token"},
+                status=403,
+            )
         try:
             data = await request.json()
         except (json.JSONDecodeError, ValueError):
@@ -235,6 +274,15 @@ class WebhookServer:
         We identify the sender (Ian or Tan), log the message, and invoke the
         callback so the orchestrator can process the instruction.
         """
+        if not self._verify_auth_token(request):
+            logger.warning(
+                "Sendblue webhook rejected: missing or invalid auth token. "
+                "Set WEBHOOK_AUTH_TOKEN and pass ?token=<value> in the webhook URL."
+            )
+            return web.json_response(
+                {"error": "Unauthorized: invalid or missing webhook auth token"},
+                status=403,
+            )
         try:
             data = await request.json()
         except (json.JSONDecodeError, ValueError):

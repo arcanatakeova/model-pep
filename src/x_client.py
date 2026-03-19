@@ -106,7 +106,7 @@ class XClient:
             return {"id": None, "text": text, "error": "not_configured"}
 
         try:
-            resp = client.create_tweet(text=text, in_reply_to_tweet_id=reply_to)
+            resp = await asyncio.to_thread(client.create_tweet, text=text, in_reply_to_tweet_id=reply_to)
             tweet_id = str(resp.data["id"])
             self._daily_posts += 1
 
@@ -192,7 +192,7 @@ class XClient:
 
         try:
             if self._me is None:
-                me = client.get_me()
+                me = await asyncio.to_thread(client.get_me)
                 self._me = me.data.id if me and me.data else None
 
             if not self._me:
@@ -202,7 +202,7 @@ class XClient:
             if since_id:
                 params["since_id"] = since_id
 
-            mentions = client.get_users_mentions(self._me, **params)
+            mentions = await asyncio.to_thread(client.get_users_mentions, self._me, **params)
             if not mentions or not mentions.data:
                 return []
 
@@ -240,7 +240,7 @@ class XClient:
             return []
 
         try:
-            results = client.search_recent_tweets(query=query, max_results=max_results)
+            results = await asyncio.to_thread(client.search_recent_tweets, query=query, max_results=max_results)
             if not results or not results.data:
                 return []
             return [{"id": str(t.id), "text": t.text} for t in results.data]

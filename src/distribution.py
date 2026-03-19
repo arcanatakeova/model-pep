@@ -51,6 +51,12 @@ class ContentDistributor:
             await self._http.aclose()
             self._http = None
 
+    async def __aenter__(self) -> "ContentDistributor":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
+
     # ── Content Repurposing Engine ──────────────────────────────────
 
     async def repurpose_tweet(self, tweet_text: str) -> dict[str, Any]:

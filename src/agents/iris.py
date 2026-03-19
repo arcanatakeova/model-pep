@@ -12,6 +12,7 @@ Escalation: Simple issues → Iris handles. Complex → escalate to ARCANA. Trul
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from src.email_engine import EmailEngine
@@ -76,15 +77,16 @@ class Iris:
             "Support",
         )
 
-        # Save customer history
-        self.memory.save_knowledge(
-            "resources",
-            f"customer-{customer}",
-            f"Customer: {customer}\n"
-            f"Last inquiry: {message[:200]}\n"
+        # Append to customer history (preserve previous interactions)
+        existing = self.memory.get_knowledge("resources", f"customer-{customer}") or ""
+        datetime_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        new_entry = (
+            f"\n\n---\n## {datetime_now} — Support Inquiry\n"
+            f"Inquiry: {message[:200]}\n"
             f"Resolution: {result.get('action', 'unknown')}\n"
-            f"Notes: {result.get('notes', '')}",
+            f"Notes: {result.get('notes', '')}"
         )
+        self.memory.save_knowledge("resources", f"customer-{customer}", existing + new_entry)
 
         # Actually send the response via email
         response_text = result.get("response", "")
@@ -207,15 +209,16 @@ class Iris:
                 text_body=response_text,
             )
 
-        # Save to customer history
-        self.memory.save_knowledge(
-            "resources",
-            f"customer-{customer}",
-            f"Customer: {customer}\n"
-            f"Refund request: {product} (${amount:.2f})\n"
+        # Append to customer history (preserve previous interactions)
+        existing = self.memory.get_knowledge("resources", f"customer-{customer}") or ""
+        datetime_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        new_entry = (
+            f"\n\n---\n## {datetime_now} — Refund Request\n"
+            f"Product: {product} (${amount:.2f})\n"
             f"Decision: {action}\n"
-            f"Notes: {result.get('notes', '')}",
+            f"Notes: {result.get('notes', '')}"
         )
+        self.memory.save_knowledge("resources", f"customer-{customer}", existing + new_entry)
 
         return {**result, "action": action}
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,35 @@ logger = logging.getLogger("arcana.database")
 
 DB_DIR = Path("data")
 DB_PATH = DB_DIR / "arcana.db"
+
+# ── Column whitelists (derived from CREATE TABLE schemas) ─────────
+_CONTACTS_COLUMNS = frozenset({
+    "name", "email", "company", "role", "phone", "source", "x_handle",
+    "linkedin_url", "website", "industry", "company_size", "location",
+    "notes", "tags", "first_seen", "last_contact", "interaction_count",
+    "lead_score", "lifetime_value", "status", "metadata",
+})
+
+_DEALS_COLUMNS = frozenset({
+    "contact_id", "service", "monthly_value", "annual_value", "stage",
+    "probability", "source", "source_query", "source_platform",
+    "proposal_sent", "proposal_text", "close_date", "lost_reason",
+    "notes", "created_at", "updated_at", "metadata",
+})
+
+_CONTENT_COLUMNS = frozenset({
+    "content_type", "platform", "body", "title", "suit", "hook_strength",
+    "x_tweet_id", "x_thread_ids", "impressions", "engagements", "clicks",
+    "leads_generated", "revenue_attributed", "posted_at", "created_at",
+    "metadata",
+})
+
+
+def _validate_columns(kwargs_keys: set[str], allowed: frozenset[str], table: str) -> None:
+    """Raise ValueError if any key is not in the allowed column set."""
+    bad = kwargs_keys - allowed
+    if bad:
+        raise ValueError(f"Invalid column(s) for {table}: {bad}")
 
 
 class Database:
@@ -47,6 +77,7 @@ class Database:
         self._conn: sqlite3.Connection | None = None
         self._query_count = 0
         self._error_count = 0
+        self._lock = threading.Lock()
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -89,8 +120,9 @@ class Database:
     def vacuum(self) -> None:
         """Run incremental vacuum to reclaim space."""
         conn = self._get_conn()
-        conn.execute("PRAGMA incremental_vacuum(1000)")
-        conn.commit()
+        with self._lock:
+            conn.execute("PRAGMA incremental_vacuum(1000)")
+            conn.commit()
 
     def integrity_check(self) -> bool:
         """Run SQLite integrity check."""
@@ -372,6 +404,7 @@ class Database:
 
     def upsert_contact(self, **kwargs: Any) -> int:
         """Create or update a contact. Returns contact ID."""
+        _validate_columns(set(kwargs.keys()) - {"id"}, _CONTACTS_COLUMNS, "contacts")
         conn = self._get_conn()
         email = kwargs.get("email", "")
         x_handle = kwargs.get("x_handle", "")
@@ -385,24 +418,26 @@ class Database:
 
         if existing:
             contact_id = existing["id"]
-            updates = {k: v for k, v in kwargs.items() if v and k != "id"}
+            updates = {k: v for k, v in kwargs.items() if v is not None and k != "id"}
             if updates:
                 set_clause = ", ".join(f"{k} = ?" for k in updates)
-                conn.execute(
-                    f"UPDATE contacts SET {set_clause}, last_contact = datetime('now') WHERE id = ?",
-                    (*updates.values(), contact_id),
-                )
-                conn.commit()
+                with self._lock:
+                    conn.execute(
+                        f"UPDATE contacts SET {set_clause}, last_contact = datetime('now') WHERE id = ?",
+                        (*updates.values(), contact_id),
+                    )
+                    conn.commit()
             return contact_id
         else:
-            cols = [k for k in kwargs if kwargs[k]]
+            cols = [k for k in kwargs if kwargs[k] is not None]
             vals = [kwargs[k] for k in cols]
             placeholders = ", ".join("?" * len(cols))
             col_names = ", ".join(cols)
-            cur = conn.execute(
-                f"INSERT INTO contacts ({col_names}) VALUES ({placeholders})", vals,
-            )
-            conn.commit()
+            with self._lock:
+                cur = conn.execute(
+                    f"INSERT INTO contacts ({col_names}) VALUES ({placeholders})", vals,
+                )
+                conn.commit()
             contact_id = cur.lastrowid
 
             # Index in FTS
@@ -418,6 +453,7 @@ class Database:
 
     def find_contacts(self, **filters: Any) -> list[dict[str, Any]]:
         """Query contacts with filters."""
+        _validate_columns(set(filters.keys()), _CONTACTS_COLUMNS | {"id"}, "contacts")
         conn = self._get_conn()
         where = []
         values = []
@@ -441,24 +477,28 @@ class Database:
     # ══════════════════════════════════════════════════════════════
 
     def create_deal(self, **kwargs: Any) -> int:
+        _validate_columns(set(kwargs.keys()), _DEALS_COLUMNS, "deals")
         conn = self._get_conn()
         cols = [k for k in kwargs if kwargs[k] is not None]
         vals = [kwargs[k] for k in cols]
         placeholders = ", ".join("?" * len(cols))
         col_names = ", ".join(cols)
-        cur = conn.execute(
-            f"INSERT INTO deals ({col_names}) VALUES ({placeholders})", vals,
-        )
-        conn.commit()
+        with self._lock:
+            cur = conn.execute(
+                f"INSERT INTO deals ({col_names}) VALUES ({placeholders})", vals,
+            )
+            conn.commit()
         return cur.lastrowid
 
     def update_deal(self, deal_id: int, **kwargs: Any) -> None:
+        _validate_columns(set(kwargs.keys()), _DEALS_COLUMNS, "deals")
         conn = self._get_conn()
         updates = {k: v for k, v in kwargs.items() if v is not None}
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
         set_clause = ", ".join(f"{k} = ?" for k in updates)
-        conn.execute(f"UPDATE deals SET {set_clause} WHERE id = ?", (*updates.values(), deal_id))
-        conn.commit()
+        with self._lock:
+            conn.execute(f"UPDATE deals SET {set_clause} WHERE id = ?", (*updates.values(), deal_id))
+            conn.commit()
 
     def get_pipeline(self, stage: str | None = None) -> list[dict[str, Any]]:
         conn = self._get_conn()
@@ -505,19 +545,20 @@ class Database:
     def log_interaction(self, contact_id: int, channel: str, direction: str,
                         content: str, **kwargs: Any) -> int:
         conn = self._get_conn()
-        cur = conn.execute(
-            "INSERT INTO interactions (contact_id, channel, direction, content, "
-            "sentiment, is_lead_signal, deal_id, metadata) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (contact_id, channel, direction, content,
-             kwargs.get("sentiment"), kwargs.get("is_lead_signal", 0),
-             kwargs.get("deal_id"), json.dumps(kwargs.get("metadata", {}))),
-        )
-        conn.execute(
-            "UPDATE contacts SET interaction_count = interaction_count + 1, "
-            "last_contact = datetime('now') WHERE id = ?", (contact_id,),
-        )
-        conn.commit()
+        with self._lock:
+            cur = conn.execute(
+                "INSERT INTO interactions (contact_id, channel, direction, content, "
+                "sentiment, is_lead_signal, deal_id, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (contact_id, channel, direction, content,
+                 kwargs.get("sentiment"), kwargs.get("is_lead_signal", 0),
+                 kwargs.get("deal_id"), json.dumps(kwargs.get("metadata", {}))),
+            )
+            conn.execute(
+                "UPDATE contacts SET interaction_count = interaction_count + 1, "
+                "last_contact = datetime('now') WHERE id = ?", (contact_id,),
+            )
+            conn.commit()
         self._index_fts("interactions", cur.lastrowid, content)
         return cur.lastrowid
 
@@ -535,25 +576,28 @@ class Database:
 
     def log_content(self, content_type: str, platform: str, body: str, **kwargs: Any) -> int:
         conn = self._get_conn()
-        cur = conn.execute(
-            "INSERT INTO content (content_type, platform, body, title, suit, "
-            "hook_strength, x_tweet_id, posted_at, metadata) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (content_type, platform, body, kwargs.get("title"),
-             kwargs.get("suit"), kwargs.get("hook_strength"),
-             kwargs.get("x_tweet_id"), kwargs.get("posted_at"),
-             json.dumps(kwargs.get("metadata", {}))),
-        )
-        conn.commit()
+        with self._lock:
+            cur = conn.execute(
+                "INSERT INTO content (content_type, platform, body, title, suit, "
+                "hook_strength, x_tweet_id, posted_at, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (content_type, platform, body, kwargs.get("title"),
+                 kwargs.get("suit"), kwargs.get("hook_strength"),
+                 kwargs.get("x_tweet_id"), kwargs.get("posted_at"),
+                 json.dumps(kwargs.get("metadata", {}))),
+            )
+            conn.commit()
         self._index_fts("content", cur.lastrowid, f"{kwargs.get('title', '')} {body}")
         return cur.lastrowid
 
     def update_content_metrics(self, content_id: int, **metrics: Any) -> None:
+        _validate_columns(set(metrics.keys()), _CONTENT_COLUMNS, "content")
         conn = self._get_conn()
         updates = {k: v for k, v in metrics.items() if v is not None}
         set_clause = ", ".join(f"{k} = ?" for k in updates)
-        conn.execute(f"UPDATE content SET {set_clause} WHERE id = ?", (*updates.values(), content_id))
-        conn.commit()
+        with self._lock:
+            conn.execute(f"UPDATE content SET {set_clause} WHERE id = ?", (*updates.values(), content_id))
+            conn.commit()
 
     def get_top_content(self, limit: int = 20) -> list[dict[str, Any]]:
         conn = self._get_conn()
@@ -570,19 +614,20 @@ class Database:
     def log_opportunity(self, source: str, platform: str, original_text: str,
                         score: int, **kwargs: Any) -> int:
         conn = self._get_conn()
-        cur = conn.execute(
-            "INSERT INTO opportunities (source, platform, original_text, score, "
-            "query_used, author, author_handle, service_match, estimated_value, "
-            "urgency, buyer_type, auto_responded, response_text, metadata) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (source, platform, original_text, score,
-             kwargs.get("query_used"), kwargs.get("author"),
-             kwargs.get("author_handle"), kwargs.get("service_match"),
-             kwargs.get("estimated_value", 0), kwargs.get("urgency"),
-             kwargs.get("buyer_type"), kwargs.get("auto_responded", 0),
-             kwargs.get("response_text"), json.dumps(kwargs.get("metadata", {}))),
-        )
-        conn.commit()
+        with self._lock:
+            cur = conn.execute(
+                "INSERT INTO opportunities (source, platform, original_text, score, "
+                "query_used, author, author_handle, service_match, estimated_value, "
+                "urgency, buyer_type, auto_responded, response_text, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (source, platform, original_text, score,
+                 kwargs.get("query_used"), kwargs.get("author"),
+                 kwargs.get("author_handle"), kwargs.get("service_match"),
+                 kwargs.get("estimated_value", 0), kwargs.get("urgency"),
+                 kwargs.get("buyer_type"), kwargs.get("auto_responded", 0),
+                 kwargs.get("response_text"), json.dumps(kwargs.get("metadata", {}))),
+            )
+            conn.commit()
         self._index_fts("opportunities", cur.lastrowid, original_text)
         return cur.lastrowid
 

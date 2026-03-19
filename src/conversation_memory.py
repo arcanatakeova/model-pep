@@ -244,49 +244,53 @@ class ConversationMemory:
         # Detect lead signals
         signals = self._detect_signals(content)
 
-        cur = conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, channel, "
-            "sentiment, lead_signals, created_at, metadata) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (conv_id, role, content, msg_channel, sentiment,
-             json.dumps(signals), now, json.dumps(metadata or {})),
-        )
-        msg_id = cur.lastrowid
-
-        # Update conversation
-        conn.execute(
-            "UPDATE conversations SET message_count = message_count + 1, "
-            "updated_at = ?, status = ? WHERE id = ?",
-            (now, "waiting_reply" if role == MessageRole.CONTACT else "active", conv_id),
-        )
-
-        # Update sentiment trend
-        trend_row = conn.execute(
-            "SELECT sentiment_trend FROM conversations WHERE id = ?", (conv_id,)
-        ).fetchone()
-        trend = json.loads(trend_row["sentiment_trend"]) if trend_row else []
-        trend.append(sentiment)
-        # Keep last 20 sentiments
-        trend = trend[-20:]
-        conn.execute(
-            "UPDATE conversations SET sentiment_trend = ? WHERE id = ?",
-            (json.dumps(trend), conv_id),
-        )
-
-        # Update lead score if signals found
-        if signals:
-            score_bump = len(signals) * 5
-            conn.execute(
-                "UPDATE conversations SET lead_score = lead_score + ? WHERE id = ?",
-                (score_bump, conv_id),
+        try:
+            cur = conn.execute(
+                "INSERT INTO messages (conversation_id, role, content, channel, "
+                "sentiment, lead_signals, created_at, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (conv_id, role, content, msg_channel, sentiment,
+                 json.dumps(signals), now, json.dumps(metadata or {})),
             )
-            # Also bump contact lead score
+            msg_id = cur.lastrowid
+
+            # Update conversation
             conn.execute(
-                "UPDATE contacts SET lead_score = lead_score + ? WHERE id = ?",
-                (score_bump, conv_row["contact_id"]),
+                "UPDATE conversations SET message_count = message_count + 1, "
+                "updated_at = ?, status = ? WHERE id = ?",
+                (now, "waiting_reply" if role == MessageRole.CONTACT else "active", conv_id),
             )
 
-        conn.commit()
+            # Update sentiment trend
+            trend_row = conn.execute(
+                "SELECT sentiment_trend FROM conversations WHERE id = ?", (conv_id,)
+            ).fetchone()
+            trend = json.loads(trend_row["sentiment_trend"]) if trend_row else []
+            trend.append(sentiment)
+            # Keep last 20 sentiments
+            trend = trend[-20:]
+            conn.execute(
+                "UPDATE conversations SET sentiment_trend = ? WHERE id = ?",
+                (json.dumps(trend), conv_id),
+            )
+
+            # Update lead score if signals found
+            if signals:
+                score_bump = len(signals) * 5
+                conn.execute(
+                    "UPDATE conversations SET lead_score = lead_score + ? WHERE id = ?",
+                    (score_bump, conv_id),
+                )
+                # Also bump contact lead score
+                conn.execute(
+                    "UPDATE contacts SET lead_score = lead_score + ? WHERE id = ?",
+                    (score_bump, conv_row["contact_id"]),
+                )
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
         # Index message in FTS
         self.db._index_fts("messages", msg_id, content)

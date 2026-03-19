@@ -173,24 +173,58 @@ class TaskScheduler:
             self._init_default_schedule()
             return
 
-        for line in data.splitlines():
-            if "|" in line and not line.startswith("#") and not line.startswith("-"):
-                parts = [p.strip() for p in line.split("|")]
-                if len(parts) >= 5:
-                    name = parts[0]
-                    try:
-                        task = ScheduledTask(
-                            name=name,
-                            frequency=parts[1],
-                            description=parts[2],
-                            hour_utc=int(parts[3]) if parts[3].isdigit() else 12,
-                            priority=int(parts[4]) if parts[4].isdigit() else 5,
-                        )
-                        if len(parts) > 5:
-                            task.last_run = parts[5]
-                        self.tasks[name] = task
-                    except (ValueError, IndexError):
-                        pass
+        import json as _json
+        try:
+            task_list = _json.loads(data)
+        except (ValueError, TypeError):
+            task_list = None
+
+        if isinstance(task_list, list):
+            for entry in task_list:
+                if not isinstance(entry, dict) or "name" not in entry:
+                    continue
+                try:
+                    task = ScheduledTask(
+                        name=entry["name"],
+                        frequency=entry.get("frequency", "daily"),
+                        description=entry.get("description", ""),
+                        day_of_week=entry.get("day_of_week"),
+                        hour_utc=entry.get("hour_utc", 12),
+                        priority=entry.get("priority", 5),
+                        client_key=entry.get("client_key", ""),
+                        max_retries=entry.get("max_retries", 3),
+                        timeout_seconds=entry.get("timeout_seconds", DEFAULT_TASK_TIMEOUT),
+                    )
+                    task.last_run = entry.get("last_run", "")
+                    task.last_duration_seconds = entry.get("last_duration_seconds", 0.0)
+                    task.run_count = entry.get("run_count", 0)
+                    task.fail_count = entry.get("fail_count", 0)
+                    task.consecutive_failures = entry.get("consecutive_failures", 0)
+                    task.status = entry.get("status", "pending")
+                    task.last_error = entry.get("last_error", "")
+                    self.tasks[task.name] = task
+                except (ValueError, KeyError):
+                    pass
+        else:
+            # Legacy pipe-delimited format — parse but migrate on next save
+            for line in data.splitlines():
+                if "|" in line and not line.startswith("#") and not line.startswith("-"):
+                    parts = [p.strip() for p in line.split("|")]
+                    if len(parts) >= 5:
+                        name = parts[0]
+                        try:
+                            task = ScheduledTask(
+                                name=name,
+                                frequency=parts[1],
+                                description=parts[2],
+                                hour_utc=int(parts[3]) if parts[3].isdigit() else 12,
+                                priority=int(parts[4]) if parts[4].isdigit() else 5,
+                            )
+                            if len(parts) > 5:
+                                task.last_run = parts[5]
+                            self.tasks[name] = task
+                        except (ValueError, IndexError):
+                            pass
 
     def _init_default_schedule(self) -> None:
         """Initialize default task schedule."""
@@ -219,16 +253,10 @@ class TaskScheduler:
         self._save_schedule()
 
     def _save_schedule(self) -> None:
-        """Persist schedule to memory."""
-        lines = ["# Task Schedule\n"]
-        lines.append("name | frequency | description | hour_utc | priority | last_run")
-        lines.append("--- | --- | --- | --- | --- | ---")
-        for task in sorted(self.tasks.values(), key=lambda t: t.priority):
-            lines.append(
-                f"{task.name} | {task.frequency} | {task.description} | "
-                f"{task.hour_utc} | {task.priority} | {task.last_run}"
-            )
-        self.memory.save_tacit("schedule", "\n".join(lines))
+        """Persist schedule to memory as JSON using to_dict() for full state."""
+        import json as _json
+        task_list = [task.to_dict() for task in sorted(self.tasks.values(), key=lambda t: t.priority)]
+        self.memory.save_tacit("schedule", _json.dumps(task_list, indent=2))
 
     # ── Task Management ─────────────────────────────────────────────
 

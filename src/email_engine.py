@@ -12,6 +12,7 @@ Uses SendGrid for transactional, Instantly for cold outreach campaigns.
 
 from __future__ import annotations
 
+import html as html_mod
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -143,16 +144,22 @@ class EmailEngine:
         amount: float, due_date: str, payment_link: str,
     ) -> bool:
         """Send invoice email to a service client."""
+        # Sanitize user-supplied values to prevent XSS
+        safe_name = html_mod.escape(client_name)
+        safe_service = html_mod.escape(service)
+        if not payment_link.startswith("https://"):
+            raise ValueError(f"payment_link must start with https://, got: {payment_link!r}")
+        safe_link = html_mod.escape(payment_link)
         html = (
             f"<h2>Invoice from Arcana Operations</h2>"
-            f"<p>Hi {client_name},</p>"
-            f"<p>Here's your invoice for <strong>{service}</strong>.</p>"
+            f"<p>Hi {safe_name},</p>"
+            f"<p>Here's your invoice for <strong>{safe_service}</strong>.</p>"
             f"<table style='border-collapse:collapse;width:100%'>"
-            f"<tr><td>Service</td><td>{service}</td></tr>"
+            f"<tr><td>Service</td><td>{safe_service}</td></tr>"
             f"<tr><td>Amount</td><td><strong>${amount:,.2f}</strong></td></tr>"
             f"<tr><td>Due Date</td><td>{due_date}</td></tr>"
             f"</table>"
-            f"<p><a href='{payment_link}' style='background:#000;color:#fff;"
+            f"<p><a href='{safe_link}' style='background:#000;color:#fff;"
             f"padding:12px 24px;text-decoration:none;display:inline-block;"
             f"margin-top:16px'>Pay Now →</a></p>"
             f"<p>Questions? Reply to this email.</p>"

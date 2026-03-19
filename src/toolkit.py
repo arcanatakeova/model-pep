@@ -755,19 +755,40 @@ def dataframe_summary(data: list[dict[str, Any]], group_by: str, agg_col: str, a
 _signer_secret = None
 
 
+_DEFAULT_SECRET = "arcana-default-change-me"
+
+
+def _is_production() -> bool:
+    """Check if running in a production environment."""
+    import os
+    env = os.getenv("ENVIRONMENT", os.getenv("ARCANA_ENV", "dev")).lower()
+    return env in ("production", "prod")
+
+
 def _get_signer_secret() -> str:
     """Get signing secret from env or generate one."""
     global _signer_secret
     if _signer_secret is None:
         import os
-        _signer_secret = os.getenv("SIGNING_SECRET", "arcana-default-change-me")
+        _signer_secret = os.getenv("SIGNING_SECRET", _DEFAULT_SECRET)
+        if _signer_secret == _DEFAULT_SECRET:
+            logger.warning(
+                "SIGNING_SECRET is using the insecure default value! "
+                "Set SIGNING_SECRET env var to a strong random string."
+            )
     return _signer_secret
 
 
 def sign_token(data: str, salt: str = "arcana") -> str:
     """Create a signed token (e.g., for unsubscribe links)."""
+    secret = _get_signer_secret()
+    if secret == _DEFAULT_SECRET and _is_production():
+        raise RuntimeError(
+            "Refusing to sign tokens with the default secret in production. "
+            "Set the SIGNING_SECRET environment variable."
+        )
     from itsdangerous import URLSafeTimedSerializer
-    s = URLSafeTimedSerializer(_get_signer_secret())
+    s = URLSafeTimedSerializer(secret)
     return s.dumps(data, salt=salt)
 
 
@@ -777,8 +798,14 @@ def verify_token(token: str, salt: str = "arcana", max_age: int = 86400) -> str 
     Args:
         max_age: Maximum age in seconds (default 24 hours)
     """
+    secret = _get_signer_secret()
+    if secret == _DEFAULT_SECRET and _is_production():
+        raise RuntimeError(
+            "Refusing to verify tokens with the default secret in production. "
+            "Set the SIGNING_SECRET environment variable."
+        )
     from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
-    s = URLSafeTimedSerializer(_get_signer_secret())
+    s = URLSafeTimedSerializer(secret)
     try:
         return s.loads(token, salt=salt, max_age=max_age)
     except (SignatureExpired, BadSignature):

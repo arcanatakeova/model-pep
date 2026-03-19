@@ -154,8 +154,19 @@ class Memory:
 
     # ── Knowledge Graph (PARA) ──────────────────────────────────────
 
+    VALID_CATEGORIES = {"projects", "areas", "resources", "archives"}
+
+    def _validate_category(self, category: str) -> None:
+        """Validate that category is in the allowed PARA set."""
+        if category not in self.VALID_CATEGORIES:
+            raise ValueError(
+                f"Invalid category {category!r}. "
+                f"Must be one of: {', '.join(sorted(self.VALID_CATEGORIES))}"
+            )
+
     def save_knowledge(self, category: str, name: str, content: str) -> Path:
         """Save or update a knowledge file (atomic write)."""
+        self._validate_category(category)
         slug = name.lower().replace(" ", "-").replace("/", "-")
         path = self.life / category / f"{slug}.md"
 
@@ -170,6 +181,7 @@ class Memory:
 
     def get_knowledge(self, category: str, name: str) -> str:
         """Read a knowledge file."""
+        self._validate_category(category)
         slug = name.lower().replace(" ", "-").replace("/", "-")
         return self._safe_read(self.life / category / f"{slug}.md")
 
@@ -182,6 +194,7 @@ class Memory:
 
     def delete_knowledge(self, category: str, name: str) -> bool:
         """Delete a knowledge file."""
+        self._validate_category(category)
         slug = name.lower().replace(" ", "-").replace("/", "-")
         path = self.life / category / f"{slug}.md"
         if path.exists():

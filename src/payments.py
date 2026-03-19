@@ -202,12 +202,12 @@ class PaymentsEngine:
             since = int(time.time()) - (days * 86400)
             charges = stripe.Charge.list(created={"gte": since}, limit=100)
 
-            total = 0
+            total_cents = 0
             count = 0
             recent = []
             for charge in charges.auto_paging_iter():
                 if charge.paid and not charge.refunded:
-                    total += charge.amount / 100
+                    total_cents += charge.amount
                     count += 1
                     if len(recent) < 10:
                         recent.append({
@@ -218,7 +218,7 @@ class PaymentsEngine:
                             ).strftime("%Y-%m-%d"),
                         })
 
-            return {"revenue": total, "charges": count, "recent": recent}
+            return {"revenue": total_cents / 100, "charges": count, "recent": recent}
 
         except Exception as exc:
             logger.error("Stripe revenue error: %s", exc)
@@ -238,6 +238,7 @@ class PaymentsEngine:
                         "id": sub.id,
                         "customer": sub.customer,
                         "product": item["price"]["product"],
+                        "amount_cents": item["price"]["unit_amount"],
                         "amount": item["price"]["unit_amount"] / 100,
                         "interval": item["price"]["recurring"]["interval"],
                         "status": sub.status,
@@ -250,7 +251,8 @@ class PaymentsEngine:
     def get_mrr(self) -> float:
         """Calculate Monthly Recurring Revenue from active subscriptions."""
         subs = self.get_active_subscriptions()
-        return sum(s["amount"] for s in subs if s["interval"] == "month")
+        total_cents = sum(s["amount_cents"] for s in subs if s["interval"] == "month")
+        return total_cents / 100
 
     # ── Gumroad: Product Creation ───────────────────────────────────
 
@@ -336,7 +338,7 @@ class PaymentsEngine:
     # ── Webhook Handling ─────────────────────────────────────────────
 
     def handle_webhook(
-        self, payload: dict, signature: str,
+        self, payload: dict | str | bytes, signature: str,
         webhook_secret: str = "",
     ) -> dict[str, Any]:
         """Process Stripe webhook events in real-time.
@@ -362,8 +364,8 @@ class PaymentsEngine:
                 logger.error("Webhook construction error: %s", exc)
                 return {"status": "error", "reason": str(exc)}
         else:
-            # No secret configured — trust the payload (dev/testing only)
-            event = payload
+            logger.critical("STRIPE_WEBHOOK_SECRET not configured — rejecting unverified webhook")
+            return {"status": "error", "reason": "webhook_secret_not_configured"}
 
         event_type: str = event.get("type", "unknown")
         data_obj: dict[str, Any] = event.get("data", {}).get("object", {})
@@ -783,14 +785,14 @@ class PaymentsEngine:
                     sub.current_period_end, tz=timezone.utc,
                 ).strftime("%Y-%m-%d")
 
-                amount = 0.0
+                amount_cents = 0
                 for item in sub["items"]["data"]:
-                    amount += item["price"]["unit_amount"] / 100
+                    amount_cents += item["price"]["unit_amount"]
 
                 renewals.append({
                     "subscription_id": sub.id,
                     "customer_email": customer_email,
-                    "amount": amount,
+                    "amount": amount_cents / 100,
                     "renewal_date": renewal_date,
                     "status": sub.status,
                 })
@@ -846,12 +848,20 @@ class PaymentsEngine:
                 continue
 
             # Determine attempt stage from the invoice
+            invoice = None
             try:
                 invoice = stripe.Invoice.retrieve(invoice_id)
                 attempt_count = invoice.get("attempt_count", 1)
             except Exception as exc:
                 logger.warning("Failed to retrieve invoice %s: %s", invoice_id, exc)
                 attempt_count = 1
+
+            if invoice is None:
+                results["skipped"].append({
+                    "charge_id": charge_info["charge_id"],
+                    "reason": "invoice_retrieve_failed",
+                })
+                continue
 
             if invoice.status == "paid":
                 # Already resolved
