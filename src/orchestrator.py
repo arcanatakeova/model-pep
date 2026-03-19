@@ -224,7 +224,7 @@ class Orchestrator:
         self.scheduler.register_handler("scan_opportunities", self.scanner.scan_cycle)
         self.scheduler.register_handler("fulfill_services", self.fulfillment.run_daily_fulfillment)
         self.scheduler.register_handler("weekly_newsletter", self.newsletter.generate_weekly_issue)
-        self.scheduler.register_handler("weekly_outreach", self.outreach.weekly_outreach_cycle)
+        self.scheduler.register_handler("weekly_outreach", self._run_enriched_outreach)
         self.scheduler.register_handler("weekly_pipeline_nurture", self.scanner.nurture_pipeline)
         self.scheduler.register_handler("monthly_product_creation", self.product_factory.create_and_list_product)
         self.scheduler.register_handler("monthly_analytics", self.analytics.generate_roi_report)
@@ -611,6 +611,29 @@ class Orchestrator:
                 await self.x.post_thread(tweets)
                 self._completed_today.append("Posted product promotion")
 
+    async def _run_enriched_outreach(self) -> dict[str, Any]:
+        """Run outreach with competitive intel + pricing context injected."""
+        intel_ctx = ""
+        pricing_ctx = ""
+        try:
+            displacements = await self.intel.identify_displacement_opportunities()
+            opps = displacements.get("opportunities", [])
+            if opps:
+                intel_ctx = "\n".join(
+                    f"- {o.get('competitor', '?')}: {o.get('weakness', '?')}"
+                    for o in opps[:5]
+                )
+        except Exception:
+            pass
+        try:
+            for svc in ["consulting", "ugc", "seo"]:
+                comp = await self.pricing.compare_to_competitors(svc)
+                if comp.get("our_position"):
+                    pricing_ctx += f"- {svc}: {comp['our_position']}\n"
+        except Exception:
+            pass
+        return await self.outreach.weekly_outreach_cycle(intel_ctx, pricing_ctx)
+
     async def _maybe_post_trade_receipt(self) -> None:
         """Post trade receipts from the trading bot to X."""
         winners = self.trader.get_recent_winners(3)
@@ -699,9 +722,35 @@ class Orchestrator:
         except Exception as exc:
             logger.error("Pipeline nurture failed: %s", exc)
 
-        # 5. Launch cold outreach campaign
+        # 5. Launch cold outreach campaign — enriched with competitive intel + pricing
         try:
-            outreach = await self.outreach.weekly_outreach_cycle()
+            # Get competitive context for smarter targeting
+            intel_ctx = ""
+            try:
+                displacements = await self.intel.identify_displacement_opportunities()
+                opps = displacements.get("opportunities", [])
+                if opps:
+                    intel_ctx = "\n".join(
+                        f"- {o.get('competitor', '?')}: {o.get('weakness', '?')} → {o.get('our_angle', '?')}"
+                        for o in opps[:5]
+                    )
+            except Exception:
+                pass
+
+            # Get pricing context
+            pricing_ctx = ""
+            try:
+                for svc in ["consulting", "ugc", "seo"]:
+                    comp = await self.pricing.compare_to_competitors(svc)
+                    if comp.get("our_position"):
+                        pricing_ctx += f"- {svc}: {comp['our_position']}\n"
+            except Exception:
+                pass
+
+            outreach = await self.outreach.weekly_outreach_cycle(
+                intel_context=intel_ctx,
+                pricing_context=pricing_ctx,
+            )
             if outreach.get("status") == "launched":
                 self._completed_today.append(
                     f"Outreach campaign: {outreach.get('campaign_name', 'N/A')} "
@@ -710,13 +759,20 @@ class Orchestrator:
         except Exception as exc:
             logger.error("Outreach campaign failed: %s", exc)
 
-        # 6. Run daily fulfillment for all service clients
+        # 6. Run daily fulfillment for all service clients + track SLA via portal
         try:
             fulfillment = await self.fulfillment.run_daily_fulfillment()
             if fulfillment.get("clients_served", 0) > 0:
                 self._completed_today.append(
                     f"Fulfilled services for {fulfillment['clients_served']} clients"
                 )
+                # Track deliverables in client portal for SLA compliance
+                all_projects = self.memory.list_knowledge("projects")
+                for client_key in [k for k in all_projects if k.startswith("client-")][:10]:
+                    try:
+                        await self.client_portal.track_deliverables(client_key)
+                    except Exception:
+                        pass
         except Exception as exc:
             logger.error("Fulfillment failed: %s", exc)
 

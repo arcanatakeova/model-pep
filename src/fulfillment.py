@@ -223,6 +223,20 @@ class FulfillmentEngine:
             "posts_scheduled": scheduled,
         }
 
+    def _get_client_buffer_profiles(self, client_key: str) -> list[str]:
+        """Extract Buffer profile IDs from client data in memory."""
+        client_data = self.memory.get_knowledge("projects", client_key) or ""
+        profile_ids = []
+        for line in client_data.splitlines():
+            if "buffer_profile" in line.lower() or "profile_id" in line.lower():
+                value = line.split(":", 1)[1].strip()
+                # Handle comma-separated or single values
+                for pid in value.split(","):
+                    pid = pid.strip().strip("[]\"'")
+                    if pid:
+                        profile_ids.append(pid)
+        return profile_ids
+
     async def _schedule_buffer_post(
         self, text: str, platform: str, client_key: str,
     ) -> bool:
@@ -234,22 +248,75 @@ class FulfillmentEngine:
             )
             return False
 
+        # Get client's Buffer profile IDs from their project data
+        profile_ids = self._get_client_buffer_profiles(client_key)
+
+        if not profile_ids:
+            # Try to fetch profiles from Buffer API and cache them
+            profile_ids = await self._fetch_buffer_profiles(client_key, platform)
+
+        if not profile_ids:
+            self.memory.log(
+                f"[Fulfillment] No Buffer profiles for {client_key}/{platform} — "
+                f"add buffer_profile_id to client data",
+                "Fulfillment",
+            )
+            return False
+
         try:
             http = await self._get_http()
-            # Get profile IDs (would need to be stored per client)
-            resp = await http.post(
-                "https://api.bufferapp.com/1/updates/create.json",
-                data={
-                    "access_token": self.buffer_key,
-                    "text": text,
-                    "profile_ids[]": "",  # Client's Buffer profile ID
-                    "scheduled_at": "",   # Would calculate optimal time
-                },
-            )
-            return resp.status_code in (200, 201)
+            for profile_id in profile_ids:
+                resp = await http.post(
+                    "https://api.bufferapp.com/1/updates/create.json",
+                    data={
+                        "access_token": self.buffer_key,
+                        "text": text,
+                        "profile_ids[]": profile_id,
+                    },
+                )
+                if resp.status_code in (200, 201):
+                    return True
+                else:
+                    logger.warning("Buffer post failed for profile %s: %s",
+                                   profile_id, resp.status_code)
+            return False
         except Exception as exc:
             logger.error("Buffer schedule error: %s", exc)
             return False
+
+    async def _fetch_buffer_profiles(self, client_key: str, platform: str = "") -> list[str]:
+        """Fetch available Buffer profiles and cache matching ones for the client."""
+        if not self.buffer_key:
+            return []
+
+        try:
+            http = await self._get_http()
+            resp = await http.get(
+                "https://api.bufferapp.com/1/profiles.json",
+                params={"access_token": self.buffer_key},
+            )
+            if resp.status_code != 200:
+                return []
+
+            profiles = resp.json()
+            # Filter by platform if specified
+            matching = []
+            for p in profiles:
+                if not platform or p.get("service", "").lower() == platform.lower():
+                    matching.append(p.get("id", ""))
+
+            # Cache the profile IDs in client data for future use
+            if matching:
+                existing = self.memory.get_knowledge("projects", client_key) or ""
+                if "buffer_profile" not in existing.lower():
+                    updated = f"{existing}\nbuffer_profile_ids: {', '.join(matching)}\n"
+                    self.memory.save_knowledge("projects", client_key, updated)
+                    logger.info("Cached %d Buffer profiles for %s", len(matching), client_key)
+
+            return matching
+        except Exception as exc:
+            logger.error("Buffer profiles fetch error: %s", exc)
+            return []
 
     # ── SEO Content Publishing ──────────────────────────────────────
 

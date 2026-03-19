@@ -242,9 +242,16 @@ class OutreachEngine:
 
     # ── Weekly Outreach Cycle ───────────────────────────────────────
 
-    async def weekly_outreach_cycle(self) -> dict[str, Any]:
-        """Run weekly outreach — pick best service, find prospects, launch."""
-        # Determine which service to push based on demand signals
+    async def weekly_outreach_cycle(
+        self,
+        intel_context: str = "",
+        pricing_context: str = "",
+    ) -> dict[str, Any]:
+        """Run weekly outreach — pick best service, find prospects, launch.
+
+        Now accepts competitive intelligence and pricing context for smarter targeting.
+        """
+        # Determine which service to push based on demand signals + competitive intel
         result = await self.llm.ask_json(
             f"Pick the best Arcana Operations service to cold outreach this week.\n\n"
             f"Services and typical targets:\n"
@@ -255,12 +262,15 @@ class OutreachEngine:
             f"- Review management: restaurants, medical, dental, hotels\n"
             f"- SEO: local businesses, professional services, SaaS\n"
             f"- AI consulting: funded startups, mid-market companies\n\n"
-            f"Pick based on: easiest to close, highest volume, best margins.\n\n"
+            + (f"COMPETITIVE INTELLIGENCE:\n{intel_context}\n\n" if intel_context else "")
+            + (f"PRICING CONTEXT:\n{pricing_context}\n\n" if pricing_context else "")
+            + f"Pick based on: easiest to close, highest volume, best margins, "
+            f"competitive gaps we can exploit.\n\n"
             f"Return JSON: {{"
             f'"service": str, "target_role": str, "target_industry": str, '
-            f'"pain_point": str, "reasoning": str}}',
+            f'"pain_point": str, "competitive_angle": str, "reasoning": str}}',
             tier=Tier.HAIKU,
-            max_tokens=150,
+            max_tokens=200,
         )
 
         if not result:

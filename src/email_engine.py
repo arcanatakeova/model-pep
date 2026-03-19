@@ -290,6 +290,82 @@ class EmailEngine:
     # ── Lead Enrichment (Apollo) ────────────────────────────────────
 
     async def enrich_lead(self, email: str = "", domain: str = "", name: str = "") -> dict[str, Any]:
-        """Enrich a lead with Apollo.io data."""
-        # Apollo enrichment handled in outreach_engine.py
-        return {"email": email, "domain": domain, "name": name}
+        """Enrich a lead with Apollo.io people/company data.
+
+        Returns enriched profile: title, company, industry, employee count,
+        LinkedIn URL, and other public data useful for outreach.
+        """
+        import os
+        apollo_key = os.getenv("APOLLO_API_KEY", "")
+        if not apollo_key:
+            logger.warning("Apollo API key not configured — enrichment skipped")
+            return {"email": email, "domain": domain, "name": name, "enriched": False}
+
+        client = await self._get_client()
+        enriched: dict[str, Any] = {
+            "email": email, "domain": domain, "name": name, "enriched": False,
+        }
+
+        # People enrichment
+        if email or name:
+            try:
+                payload: dict[str, Any] = {"api_key": apollo_key}
+                if email:
+                    payload["email"] = email
+                if name:
+                    payload["first_name"] = name.split()[0] if " " in name else name
+                    if " " in name:
+                        payload["last_name"] = name.split()[-1]
+                if domain:
+                    payload["domain"] = domain
+
+                resp = await client.post(
+                    "https://api.apollo.io/v1/people/match",
+                    json=payload,
+                )
+                if resp.status_code == 200:
+                    person = resp.json().get("person", {})
+                    if person:
+                        enriched.update({
+                            "enriched": True,
+                            "title": person.get("title", ""),
+                            "company": person.get("organization", {}).get("name", ""),
+                            "industry": person.get("organization", {}).get("industry", ""),
+                            "employees": person.get("organization", {}).get("estimated_num_employees", 0),
+                            "linkedin_url": person.get("linkedin_url", ""),
+                            "city": person.get("city", ""),
+                            "state": person.get("state", ""),
+                            "seniority": person.get("seniority", ""),
+                            "departments": person.get("departments", []),
+                        })
+                        self.memory.log(
+                            f"[Enrichment] {email or name}: "
+                            f"{enriched.get('title', '?')} at {enriched.get('company', '?')}",
+                            "Enrichment",
+                        )
+            except Exception as exc:
+                logger.error("Apollo people enrichment failed: %s", exc)
+
+        # Company enrichment fallback if we have domain but no person data
+        if domain and not enriched.get("company"):
+            try:
+                resp = await client.post(
+                    "https://api.apollo.io/v1/organizations/enrich",
+                    json={"api_key": apollo_key, "domain": domain},
+                )
+                if resp.status_code == 200:
+                    org = resp.json().get("organization", {})
+                    if org:
+                        enriched.update({
+                            "enriched": True,
+                            "company": org.get("name", ""),
+                            "industry": org.get("industry", ""),
+                            "employees": org.get("estimated_num_employees", 0),
+                            "annual_revenue": org.get("annual_revenue_printed", ""),
+                            "company_linkedin": org.get("linkedin_url", ""),
+                            "technologies": org.get("current_technologies", [])[:10],
+                        })
+            except Exception as exc:
+                logger.error("Apollo org enrichment failed: %s", exc)
+
+        return enriched
