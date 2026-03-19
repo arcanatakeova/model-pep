@@ -147,11 +147,7 @@ class LiveIntegrator:
         Only modules present in the approved registry are loaded.
         """
         approved = self._get_approved_modules()
-        # Also check the registry keys directly (api_name -> module mapping)
-        registry_modules = {
-            rec.module_name.rsplit(".", 1)[-1] for rec in self._registry.values()
-        }
-        if name not in approved and name not in registry_modules:
+        if name not in approved:
             logger.error(
                 "Module '%s' is not in the approved integrations registry. "
                 "Register it via APIEvolver and approve_wrapper() before loading.",

@@ -494,6 +494,8 @@ class Database:
         _validate_columns(set(kwargs.keys()), _DEALS_COLUMNS, "deals")
         conn = self._get_conn()
         updates = {k: v for k, v in kwargs.items() if v is not None}
+        if not updates:
+            return
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         with self._lock:
@@ -594,6 +596,8 @@ class Database:
         _validate_columns(set(metrics.keys()), _CONTENT_COLUMNS, "content")
         conn = self._get_conn()
         updates = {k: v for k, v in metrics.items() if v is not None}
+        if not updates:
+            return
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         with self._lock:
             conn.execute(f"UPDATE content SET {set_clause} WHERE id = ?", (*updates.values(), content_id))
