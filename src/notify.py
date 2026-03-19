@@ -13,7 +13,6 @@ Features:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import time
 from collections import deque
@@ -49,7 +48,8 @@ class Notifier:
 
     def _is_duplicate(self, message: str) -> bool:
         """Check if this message was sent recently (dedup window)."""
-        msg_hash = hashlib.md5(message[:200].encode()).hexdigest()
+        from src.toolkit import fast_hash
+        msg_hash = fast_hash(message[:200])
         now = time.monotonic()
 
         # Clean old entries

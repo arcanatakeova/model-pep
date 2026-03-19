@@ -542,8 +542,8 @@ class Orchestrator:
                     # Append price hint to reply if appropriate
                     if quote.get("starting_at"):
                         reply = f"{reply}\n\nStarting at {quote['starting_at']}/mo — DM for a custom quote."
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Pricing quote for lead %s failed: %s", lead.get("handle", "?"), exc)
 
             if reply:
                 mention_id = next(
@@ -612,8 +612,8 @@ class Orchestrator:
                     await self.distributor.distribute_content(
                         "\n\n".join(tweets), "thread"
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Case File distribution failed: %s", exc)
                 self._completed_today.append("Posted + distributed Case File")
 
         # Behind-the-scenes (2-3x per week)
@@ -649,15 +649,15 @@ class Orchestrator:
                     f"- {o.get('competitor', '?')}: {o.get('weakness', '?')}"
                     for o in opps[:5]
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Intel displacement lookup failed: %s", exc)
         try:
             for svc in ["consulting", "ugc", "seo"]:
                 comp = await self.pricing.compare_to_competitors(svc)
                 if comp.get("our_position"):
                     pricing_ctx += f"- {svc}: {comp['our_position']}\n"
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Competitor pricing lookup failed: %s", exc)
         return await self.outreach.weekly_outreach_cycle(intel_ctx, pricing_ctx)
 
     async def _maybe_post_trade_receipt(self) -> None:
@@ -760,8 +760,8 @@ class Orchestrator:
                         f"- {o.get('competitor', '?')}: {o.get('weakness', '?')} → {o.get('our_angle', '?')}"
                         for o in opps[:5]
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Nightly intel displacement lookup failed: %s", exc)
 
             # Get pricing context
             pricing_ctx = ""
@@ -770,8 +770,8 @@ class Orchestrator:
                     comp = await self.pricing.compare_to_competitors(svc)
                     if comp.get("our_position"):
                         pricing_ctx += f"- {svc}: {comp['our_position']}\n"
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Nightly competitor pricing lookup failed: %s", exc)
 
             outreach = await self.outreach.weekly_outreach_cycle(
                 intel_context=intel_ctx,
@@ -797,8 +797,8 @@ class Orchestrator:
                 for client_key in [k for k in all_projects if k.startswith("client-")][:10]:
                     try:
                         await self.client_portal.track_deliverables(client_key)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("Deliverable tracking failed for %s: %s", client_key, exc)
         except Exception as exc:
             logger.error("Fulfillment failed: %s", exc)
 

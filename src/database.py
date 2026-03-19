@@ -66,8 +66,8 @@ class Database:
             try:
                 self._conn.execute("PRAGMA optimize")
                 self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Database close optimization failed: %s", exc)
             self._conn.close()
             self._conn = None
             logger.info("Database closed — %d queries, %d errors", self._query_count, self._error_count)

@@ -128,7 +128,8 @@ class RevenueEngine:
         # 2. Trading profits
         try:
             trading_rev = max(0.0, self.trader.get_monthly_trading_revenue())
-        except Exception:
+        except Exception as exc:
+            logger.warning("Trading revenue fetch failed: %s", exc)
             trading_rev = 0.0
 
         # 3. Other channels from memory (safe parsing)
@@ -258,5 +259,6 @@ class RevenueEngine:
 
             success = generate_excel(rows, output_path, sheet_name=snapshot.get("month", "Revenue"))
             return output_path if success else None
-        except Exception:
+        except Exception as exc:
+            logger.error("Revenue Excel export failed: %s", exc)
             return None

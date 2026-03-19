@@ -960,7 +960,8 @@ class OpportunityScanner:
                                 details={**opp, "hn_id": story_id, "url": item.get("url", "")},
                             )
 
-                    except Exception:
+                    except Exception as exc:
+                        logger.warning("HN story %s processing failed: %s", story_id, exc)
                         continue
 
                 await asyncio.sleep(random.uniform(1, 3))

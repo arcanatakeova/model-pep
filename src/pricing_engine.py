@@ -17,7 +17,6 @@ Capabilities:
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import random
 from dataclasses import dataclass, field
@@ -486,7 +485,8 @@ class PricingEngine:
         Uses a hash of (service + prospect_id) so the same prospect always
         sees the same price, but the split is ~50/50 across all prospects.
         """
-        seed = hashlib.md5(f"{service}:{prospect_id}".encode()).hexdigest()
+        from src.toolkit import fast_hash
+        seed = fast_hash(f"{service}:{prospect_id}")
         bucket = "A" if int(seed, 16) % 2 == 0 else "B"
         shown_price = price_a if bucket == "A" else price_b
 

@@ -342,7 +342,8 @@ async def handle_dashboard(request: web.Request) -> web.Response:
         if orch.revenue:
             try:
                 dashboard["revenue"] = await orch.revenue.get_full_revenue_snapshot()
-            except Exception:
+            except Exception as exc:
+                logger.error("Dashboard revenue fetch failed: %s", exc)
                 dashboard["revenue"] = {"error": "failed to fetch"}
 
         # Analytics funnel

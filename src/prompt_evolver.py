@@ -14,7 +14,6 @@ This is how ARCANA gets better at talking — not just what it does, but HOW it 
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -116,7 +115,8 @@ class PromptEvolver:
             return None
 
         # Deterministic bucket
-        bucket = int(hashlib.md5(context_key.encode()).hexdigest(), 16) % len(variants)
+        from src.toolkit import fast_hash
+        bucket = int(fast_hash(context_key), 16) % len(variants)
         variant = variants[bucket]
         variant.impressions += 1
         return variant

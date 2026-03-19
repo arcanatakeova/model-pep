@@ -77,8 +77,8 @@ class LeadPipeline:
             result["sentiment_polarity"] = sentiment["polarity"]
             result["keywords"] = extract_keywords(text, top_n=5)
             result["fingerprint"] = content_fingerprint(text)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Lead NLP enrichment failed for @%s: %s", handle, exc)
 
         # Log to memory
         self.memory.log(

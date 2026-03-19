@@ -497,8 +497,8 @@ class PaymentsEngine:
         try:
             customer = stripe.Customer.retrieve(customer_id)
             customer_email = customer.get("email", "unknown")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to resolve customer %s for cancelled sub: %s", customer_id, exc)
 
         self.memory.log(
             f"[Payments] Subscription CANCELLED: {customer_email}\n"
@@ -532,8 +532,8 @@ class PaymentsEngine:
         try:
             customer = stripe.Customer.retrieve(customer_id)
             customer_email = customer.get("email", "unknown")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to resolve customer %s for refund: %s", customer_id, exc)
 
         self.memory.log(
             f"[Payments] REFUND processed: {customer_email} — "
@@ -729,8 +729,8 @@ class PaymentsEngine:
                         try:
                             cust = stripe.Customer.retrieve(charge.customer)
                             customer_email = cust.get("email", "unknown")
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning("Failed to resolve customer for failed charge %s: %s", charge.id, exc)
 
                     failed.append({
                         "charge_id": charge.id,
@@ -776,8 +776,8 @@ class PaymentsEngine:
                 try:
                     cust = stripe.Customer.retrieve(sub.customer)
                     customer_email = cust.get("email", "unknown")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Failed to resolve customer for renewal %s: %s", sub.id, exc)
 
                 renewal_date = datetime.fromtimestamp(
                     sub.current_period_end, tz=timezone.utc,
@@ -849,7 +849,8 @@ class PaymentsEngine:
             try:
                 invoice = stripe.Invoice.retrieve(invoice_id)
                 attempt_count = invoice.get("attempt_count", 1)
-            except Exception:
+            except Exception as exc:
+                logger.warning("Failed to retrieve invoice %s: %s", invoice_id, exc)
                 attempt_count = 1
 
             if invoice.status == "paid":

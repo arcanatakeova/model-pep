@@ -90,9 +90,9 @@ class ScannerOrchestrator:
 
     def _dedup_key(self, text: str, author: str) -> str:
         """Generate dedup key from opportunity text + author."""
-        import hashlib
+        from src.toolkit import fast_hash
         normalized = f"{author.lower().strip()}:{text[:200].lower().strip()}"
-        return hashlib.md5(normalized.encode()).hexdigest()
+        return fast_hash(normalized)
 
     def is_duplicate(self, text: str, author: str) -> bool:
         """Check if this opportunity was already found (cross-platform)."""
