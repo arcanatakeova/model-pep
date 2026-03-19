@@ -62,16 +62,32 @@ def is_duplicate_text(text1: str, text2: str, threshold: float = 0.85) -> bool:
 
 
 def extract_keywords(text: str, top_n: int = 10) -> list[str]:
-    """Extract keywords from text using TextBlob noun phrase extraction."""
-    from textblob import TextBlob
-    blob = TextBlob(text)
-    # Get noun phrases and single nouns
-    phrases = [str(p).lower() for p in blob.noun_phrases]
-    # Deduplicate and rank by frequency
-    freq: dict[str, int] = {}
-    for p in phrases:
-        freq[p] = freq.get(p, 0) + 1
-    return sorted(freq.keys(), key=lambda k: -freq[k])[:top_n]
+    """Extract keywords from text using TextBlob noun phrase extraction.
+    Falls back to simple word frequency if NLTK corpora aren't available.
+    """
+    try:
+        from textblob import TextBlob
+        blob = TextBlob(text)
+        phrases = [str(p).lower() for p in blob.noun_phrases]
+        freq: dict[str, int] = {}
+        for p in phrases:
+            freq[p] = freq.get(p, 0) + 1
+        return sorted(freq.keys(), key=lambda k: -freq[k])[:top_n]
+    except Exception:
+        # Fallback: extract frequent non-stopword tokens
+        stopwords = {"the", "a", "an", "is", "are", "was", "were", "be", "been",
+                     "being", "have", "has", "had", "do", "does", "did", "will",
+                     "would", "could", "should", "may", "might", "shall", "can",
+                     "to", "of", "in", "for", "on", "with", "at", "by", "from",
+                     "and", "or", "but", "not", "no", "if", "then", "so", "as",
+                     "it", "its", "this", "that", "their", "your", "my", "our",
+                     "they", "them", "we", "us", "he", "she", "him", "her", "i"}
+        words = re.sub(r"[^a-z\s]", "", text.lower()).split()
+        freq = {}
+        for w in words:
+            if w not in stopwords and len(w) > 2:
+                freq[w] = freq.get(w, 0) + 1
+        return sorted(freq.keys(), key=lambda k: -freq[k])[:top_n]
 
 
 def detect_language(text: str) -> str:
