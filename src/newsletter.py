@@ -304,6 +304,117 @@ class Newsletter:
             "published": published,
         }
 
+    async def get_subscriber_growth(self, days: int = 30) -> list[dict[str, Any]]:
+        """Track subscriber count over time.
+
+        Fetches current subscriber data and logs a snapshot to memory
+        for historical trend analysis.
+
+        Args:
+            days: Number of days of history to consider (for future use).
+        """
+        if not self.api_key or not self.publication_id:
+            return []
+        try:
+            # Fetch current subscription stats
+            resp = await self._request_with_retry(
+                "get",
+                f"{self.base_url}/publications/{self.publication_id}/subscriptions",
+                params={"limit": 100, "status": "active"},
+            )
+            if resp.status_code != 200:
+                logger.error("Beehiiv subscriber growth fetch failed: %s", resp.status_code)
+                return []
+
+            # Get current stats as a snapshot
+            stats = await self.get_stats()
+            snapshot = {
+                "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "active_subscribers": stats.get("subscribers", 0),
+                "total_subscribers": stats.get("total", 0),
+            }
+
+            # Log to memory for historical tracking
+            self.memory.log(
+                f"Subscriber snapshot: {snapshot['active_subscribers']} active, "
+                f"{snapshot['total_subscribers']} total",
+                "Newsletter",
+            )
+            return [snapshot]
+        except Exception as exc:
+            logger.error("Beehiiv subscriber growth error: %s", exc)
+            return []
+
+    async def get_newsletter_performance(self, limit: int = 10) -> dict[str, Any]:
+        """Get performance metrics for recent newsletters.
+
+        Returns aggregate and per-issue stats including open rates,
+        click rates, and delivery counts.
+
+        Args:
+            limit: Max number of recent issues to analyze.
+        """
+        if not self.api_key or not self.publication_id:
+            return {"issues": [], "aggregate": {}}
+        try:
+            resp = await self._request_with_retry(
+                "get",
+                f"{self.base_url}/publications/{self.publication_id}/posts",
+                params={"limit": limit, "status": "confirmed"},
+            )
+            if resp.status_code != 200:
+                logger.error("Beehiiv performance fetch failed: %s", resp.status_code)
+                return {"issues": [], "aggregate": {}}
+
+            posts = resp.json().get("data", [])
+            issues: list[dict[str, Any]] = []
+            total_opens = 0
+            total_clicks = 0
+            total_delivered = 0
+
+            for post in posts:
+                post_stats = post.get("stats", {})
+                delivered = post_stats.get("email_total_delivered", 0)
+                opens = post_stats.get("email_total_unique_opened", 0)
+                clicks = post_stats.get("email_total_unique_clicked", 0)
+                open_rate = (opens / delivered * 100) if delivered > 0 else 0
+                click_rate = (clicks / delivered * 100) if delivered > 0 else 0
+
+                issues.append({
+                    "id": post.get("id"),
+                    "title": post.get("title", ""),
+                    "published_at": post.get("published_at"),
+                    "delivered": delivered,
+                    "opens": opens,
+                    "clicks": clicks,
+                    "open_rate": round(open_rate, 1),
+                    "click_rate": round(click_rate, 1),
+                })
+
+                total_opens += opens
+                total_clicks += clicks
+                total_delivered += delivered
+
+            avg_open_rate = (total_opens / total_delivered * 100) if total_delivered > 0 else 0
+            avg_click_rate = (total_clicks / total_delivered * 100) if total_delivered > 0 else 0
+
+            aggregate = {
+                "total_issues": len(issues),
+                "total_delivered": total_delivered,
+                "avg_open_rate": round(avg_open_rate, 1),
+                "avg_click_rate": round(avg_click_rate, 1),
+            }
+
+            self.memory.log(
+                f"Newsletter performance: {len(issues)} issues, "
+                f"{avg_open_rate:.1f}% open rate, {avg_click_rate:.1f}% click rate",
+                "Newsletter",
+            )
+            return {"issues": issues, "aggregate": aggregate}
+        except Exception as exc:
+            logger.error("Beehiiv performance error: %s", exc)
+            return {"issues": [], "aggregate": {}}
+
     async def generate_x_to_newsletter_cta(self) -> str:
         """Generate a tweet promoting newsletter signup."""
         stats = await self.get_stats()

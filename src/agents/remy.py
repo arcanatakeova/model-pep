@@ -189,4 +189,56 @@ class Remy:
             tier=Tier.HAIKU,
             max_tokens=300,
         )
-        return report.strip()
+
+        report_text = report.strip()
+
+        # ── Send nightly report to Discord via notifier ──────────────
+        if self.notifier:
+            await self.notifier.send(
+                f"**[Remy Nightly Report]**\n\n{report_text}", level="info",
+            )
+            self.memory.log("[Remy] Nightly report sent to Discord", "Sales")
+
+        return report_text
+
+    async def auto_sequence(self, handle: str, context: str) -> dict[str, Any]:
+        """Trigger a multi-step follow-up sequence for a qualified lead.
+
+        Steps:
+        1. Immediate follow-up (email + X reply)
+        2. Generate a tailored proposal
+        3. Send the proposal via email
+        4. Log the full sequence to memory
+        """
+        results: dict[str, Any] = {"handle": handle, "steps": []}
+
+        # Step 1: Initial follow-up
+        follow_up = await self.follow_up(handle, context)
+        results["follow_up"] = follow_up
+        results["steps"].append("follow_up")
+
+        # Step 2: If we identified a service fit, generate and send a proposal
+        service = follow_up.get("suggested_service", "")
+        if service:
+            next_step = follow_up.get("next_step", "")
+            proposal = await self.generate_proposal(
+                handle, service, next_step or context,
+            )
+            results["proposal"] = proposal
+            results["steps"].append("proposal_generated")
+
+        # Step 3: Notify Ian/Tan about the sequence
+        if self.notifier:
+            await self.notifier.send(
+                f"**[Remy]** Auto-sequence triggered for @{handle}\n"
+                f"Service: {service or 'TBD'}\n"
+                f"Steps completed: {', '.join(results['steps'])}",
+                level="info",
+            )
+            results["steps"].append("team_notified")
+
+        self.memory.log(
+            f"[Remy] Auto-sequence for @{handle}: {', '.join(results['steps'])}",
+            "Sales",
+        )
+        return results

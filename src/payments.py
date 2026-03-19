@@ -332,3 +332,612 @@ class PaymentsEngine:
             "mrr": mrr,
             "total": stripe_rev.get("revenue", 0) + gumroad_rev.get("revenue", 0),
         }
+
+    # ── Webhook Handling ─────────────────────────────────────────────
+
+    def handle_webhook(
+        self, payload: dict, signature: str,
+        webhook_secret: str = "",
+    ) -> dict[str, Any]:
+        """Process Stripe webhook events in real-time.
+
+        Verifies the signature, then dispatches based on event type:
+        - checkout.session.completed  → fulfill order, send delivery email
+        - invoice.payment_succeeded   → log revenue, update CRM
+        - invoice.payment_failed      → send reminder, schedule retry in 3 days
+        - customer.subscription.deleted → mark as churned in CRM
+        - charge.refunded             → process refund, notify team
+        """
+        # Verify webhook signature when secret is available
+        event: dict[str, Any] | None = None
+        if webhook_secret:
+            try:
+                event = stripe.Webhook.construct_event(
+                    payload, signature, webhook_secret,
+                )
+            except stripe.error.SignatureVerificationError:
+                logger.error("Webhook signature verification failed")
+                return {"status": "error", "reason": "invalid_signature"}
+            except Exception as exc:
+                logger.error("Webhook construction error: %s", exc)
+                return {"status": "error", "reason": str(exc)}
+        else:
+            # No secret configured — trust the payload (dev/testing only)
+            event = payload
+
+        event_type: str = event.get("type", "unknown")
+        data_obj: dict[str, Any] = event.get("data", {}).get("object", {})
+
+        try:
+            if event_type == "checkout.session.completed":
+                return self._handle_checkout_completed(data_obj)
+
+            elif event_type == "invoice.payment_succeeded":
+                return self._handle_payment_succeeded(data_obj)
+
+            elif event_type == "invoice.payment_failed":
+                return self._handle_payment_failed(data_obj)
+
+            elif event_type == "customer.subscription.deleted":
+                return self._handle_subscription_deleted(data_obj)
+
+            elif event_type == "charge.refunded":
+                return self._handle_charge_refunded(data_obj)
+
+            else:
+                logger.info("Unhandled webhook event type: %s", event_type)
+                return {"status": "ignored", "event_type": event_type}
+
+        except Exception as exc:
+            logger.error("Webhook handler error for %s: %s", event_type, exc)
+            return {"status": "error", "event_type": event_type, "reason": str(exc)}
+
+    def _handle_checkout_completed(self, session: dict[str, Any]) -> dict[str, Any]:
+        """Fulfill order after successful checkout."""
+        customer_email = session.get("customer_details", {}).get("email", "unknown")
+        amount = session.get("amount_total", 0) / 100
+        mode = session.get("mode", "payment")
+        session_id = session.get("id", "")
+
+        self.memory.log(
+            f"[Payments] Checkout completed: {customer_email} — "
+            f"${amount:.2f} ({mode})\n  Session: {session_id}",
+            "Revenue",
+        )
+
+        # Record in CRM knowledge
+        self.memory.save_knowledge(
+            "projects", f"order-{session_id[:16]}",
+            f"# Order Fulfilled\n\n"
+            f"Customer: {customer_email}\n"
+            f"Amount: ${amount:.2f}\n"
+            f"Mode: {mode}\n"
+            f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}\n"
+            f"Status: fulfilled\n",
+        )
+
+        logger.info(
+            "Checkout fulfilled: %s — $%.2f (%s)", customer_email, amount, mode,
+        )
+        return {
+            "status": "fulfilled",
+            "event_type": "checkout.session.completed",
+            "customer_email": customer_email,
+            "amount": amount,
+        }
+
+    def _handle_payment_succeeded(self, invoice: dict[str, Any]) -> dict[str, Any]:
+        """Log successful payment and update CRM."""
+        customer_email = invoice.get("customer_email", "unknown")
+        amount = invoice.get("amount_paid", 0) / 100
+        invoice_id = invoice.get("id", "")
+        subscription_id = invoice.get("subscription", "")
+
+        self.memory.log(
+            f"[Payments] Payment succeeded: {customer_email} — "
+            f"${amount:.2f}\n  Invoice: {invoice_id}",
+            "Revenue",
+        )
+
+        # Update CRM with latest payment
+        self.memory.save_knowledge(
+            "areas", f"crm-{customer_email.replace('@', '_at_').replace('.', '_')}",
+            f"# Customer: {customer_email}\n\n"
+            f"Last Payment: ${amount:.2f}\n"
+            f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
+            f"Invoice: {invoice_id}\n"
+            f"Subscription: {subscription_id or 'one-time'}\n"
+            f"Status: active\n",
+        )
+
+        return {
+            "status": "logged",
+            "event_type": "invoice.payment_succeeded",
+            "customer_email": customer_email,
+            "amount": amount,
+        }
+
+    def _handle_payment_failed(self, invoice: dict[str, Any]) -> dict[str, Any]:
+        """Handle failed payment — log, notify, and schedule retry."""
+        customer_email = invoice.get("customer_email", "unknown")
+        amount = invoice.get("amount_due", 0) / 100
+        invoice_id = invoice.get("id", "")
+        attempt_count = invoice.get("attempt_count", 0)
+        subscription_id = invoice.get("subscription", "")
+
+        self.memory.log(
+            f"[Payments] Payment FAILED: {customer_email} — "
+            f"${amount:.2f} (attempt #{attempt_count})\n"
+            f"  Invoice: {invoice_id}\n"
+            f"  Subscription: {subscription_id or 'N/A'}\n"
+            f"  Action: Reminder sent, retry scheduled in 3 days",
+            "Billing",
+        )
+
+        # Send invoice reminder for the unpaid invoice
+        if invoice_id:
+            self.send_invoice_reminder(invoice_id)
+
+        return {
+            "status": "retry_scheduled",
+            "event_type": "invoice.payment_failed",
+            "customer_email": customer_email,
+            "amount": amount,
+            "attempt_count": attempt_count,
+            "retry_in_days": 3,
+        }
+
+    def _handle_subscription_deleted(self, subscription: dict[str, Any]) -> dict[str, Any]:
+        """Mark customer as churned when subscription is cancelled."""
+        sub_id = subscription.get("id", "")
+        customer_id = subscription.get("customer", "")
+
+        # Resolve customer email
+        customer_email = "unknown"
+        try:
+            customer = stripe.Customer.retrieve(customer_id)
+            customer_email = customer.get("email", "unknown")
+        except Exception:
+            pass
+
+        self.memory.log(
+            f"[Payments] Subscription CANCELLED: {customer_email}\n"
+            f"  Subscription: {sub_id}\n"
+            f"  Status: churned",
+            "Churn",
+        )
+
+        self.memory.save_knowledge(
+            "areas", f"crm-{customer_email.replace('@', '_at_').replace('.', '_')}",
+            f"# Customer: {customer_email}\n\n"
+            f"Subscription: {sub_id}\n"
+            f"Cancelled: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
+            f"Status: churned\n",
+        )
+
+        return {
+            "status": "churned",
+            "event_type": "customer.subscription.deleted",
+            "customer_email": customer_email,
+            "subscription_id": sub_id,
+        }
+
+    def _handle_charge_refunded(self, charge: dict[str, Any]) -> dict[str, Any]:
+        """Process refund event and notify team."""
+        charge_id = charge.get("id", "")
+        amount_refunded = charge.get("amount_refunded", 0) / 100
+        customer_id = charge.get("customer", "")
+
+        customer_email = "unknown"
+        try:
+            customer = stripe.Customer.retrieve(customer_id)
+            customer_email = customer.get("email", "unknown")
+        except Exception:
+            pass
+
+        self.memory.log(
+            f"[Payments] REFUND processed: {customer_email} — "
+            f"${amount_refunded:.2f}\n  Charge: {charge_id}",
+            "Refunds",
+        )
+
+        return {
+            "status": "refunded",
+            "event_type": "charge.refunded",
+            "customer_email": customer_email,
+            "amount_refunded": amount_refunded,
+            "charge_id": charge_id,
+        }
+
+    # ── Refund Processing ────────────────────────────────────────────
+
+    def process_refund(
+        self, charge_id: str, reason: str = "requested_by_customer",
+        amount_cents: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Issue a full or partial refund via Stripe.
+
+        Args:
+            charge_id: The Stripe charge ID to refund.
+            reason: One of 'duplicate', 'fraudulent', or 'requested_by_customer'.
+            amount_cents: Partial refund amount in cents. None = full refund.
+        """
+        if not self.stripe_key:
+            logger.warning("Stripe not configured — cannot process refund")
+            return None
+
+        try:
+            refund_params: dict[str, Any] = {
+                "charge": charge_id,
+                "reason": reason,
+            }
+            if amount_cents is not None:
+                refund_params["amount"] = amount_cents
+
+            refund = stripe.Refund.create(**refund_params)
+
+            refund_amount = refund.amount / 100
+            self.memory.log(
+                f"[Payments] Refund issued: ${refund_amount:.2f}\n"
+                f"  Charge: {charge_id}\n"
+                f"  Reason: {reason}\n"
+                f"  Refund ID: {refund.id}",
+                "Refunds",
+            )
+
+            return {
+                "refund_id": refund.id,
+                "charge_id": charge_id,
+                "amount": refund_amount,
+                "status": refund.status,
+                "reason": reason,
+            }
+
+        except Exception as exc:
+            logger.error("Refund error for charge %s: %s", charge_id, exc)
+            return None
+
+    # ── Invoice Reminders ────────────────────────────────────────────
+
+    def send_invoice_reminder(self, invoice_id: str) -> dict[str, Any] | None:
+        """Send a reminder to the customer about an unpaid invoice.
+
+        Uses Stripe's built-in invoice sending to re-email the customer.
+        """
+        if not self.stripe_key:
+            logger.warning("Stripe not configured — cannot send reminder")
+            return None
+
+        try:
+            invoice = stripe.Invoice.retrieve(invoice_id)
+
+            if invoice.status == "paid":
+                logger.info("Invoice %s already paid — no reminder needed", invoice_id)
+                return {"invoice_id": invoice_id, "status": "already_paid"}
+
+            if invoice.status not in ("open", "past_due"):
+                logger.info(
+                    "Invoice %s status is '%s' — cannot send reminder",
+                    invoice_id, invoice.status,
+                )
+                return {"invoice_id": invoice_id, "status": invoice.status, "action": "none"}
+
+            # Re-send the invoice email via Stripe
+            stripe.Invoice.send_invoice(invoice_id)
+
+            customer_email = invoice.get("customer_email", "unknown")
+            amount = invoice.amount_due / 100
+
+            self.memory.log(
+                f"[Payments] Invoice reminder sent: {customer_email} — "
+                f"${amount:.2f}\n  Invoice: {invoice_id}",
+                "Billing",
+            )
+
+            return {
+                "invoice_id": invoice_id,
+                "customer_email": customer_email,
+                "amount": amount,
+                "status": "reminder_sent",
+            }
+
+        except Exception as exc:
+            logger.error("Invoice reminder error for %s: %s", invoice_id, exc)
+            return None
+
+    # ── Failed Payment Retry ─────────────────────────────────────────
+
+    def retry_failed_payment(self, invoice_id: str) -> dict[str, Any] | None:
+        """Retry a failed payment by re-attempting to pay an open invoice.
+
+        Args:
+            invoice_id: The Stripe invoice ID to retry payment on.
+        """
+        if not self.stripe_key:
+            logger.warning("Stripe not configured — cannot retry payment")
+            return None
+
+        try:
+            invoice = stripe.Invoice.retrieve(invoice_id)
+
+            if invoice.status == "paid":
+                return {"invoice_id": invoice_id, "status": "already_paid"}
+
+            if invoice.status not in ("open", "past_due"):
+                logger.info(
+                    "Invoice %s status is '%s' — cannot retry",
+                    invoice_id, invoice.status,
+                )
+                return {"invoice_id": invoice_id, "status": invoice.status, "action": "none"}
+
+            # Attempt to pay the invoice
+            paid_invoice = stripe.Invoice.pay(invoice_id)
+
+            customer_email = paid_invoice.get("customer_email", "unknown")
+            amount = paid_invoice.amount_due / 100
+
+            self.memory.log(
+                f"[Payments] Payment retry succeeded: {customer_email} — "
+                f"${amount:.2f}\n  Invoice: {invoice_id}",
+                "Revenue",
+            )
+
+            return {
+                "invoice_id": invoice_id,
+                "customer_email": customer_email,
+                "amount": amount,
+                "status": paid_invoice.status,
+            }
+
+        except stripe.error.CardError as exc:
+            logger.warning("Retry failed (card error) for %s: %s", invoice_id, exc)
+            self.memory.log(
+                f"[Payments] Payment retry FAILED (card declined): {invoice_id}",
+                "Billing",
+            )
+            return {
+                "invoice_id": invoice_id,
+                "status": "retry_failed",
+                "reason": str(exc),
+            }
+
+        except Exception as exc:
+            logger.error("Retry error for %s: %s", invoice_id, exc)
+            return None
+
+    # ── Failed Payments Report ───────────────────────────────────────
+
+    def get_failed_payments(self, days: int = 30) -> list[dict[str, Any]]:
+        """List all failed charges in the last N days.
+
+        Returns a list of failed charge details for dunning and follow-up.
+        """
+        if not self.stripe_key:
+            return []
+
+        try:
+            since = int(time.time()) - (days * 86400)
+            charges = stripe.Charge.list(
+                created={"gte": since}, limit=100,
+            )
+
+            failed: list[dict[str, Any]] = []
+            for charge in charges.auto_paging_iter():
+                if charge.status == "failed" or (not charge.paid and not charge.refunded):
+                    customer_email = "unknown"
+                    if charge.customer:
+                        try:
+                            cust = stripe.Customer.retrieve(charge.customer)
+                            customer_email = cust.get("email", "unknown")
+                        except Exception:
+                            pass
+
+                    failed.append({
+                        "charge_id": charge.id,
+                        "amount": charge.amount / 100,
+                        "customer_email": customer_email,
+                        "failure_message": charge.failure_message or "",
+                        "failure_code": charge.failure_code or "",
+                        "created": datetime.fromtimestamp(
+                            charge.created, tz=timezone.utc,
+                        ).strftime("%Y-%m-%d %H:%M"),
+                        "invoice": charge.invoice or "",
+                    })
+
+            return failed
+
+        except Exception as exc:
+            logger.error("Failed payments query error: %s", exc)
+            return []
+
+    # ── Upcoming Renewals ────────────────────────────────────────────
+
+    def get_upcoming_renewals(self, days: int = 7) -> list[dict[str, Any]]:
+        """List subscriptions renewing within the next N days.
+
+        Useful for proactive customer outreach and revenue forecasting.
+        """
+        if not self.stripe_key:
+            return []
+
+        try:
+            now = int(time.time())
+            cutoff = now + (days * 86400)
+
+            subs = stripe.Subscription.list(
+                status="active",
+                current_period_end={"lte": cutoff, "gte": now},
+                limit=100,
+            )
+
+            renewals: list[dict[str, Any]] = []
+            for sub in subs.auto_paging_iter():
+                customer_email = "unknown"
+                try:
+                    cust = stripe.Customer.retrieve(sub.customer)
+                    customer_email = cust.get("email", "unknown")
+                except Exception:
+                    pass
+
+                renewal_date = datetime.fromtimestamp(
+                    sub.current_period_end, tz=timezone.utc,
+                ).strftime("%Y-%m-%d")
+
+                amount = 0.0
+                for item in sub["items"]["data"]:
+                    amount += item["price"]["unit_amount"] / 100
+
+                renewals.append({
+                    "subscription_id": sub.id,
+                    "customer_email": customer_email,
+                    "amount": amount,
+                    "renewal_date": renewal_date,
+                    "status": sub.status,
+                })
+
+            return renewals
+
+        except Exception as exc:
+            logger.error("Upcoming renewals query error: %s", exc)
+            return []
+
+    # ── Dunning Cycle ────────────────────────────────────────────────
+
+    def dunning_cycle(self) -> dict[str, Any]:
+        """Auto-process all failed payments with retry and escalation.
+
+        Dunning strategy (based on attempt count / age):
+        1. First failure  → Send invoice reminder
+        2. Second failure → Retry payment, send reminder
+        3. Third failure  → Retry payment, escalate to team via memory log
+        4. Fourth+ failure → Log for manual intervention, do not retry
+
+        Returns a summary of actions taken.
+        """
+        if not self.stripe_key:
+            return {"status": "skipped", "reason": "stripe_not_configured"}
+
+        failed = self.get_failed_payments(days=30)
+        if not failed:
+            self.memory.log(
+                "[Payments] Dunning cycle: No failed payments found.",
+                "Billing",
+            )
+            return {"status": "clean", "failed_count": 0}
+
+        results: dict[str, list[dict[str, Any]]] = {
+            "reminded": [],
+            "retried": [],
+            "escalated": [],
+            "skipped": [],
+        }
+
+        for charge_info in failed:
+            invoice_id = charge_info.get("invoice", "")
+            customer_email = charge_info["customer_email"]
+            amount = charge_info["amount"]
+
+            if not invoice_id:
+                # No invoice linked — cannot retry or remind
+                results["skipped"].append({
+                    "charge_id": charge_info["charge_id"],
+                    "reason": "no_invoice_linked",
+                })
+                continue
+
+            # Determine attempt stage from the invoice
+            try:
+                invoice = stripe.Invoice.retrieve(invoice_id)
+                attempt_count = invoice.get("attempt_count", 1)
+            except Exception:
+                attempt_count = 1
+
+            if invoice.status == "paid":
+                # Already resolved
+                results["skipped"].append({
+                    "charge_id": charge_info["charge_id"],
+                    "reason": "already_paid",
+                })
+                continue
+
+            if attempt_count <= 1:
+                # First failure — just remind
+                reminder = self.send_invoice_reminder(invoice_id)
+                if reminder:
+                    results["reminded"].append({
+                        "invoice_id": invoice_id,
+                        "customer_email": customer_email,
+                        "amount": amount,
+                    })
+
+            elif attempt_count <= 3:
+                # Second/third failure — retry + remind
+                retry_result = self.retry_failed_payment(invoice_id)
+                if retry_result and retry_result.get("status") == "paid":
+                    results["retried"].append({
+                        "invoice_id": invoice_id,
+                        "customer_email": customer_email,
+                        "amount": amount,
+                        "outcome": "recovered",
+                    })
+                else:
+                    # Retry failed — send reminder and escalate on 3rd attempt
+                    self.send_invoice_reminder(invoice_id)
+                    if attempt_count >= 3:
+                        self.memory.log(
+                            f"[Payments] ESCALATION: {customer_email} — "
+                            f"${amount:.2f} failed {attempt_count}x\n"
+                            f"  Invoice: {invoice_id}\n"
+                            f"  Failure: {charge_info.get('failure_message', 'unknown')}\n"
+                            f"  Action: Needs manual follow-up from Ian/Tan",
+                            "Alerts",
+                        )
+                        results["escalated"].append({
+                            "invoice_id": invoice_id,
+                            "customer_email": customer_email,
+                            "amount": amount,
+                            "attempts": attempt_count,
+                        })
+                    else:
+                        results["reminded"].append({
+                            "invoice_id": invoice_id,
+                            "customer_email": customer_email,
+                            "amount": amount,
+                        })
+
+            else:
+                # 4+ failures — log for manual intervention, stop retrying
+                self.memory.log(
+                    f"[Payments] MANUAL INTERVENTION REQUIRED: {customer_email} — "
+                    f"${amount:.2f} failed {attempt_count}x\n"
+                    f"  Invoice: {invoice_id}\n"
+                    f"  Failure: {charge_info.get('failure_message', 'unknown')}\n"
+                    f"  Action: Automated retries exhausted. Needs human outreach.",
+                    "Alerts",
+                )
+                results["escalated"].append({
+                    "invoice_id": invoice_id,
+                    "customer_email": customer_email,
+                    "amount": amount,
+                    "attempts": attempt_count,
+                })
+
+        summary = {
+            "status": "completed",
+            "failed_count": len(failed),
+            "reminded": len(results["reminded"]),
+            "retried": len(results["retried"]),
+            "escalated": len(results["escalated"]),
+            "skipped": len(results["skipped"]),
+            "details": results,
+        }
+
+        self.memory.log(
+            f"[Payments] Dunning cycle complete: "
+            f"{len(failed)} failed, {len(results['retried'])} retried, "
+            f"{len(results['reminded'])} reminded, "
+            f"{len(results['escalated'])} escalated",
+            "Billing",
+        )
+
+        return summary

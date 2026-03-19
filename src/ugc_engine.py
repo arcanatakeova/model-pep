@@ -600,3 +600,335 @@ class UGCEngine:
             "estimated_cost": f"${len(creatives) * 2}-{len(creatives) * 5}",
             "estimated_value": f"${len(creatives) * 50}-{len(creatives) * 150}",
         }
+
+    # ── Video Delivery & Invoicing ─────────────────────────────────
+
+    async def deliver_video_to_client(
+        self, client_key: str, video_url: str, video_data: dict[str, Any],
+    ) -> bool:
+        """Send completed video to client via email with download link, thumbnail, and revision info."""
+        if not self.email_engine:
+            logger.error("Email engine not configured — cannot deliver video")
+            return False
+
+        client_info = self.memory.get_knowledge("projects", client_key)
+        if not client_info:
+            logger.error("Client not found: %s", client_key)
+            return False
+
+        # Parse client email from memory file
+        client_email = ""
+        client_name = ""
+        for line in client_info.splitlines():
+            lower = line.lower()
+            if "email:" in lower:
+                client_email = line.split(":", 1)[1].strip()
+            if line.startswith("# UGC Client:"):
+                client_name = line.replace("# UGC Client:", "").strip()
+
+        if not client_email:
+            logger.error("No email on file for client %s", client_key)
+            return False
+
+        thumbnail_url = video_data.get("thumbnail_url", "")
+        duration = video_data.get("duration", "N/A")
+        script_hook = video_data.get("script", {}).get("hook", "")
+        quality_score = video_data.get("quality", {}).get("score", "N/A")
+
+        thumbnail_html = (
+            f'<img src="{thumbnail_url}" alt="Video thumbnail" '
+            f'style="max-width:100%;border-radius:8px;margin:16px 0" />'
+            if thumbnail_url else ""
+        )
+
+        html_body = (
+            f"<h2>Your UGC Video is Ready!</h2>"
+            f"<p>Hi {client_name},</p>"
+            f"<p>Your latest UGC video has been produced and passed our quality review "
+            f"(score: {quality_score}/10).</p>"
+            f"{thumbnail_html}"
+            f"<table style='border-collapse:collapse;width:100%;margin:16px 0'>"
+            f"<tr><td><strong>Duration</strong></td><td>{duration}s</td></tr>"
+            f"<tr><td><strong>Hook</strong></td><td>{script_hook[:120]}</td></tr>"
+            f"</table>"
+            f"<p><a href='{video_url}' style='background:#000;color:#fff;"
+            f"padding:12px 24px;text-decoration:none;display:inline-block;"
+            f"border-radius:6px;margin:16px 0'>Download Video &rarr;</a></p>"
+            f"<h3>Need Revisions?</h3>"
+            f"<p>Reply to this email with your revision notes. We offer up to "
+            f"2 free revisions per video. Please include:</p>"
+            f"<ul>"
+            f"<li>Timestamp of the section to change</li>"
+            f"<li>What you'd like changed (script, pacing, avatar, etc.)</li>"
+            f"<li>Any reference examples</li>"
+            f"</ul>"
+            f"<p>— ARCANA AI, Arcana Operations</p>"
+        )
+
+        success = await self.email_engine.send(
+            to_email=client_email,
+            subject=f"Your UGC Video is Ready — {client_name}",
+            html_body=html_body,
+        )
+
+        if success:
+            self.memory.log(
+                f"[UGC] Video delivered to {client_name} ({client_email})\n"
+                f"  URL: {video_url}\n"
+                f"  Quality: {quality_score}/10",
+                "UGC",
+            )
+        return success
+
+    async def request_revision(
+        self, client_key: str, video_id: str, notes: str,
+    ) -> dict[str, Any]:
+        """Handle a client revision request for a delivered video."""
+        client_info = self.memory.get_knowledge("projects", client_key)
+        client_name = ""
+        if client_info:
+            for line in client_info.splitlines():
+                if line.startswith("# UGC Client:"):
+                    client_name = line.replace("# UGC Client:", "").strip()
+
+        # Use LLM to parse revision notes into actionable changes
+        revision_plan = await self.llm.ask_json(
+            f"A UGC video client has requested revisions.\n\n"
+            f"Client: {client_name}\n"
+            f"Video ID: {video_id}\n"
+            f"Revision notes: {notes}\n\n"
+            f"Categorize the requested changes and create an action plan.\n\n"
+            f"Return JSON: {{"
+            f'"changes": [{{"type": "script"|"avatar"|"voice"|"pacing"|"cta"|"hook"|"other", '
+            f'"description": str, "difficulty": "easy"|"medium"|"hard"}}], '
+            f'"requires_re_render": bool, '
+            f'"estimated_time_minutes": int, '
+            f'"summary": str}}',
+            tier=Tier.HAIKU,
+            max_tokens=200,
+        )
+
+        self.memory.log(
+            f"[UGC] Revision requested by {client_name}\n"
+            f"  Video: {video_id}\n"
+            f"  Notes: {notes[:150]}\n"
+            f"  Plan: {revision_plan.get('summary', 'N/A')}",
+            "UGC",
+        )
+
+        return {
+            "client_key": client_key,
+            "video_id": video_id,
+            "revision_plan": revision_plan,
+            "status": "revision_queued",
+        }
+
+    async def auto_invoice_on_delivery(
+        self, client_key: str, videos_delivered: int, rate_per_video: float,
+    ) -> dict[str, Any]:
+        """Create and send an invoice after video delivery."""
+        if not self.payments_engine:
+            logger.error("Payments engine not configured — cannot invoice")
+            return {"status": "error", "detail": "Payments engine not configured"}
+
+        client_info = self.memory.get_knowledge("projects", client_key)
+        if not client_info:
+            return {"status": "error", "detail": f"Client not found: {client_key}"}
+
+        # Parse client details
+        client_email = ""
+        client_name = ""
+        for line in client_info.splitlines():
+            lower = line.lower()
+            if "email:" in lower:
+                client_email = line.split(":", 1)[1].strip()
+            if line.startswith("# UGC Client:"):
+                client_name = line.replace("# UGC Client:", "").strip()
+
+        if not client_email:
+            return {"status": "error", "detail": f"No email for {client_key}"}
+
+        total_cents = int(videos_delivered * rate_per_video * 100)
+        now = datetime.now(timezone.utc)
+        month_label = now.strftime("%B %Y")
+
+        invoice_result = self.payments_engine.create_invoice(
+            customer_email=client_email,
+            items=[{
+                "description": (
+                    f"UGC Video Production — {videos_delivered} video(s), {month_label}"
+                ),
+                "amount_cents": total_cents,
+            }],
+            due_days=14,
+            memo=f"UGC video production for {client_name} — {month_label}",
+        )
+
+        if invoice_result:
+            self.memory.log(
+                f"[UGC] Invoice sent: {client_name} — {videos_delivered} videos "
+                f"× ${rate_per_video:.2f} = ${videos_delivered * rate_per_video:,.2f}\n"
+                f"  Invoice: {invoice_result.get('invoice_url', 'N/A')}",
+                "Billing",
+            )
+            # Also email the invoice link via email engine if available
+            if self.email_engine and invoice_result.get("invoice_url"):
+                await self.email_engine.send_invoice(
+                    to_email=client_email,
+                    client_name=client_name,
+                    service=f"UGC Video Production — {videos_delivered} videos ({month_label})",
+                    amount=videos_delivered * rate_per_video,
+                    due_date=(now.strftime("%Y-%m-%d")),
+                    payment_link=invoice_result["invoice_url"],
+                )
+
+        return {
+            "status": "invoiced" if invoice_result else "error",
+            "client": client_name,
+            "videos": videos_delivered,
+            "total": videos_delivered * rate_per_video,
+            "invoice": invoice_result,
+        }
+
+    async def monthly_production_cycle(self) -> dict[str, Any]:
+        """Run the full monthly UGC production cycle for all clients.
+
+        For each active client:
+        1. Check how many videos are due this month
+        2. Produce the batch
+        3. Run quality review on each video
+        4. Deliver each video via email
+        5. Invoice the client
+        6. Log everything in memory
+        """
+        clients = self.get_ugc_clients()
+        now = datetime.now(timezone.utc)
+        month_label = now.strftime("%B %Y")
+        cycle_results: list[dict[str, Any]] = []
+
+        self.memory.log(
+            f"[UGC] Monthly production cycle started — {month_label}\n"
+            f"  Active clients: {len(clients)}",
+            "UGC",
+        )
+
+        for client_key in clients:
+            client_info = self.memory.get_knowledge("projects", client_key)
+            if not client_info:
+                continue
+
+            # Parse client details
+            client_name = ""
+            videos_per_month = 0
+            monthly_rate = 0.0
+            product_name = ""
+            product_desc = ""
+            target_audience = ""
+            status = "active"
+            for line in client_info.splitlines():
+                lower = line.lower().strip("- ").strip()
+                if line.startswith("# UGC Client:"):
+                    client_name = line.replace("# UGC Client:", "").strip()
+                elif lower.startswith("videos/month:"):
+                    try:
+                        videos_per_month = int(lower.split(":")[1].strip())
+                    except (ValueError, IndexError):
+                        pass
+                elif "monthly rate:" in lower and "$" in line:
+                    try:
+                        monthly_rate = float(line.split("$")[1].split()[0].replace(",", ""))
+                    except (IndexError, ValueError):
+                        pass
+                elif lower.startswith("product:"):
+                    product_name = lower.split(":", 1)[1].strip()
+                elif lower.startswith("description:"):
+                    product_desc = lower.split(":", 1)[1].strip()
+                elif lower.startswith("audience:") or lower.startswith("target audience:"):
+                    target_audience = lower.split(":", 1)[1].strip()
+                elif lower.startswith("status:"):
+                    status = lower.split(":", 1)[1].strip().lower()
+
+            if status != "active" or videos_per_month <= 0:
+                continue
+
+            rate_per_video = monthly_rate / videos_per_month if videos_per_month else 0
+
+            # Produce the batch
+            logger.info("Producing %d videos for %s", videos_per_month, client_name)
+            produced: list[dict[str, Any]] = []
+            for i in range(videos_per_month):
+                result = await self.produce_video(
+                    product_name=product_name or client_name,
+                    product_description=product_desc or f"Product by {client_name}",
+                    target_audience=target_audience or "General consumer audience",
+                    key_benefits=["High quality", "Professional", "Engaging"],
+                    brand_name=client_name,
+                )
+                produced.append(result)
+                # Jitter between renders
+                await asyncio.sleep(random.uniform(2, 5))
+
+            # Deliver each completed video
+            delivered_count = 0
+            for video_result in produced:
+                if video_result.get("status") != "completed":
+                    continue
+                # Quality gate — only deliver videos that pass
+                quality = video_result.get("quality", {})
+                verdict = quality.get("verdict", "publish")
+                if verdict == "reject":
+                    logger.warning(
+                        "Video rejected by quality gate for %s (score %s)",
+                        client_name, quality.get("score"),
+                    )
+                    continue
+
+                video_url = video_result.get("video_url", "")
+                if video_url:
+                    delivered = await self.deliver_video_to_client(
+                        client_key, video_url, video_result,
+                    )
+                    if delivered:
+                        delivered_count += 1
+
+            # Invoice the client for delivered videos
+            invoice_result: dict[str, Any] = {}
+            if delivered_count > 0:
+                invoice_result = await self.auto_invoice_on_delivery(
+                    client_key, delivered_count, rate_per_video,
+                )
+
+            client_result = {
+                "client": client_name,
+                "videos_due": videos_per_month,
+                "videos_produced": len(produced),
+                "videos_delivered": delivered_count,
+                "invoice": invoice_result,
+            }
+            cycle_results.append(client_result)
+
+            self.memory.log(
+                f"[UGC] Monthly cycle complete for {client_name}\n"
+                f"  Due: {videos_per_month} | Produced: {len(produced)} | "
+                f"Delivered: {delivered_count}\n"
+                f"  Invoice: {'sent' if invoice_result.get('status') == 'invoiced' else 'failed'}",
+                "UGC",
+            )
+
+        summary = {
+            "month": month_label,
+            "clients_processed": len(cycle_results),
+            "total_produced": sum(r["videos_produced"] for r in cycle_results),
+            "total_delivered": sum(r["videos_delivered"] for r in cycle_results),
+            "results": cycle_results,
+        }
+
+        self.memory.log(
+            f"[UGC] Monthly cycle complete — {month_label}\n"
+            f"  Clients: {summary['clients_processed']}\n"
+            f"  Produced: {summary['total_produced']}\n"
+            f"  Delivered: {summary['total_delivered']}",
+            "UGC",
+        )
+
+        return summary

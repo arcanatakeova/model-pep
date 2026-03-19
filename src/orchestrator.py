@@ -71,7 +71,6 @@ class Orchestrator:
         self.heartbeat: Heartbeat | None = None
         self.x: XClient | None = None
         self.content: ContentEngine | None = None
-        self.products: ProductManager | None = None
         self.leads: LeadPipeline | None = None
         self.iris: Iris | None = None
         self.remy: Remy | None = None
@@ -112,7 +111,6 @@ class Orchestrator:
         # Core ops
         self.x = XClient(self.config, self.memory)
         self.content = ContentEngine(self.llm, self.memory)
-        self.products = ProductManager(self.config, self.memory)
         self.leads = LeadPipeline(self.llm, self.memory, self.notifier)
         self.iris = Iris(self.llm, self.memory)
         self.remy = Remy(self.llm, self.memory)
@@ -158,7 +156,7 @@ class Orchestrator:
         )
         self.scheduler = TaskScheduler(self.memory)
         self.analytics = Analytics(self.llm, self.memory)
-        self.revenue = RevenueEngine(self.memory, self.products, self.trader)
+        self.revenue = RevenueEngine(self.memory, self.payments_engine, self.trader)
 
         # Register scheduler handlers
         self._register_scheduler_handlers()
@@ -713,8 +711,6 @@ class Orchestrator:
             await self.notifier.close()
         if self.llm:
             await self.llm.close()
-        if self.products:
-            await self.products.close()
         if self.newsletter:
             await self.newsletter.close()
         if self.ugc:

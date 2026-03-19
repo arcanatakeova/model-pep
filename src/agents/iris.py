@@ -18,7 +18,7 @@ from src.email_engine import EmailEngine
 from src.llm import LLM, Tier
 from src.memory import Memory
 from src.notify import Notifier
-from src.products import ProductManager
+from src.payments import PaymentsEngine
 
 logger = logging.getLogger("arcana.iris")
 
@@ -32,7 +32,7 @@ class Iris:
         memory: Memory,
         email_engine: EmailEngine,
         notifier: Notifier,
-        products: ProductManager | None = None,
+        products: PaymentsEngine | None = None,
     ) -> None:
         self.llm = llm
         self.memory = memory

@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.llm import LLM, Tier
 from src.memory import Memory
+
+if TYPE_CHECKING:
+    from src.fulfillment import FulfillmentEngine
 
 logger = logging.getLogger("arcana.seo")
 
@@ -149,6 +152,149 @@ class SEOEngine:
 
         self.memory.log(
             f"[SEO] Product review: {product_name} ({result.get('rating', 0)}/5)",
+            "SEO",
+        )
+        return result
+
+    # ── Publishing ──────────────────────────────────────────────────
+
+    async def generate_and_publish(
+        self,
+        keyword: str,
+        intent: str = "informational",
+        word_count: int = 1500,
+        site_url: str = "",
+        vercel_token: str = "",
+    ) -> dict[str, Any]:
+        """Generate an SEO article and publish it via the fulfillment engine."""
+        article = await self.generate_article(keyword, intent, word_count)
+
+        if self.fulfillment is None:
+            logger.warning("No fulfillment engine configured — article generated but not published")
+            return {"status": "not_published", "reason": "no_fulfillment_engine", "article": article}
+
+        publish_result = await self.fulfillment.publish_seo_article(
+            article_html=article.get("content_html", ""),
+            title=article.get("title", keyword),
+            slug=article.get("slug", keyword.lower().replace(" ", "-")),
+            site_url=site_url,
+            vercel_token=vercel_token,
+        )
+
+        record = {
+            "keyword": keyword,
+            "title": article.get("title", ""),
+            "slug": article.get("slug", ""),
+            "word_count": article.get("word_count", 0),
+            "published_at": datetime.now(timezone.utc).isoformat(),
+            "publish_status": publish_result.get("status", "unknown"),
+            "url": publish_result.get("url", ""),
+        }
+        self._published.append(record)
+
+        self.memory.log(
+            f"[SEO] Published: {record['title']} → {publish_result.get('status')}",
+            "SEO",
+        )
+        return {"status": "published", "article": article, "publish_result": publish_result}
+
+    async def batch_publish(
+        self,
+        keywords: list[str],
+        intent: str = "informational",
+        site_url: str = "",
+        vercel_token: str = "",
+    ) -> dict[str, Any]:
+        """Generate and publish a batch of SEO articles (weekly content batch)."""
+        results: list[dict[str, Any]] = []
+        succeeded = 0
+        failed = 0
+
+        for kw in keywords:
+            try:
+                result = await self.generate_and_publish(
+                    kw, intent, site_url=site_url, vercel_token=vercel_token,
+                )
+                results.append({"keyword": kw, **result})
+                if result.get("status") == "published":
+                    succeeded += 1
+                else:
+                    failed += 1
+            except Exception as exc:
+                logger.error("Batch publish failed for '%s': %s", kw, exc)
+                results.append({"keyword": kw, "status": "error", "error": str(exc)})
+                failed += 1
+
+        self.memory.log(
+            f"[SEO] Batch publish: {succeeded}/{len(keywords)} succeeded, {failed} failed",
+            "SEO",
+        )
+        return {"total": len(keywords), "succeeded": succeeded, "failed": failed, "results": results}
+
+    def get_published_articles(self) -> list[dict[str, Any]]:
+        """Return the list of articles that have been published this session."""
+        return list(self._published)
+
+    def generate_sitemap(self, base_url: str = "https://arcana.operations") -> str:
+        """Generate a sitemap XML string from all published articles."""
+        urls_xml = []
+        for article in self._published:
+            slug = article.get("slug", "")
+            published_at = article.get("published_at", datetime.now(timezone.utc).isoformat())
+            loc = article.get("url") or f"{base_url.rstrip('/')}/articles/{slug}"
+            urls_xml.append(
+                f"  <url>\n"
+                f"    <loc>{loc}</loc>\n"
+                f"    <lastmod>{published_at[:10]}</lastmod>\n"
+                f"    <changefreq>monthly</changefreq>\n"
+                f"    <priority>0.7</priority>\n"
+                f"  </url>"
+            )
+
+        sitemap = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+            + "\n".join(urls_xml) + "\n"
+            "</urlset>"
+        )
+
+        self.memory.log(
+            f"[SEO] Sitemap generated with {len(self._published)} URLs",
+            "SEO",
+        )
+        return sitemap
+
+    async def research_keywords(self, niche: str) -> dict[str, Any]:
+        """Use LLM to research keyword clusters with search volume estimates for a niche."""
+        result = await self.llm.ask_json(
+            f"You are an expert SEO keyword researcher.\n\n"
+            f"Research the niche: {niche}\n\n"
+            f"Generate 5 keyword clusters (themes), each with 5-8 specific keywords.\n"
+            f"For each keyword, estimate:\n"
+            f"- Monthly search volume (numeric estimate)\n"
+            f"- Keyword difficulty (1-100)\n"
+            f"- CPC estimate (USD)\n"
+            f"- Search intent (informational/commercial/transactional/navigational)\n"
+            f"- Content format recommendation (guide/listicle/comparison/review/tutorial)\n\n"
+            f"Also provide:\n"
+            f"- Top 3 quick-win keywords (low difficulty, decent volume)\n"
+            f"- Top 3 high-value keywords (high CPC or transactional intent)\n"
+            f"- Suggested content calendar (which to publish first)\n\n"
+            f"Return JSON: {{"
+            f'"niche": str, '
+            f'"clusters": [{{"theme": str, "keywords": [{{'
+            f'"keyword": str, "volume": int, "difficulty": int, '
+            f'"cpc": float, "intent": str, "format": str}}]}}], '
+            f'"quick_wins": [str], '
+            f'"high_value": [str], '
+            f'"content_calendar": [{{"week": int, "keywords": [str], "rationale": str}}]}}',
+            tier=Tier.SONNET,
+        )
+
+        total_keywords = sum(len(c.get("keywords", [])) for c in result.get("clusters", []))
+        self.memory.log(
+            f"[SEO] Keyword research for '{niche}': "
+            f"{len(result.get('clusters', []))} clusters, {total_keywords} keywords",
             "SEO",
         )
         return result

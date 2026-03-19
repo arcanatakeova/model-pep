@@ -54,6 +54,7 @@ class EmailEngine:
 
     # ── Transactional Email (SendGrid) ──────────────────────────────
 
+    @retry()
     async def send(
         self, to_email: str, subject: str, html_body: str,
         text_body: str = "", reply_to: str = "",
@@ -77,25 +78,22 @@ class EmailEngine:
         if reply_to:
             payload["reply_to"] = {"email": reply_to}
 
-        try:
-            client = await self._get_client()
-            resp = await client.post(
-                "https://api.sendgrid.com/v3/mail/send",
-                headers={
-                    "Authorization": f"Bearer {self.sendgrid_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-            success = resp.status_code in (200, 201, 202)
-            if success:
-                self.memory.log(f"[Email] Sent to {to_email}: {subject}", "Email")
-            else:
-                logger.error("SendGrid failed: %s %s", resp.status_code, resp.text[:200])
-            return success
-        except Exception as exc:
-            logger.error("Email send error: %s", exc)
-            return False
+        client = await self._get_client()
+        resp = await client.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={
+                "Authorization": f"Bearer {self.sendgrid_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        resp.raise_for_status()
+        success = resp.status_code in (200, 201, 202)
+        if success:
+            self.memory.log(f"[Email] Sent to {to_email}: {subject}", "Email")
+        else:
+            logger.error("SendGrid failed: %s %s", resp.status_code, resp.text[:200])
+        return success
 
     async def send_product_delivery(
         self, to_email: str, product_name: str, download_url: str,
@@ -179,6 +177,7 @@ class EmailEngine:
 
     # ── Cold Outreach (Instantly API) ───────────────────────────────
 
+    @retry()
     async def create_campaign(
         self, name: str, subject: str, body: str,
         follow_ups: list[dict[str, Any]] | None = None,
@@ -188,39 +187,38 @@ class EmailEngine:
             logger.warning("Instantly not configured")
             return None
 
-        try:
-            client = await self._get_client()
-            payload = {
-                "api_key": self.instantly_key,
-                "campaign_name": name,
-                "sequences": [
-                    {"steps": [{"type": "email", "subject": subject, "body": body, "delay": 0}]}
-                ],
-            }
+        client = await self._get_client()
+        payload = {
+            "api_key": self.instantly_key,
+            "campaign_name": name,
+            "sequences": [
+                {"steps": [{"type": "email", "subject": subject, "body": body, "delay": 0}]}
+            ],
+        }
 
-            # Add follow-ups
-            if follow_ups:
-                for i, fu in enumerate(follow_ups):
-                    payload["sequences"][0]["steps"].append({
-                        "type": "email",
-                        "subject": fu.get("subject", f"Re: {subject}"),
-                        "body": fu["body"],
-                        "delay": fu.get("delay_days", (i + 1) * 3),
-                    })
+        # Add follow-ups
+        if follow_ups:
+            for i, fu in enumerate(follow_ups):
+                payload["sequences"][0]["steps"].append({
+                    "type": "email",
+                    "subject": fu.get("subject", f"Re: {subject}"),
+                    "body": fu["body"],
+                    "delay": fu.get("delay_days", (i + 1) * 3),
+                })
 
-            resp = await client.post(
-                "https://api.instantly.ai/api/v1/campaign/create",
-                json=payload,
-            )
-            if resp.status_code in (200, 201):
-                data = resp.json()
-                self.memory.log(f"[Outreach] Campaign created: {name}", "Outreach")
-                return data
-            logger.error("Instantly create failed: %s", resp.text[:200])
-        except Exception as exc:
-            logger.error("Instantly error: %s", exc)
+        resp = await client.post(
+            "https://api.instantly.ai/api/v1/campaign/create",
+            json=payload,
+        )
+        resp.raise_for_status()
+        if resp.status_code in (200, 201):
+            data = resp.json()
+            self.memory.log(f"[Outreach] Campaign created: {name}", "Outreach")
+            return data
+        logger.error("Instantly create failed: %s", resp.text[:200])
         return None
 
+    @retry()
     async def add_leads_to_campaign(
         self, campaign_id: str, leads: list[dict[str, str]],
     ) -> bool:
@@ -228,25 +226,22 @@ class EmailEngine:
         if not self.instantly_key:
             return False
 
-        try:
-            client = await self._get_client()
-            resp = await client.post(
-                "https://api.instantly.ai/api/v1/lead/add",
-                json={
-                    "api_key": self.instantly_key,
-                    "campaign_id": campaign_id,
-                    "leads": leads,
-                },
+        client = await self._get_client()
+        resp = await client.post(
+            "https://api.instantly.ai/api/v1/lead/add",
+            json={
+                "api_key": self.instantly_key,
+                "campaign_id": campaign_id,
+                "leads": leads,
+            },
+        )
+        resp.raise_for_status()
+        success = resp.status_code in (200, 201)
+        if success:
+            self.memory.log(
+                f"[Outreach] Added {len(leads)} leads to campaign {campaign_id}", "Outreach"
             )
-            success = resp.status_code in (200, 201)
-            if success:
-                self.memory.log(
-                    f"[Outreach] Added {len(leads)} leads to campaign {campaign_id}", "Outreach"
-                )
-            return success
-        except Exception as exc:
-            logger.error("Instantly add leads error: %s", exc)
-            return False
+        return success
 
     async def get_campaign_stats(self, campaign_id: str) -> dict[str, Any]:
         """Get campaign performance stats from Instantly."""
