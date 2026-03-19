@@ -150,7 +150,6 @@ class UGCEngine:
             f"- Authentic > polished for UGC\n\n"
             f"Return JSON: {{\"avatar_id\": str, \"reason\": str}}",
             tier=Tier.HAIKU,
-            max_tokens=100,
         )
 
         avatar_id = result.get("avatar_id")
@@ -426,7 +425,6 @@ class UGCEngine:
             f'"improvements": [str], '
             f'"verdict": "publish"|"revise"|"reject"}}',
             tier=Tier.HAIKU,
-            max_tokens=200,
         )
         return result
 
@@ -552,7 +550,6 @@ class UGCEngine:
             f"- Keep ARCANA's voice: confident, pattern-focused, no hype\n\n"
             f"Return JSON: {{\"script\": str, \"hook\": str, \"estimated_seconds\": int}}",
             tier=Tier.HAIKU,
-            max_tokens=200,
         )
         return script_result
 
@@ -705,7 +702,6 @@ class UGCEngine:
             f'"estimated_time_minutes": int, '
             f'"summary": str}}',
             tier=Tier.HAIKU,
-            max_tokens=200,
         )
 
         self.memory.log(

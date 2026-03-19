@@ -152,7 +152,7 @@ class LLM:
         """Single-turn completion with SOUL.md as system prompt + response cache."""
         # Check cache for identical prompts (saves API cost)
         from src.toolkit import fast_hash
-        cache_key = fast_hash(f"{tier.value}:{prompt}")
+        cache_key = fast_hash(f"{tier.value}:{system or ''}:{prompt}")
         cached = self._response_cache.get(cache_key)
         if cached and temperature <= 0.3:  # Only cache deterministic calls
             logger.debug("LLM cache hit for %s", cache_key[:8])

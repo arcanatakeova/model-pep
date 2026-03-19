@@ -480,7 +480,7 @@ class ArcanaBot(discord.Client):
         @self.tree.command(name="stop", description="Activate kill switch (STOP file)")
         async def cmd_stop(interaction: discord.Interaction) -> None:
             # Only operators can activate the kill switch
-            if OPERATOR_IDS and interaction.user.id not in OPERATOR_IDS:
+            if not OPERATOR_IDS or interaction.user.id not in OPERATOR_IDS:
                 await interaction.response.send_message(
                     "Only operators (Ian/Tan) can activate the kill switch.", ephemeral=True,
                 )
@@ -516,7 +516,7 @@ class ArcanaBot(discord.Client):
         @self.tree.command(name="approve", description="Approve a proposed action")
         @app_commands.describe(task="Description of the task/action to approve")
         async def cmd_approve(interaction: discord.Interaction, task: str) -> None:
-            if OPERATOR_IDS and interaction.user.id not in OPERATOR_IDS:
+            if not OPERATOR_IDS or interaction.user.id not in OPERATOR_IDS:
                 await interaction.response.send_message(
                     "Only operators can approve actions.", ephemeral=True,
                 )

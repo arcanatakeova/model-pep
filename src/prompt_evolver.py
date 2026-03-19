@@ -59,6 +59,7 @@ class PromptVariant:
             "impressions": self.impressions,
             "conversions": self.conversions,
             "conversion_rate": self.conversion_rate,
+            "quality_scores": self.quality_scores[-50:],
             "avg_quality": self.avg_quality,
             "status": self.status,
             "created": self.created,

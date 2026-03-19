@@ -620,6 +620,9 @@ class ClientPortal:
             if contract_end:
                 try:
                     end_date = datetime.fromisoformat(contract_end)
+                    # Ensure both datetimes are timezone-aware for comparison
+                    if end_date.tzinfo is None:
+                        end_date = end_date.replace(tzinfo=timezone.utc)
                     days_left = (end_date - now).days
                     if 25 <= days_left <= 35:
                         await self.generate_renewal_proposal(client_key)

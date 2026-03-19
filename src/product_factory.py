@@ -643,7 +643,9 @@ class ProductFactory:
                     if "price:" in line.lower():
                         price = line.split(":", 1)[1].strip()
                     if "url:" in line.lower() or "link:" in line.lower():
-                        url = line.split(":", 1)[1].strip()
+                        # Use split on ": " to preserve URLs containing colons
+                        idx = line.find(": ")
+                        url = line[idx + 2:].strip() if idx >= 0 else line.split(":", 1)[1].strip()
                 products.append({
                     "Name": name,
                     "Price": price,
@@ -712,7 +714,7 @@ class ProductFactory:
         listing: dict[str, Any] = {"name": name, "price": price_cents / 100}
         description = copy.get("description_html", "")
 
-        if platform == "gumroad":
+        if platform in ("gumroad", "both"):
             gumroad = await self.payments.create_gumroad_product(
                 name=name, description=description, price_cents=price_cents,
             )

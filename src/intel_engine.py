@@ -61,6 +61,7 @@ class IntelEngine:
         memory: Memory | None = None,
     ) -> None:
         self.config = config or get_config()
+        self._owns_llm = llm is None
         self.llm = llm or LLM(self.config)
         self.memory = memory or Memory()
         self._competitors: dict[str, Competitor] = {}
@@ -717,5 +718,6 @@ class IntelEngine:
         return briefing
 
     async def close(self) -> None:
-        """Clean up resources."""
-        await self.llm.close()
+        """Clean up resources (only closes LLM if we own it)."""
+        if hasattr(self, "_owns_llm") and self._owns_llm:
+            await self.llm.close()

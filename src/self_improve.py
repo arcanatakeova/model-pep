@@ -91,7 +91,9 @@ class SelfImprover:
         )
 
         task_name = spec.get("task_name", "auto_task")
-        skill_name = spec.get("skill_name", task_name)
+        # Sanitize skill_name to prevent path traversal from LLM output
+        raw_skill_name = spec.get("skill_name", task_name)
+        skill_name = raw_skill_name.replace("/", "-").replace("\\", "-").replace("..", "").strip(".-")
         skill_logic = spec.get("skill_logic", "")
         description = spec.get("description", bottleneck[:60])
         expected_impact = spec.get("expected_impact", "Unknown")

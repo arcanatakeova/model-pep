@@ -110,7 +110,8 @@ class WebhookServer:
         token = request.query.get("token", "") or request.headers.get(
             "X-Webhook-Token", ""
         )
-        return token == self._webhook_auth_token
+        import hmac as _hmac
+        return _hmac.compare_digest(token, self._webhook_auth_token)
 
     # ── Stripe Webhook ───────────────────────────────────────────────
 
@@ -185,7 +186,9 @@ class WebhookServer:
 
         # Normalize price to dollars
         try:
-            price_dollars = float(price) / 100 if isinstance(price, (int, float)) and float(price) > 100 else float(price)
+            price_val = float(price)
+            # Gumroad sends prices in cents; convert to dollars
+            price_dollars = price_val / 100 if price_val >= 100 else price_val
         except (TypeError, ValueError):
             price_dollars = 0.0
 

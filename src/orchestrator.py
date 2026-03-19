@@ -167,7 +167,7 @@ class Orchestrator:
         self.leads = LeadPipeline(self.llm, self.memory, self.notifier)
         self.iris = Iris(self.llm, self.memory)
         self.remy = Remy(self.llm, self.memory)
-        self.improver = SelfImprover(self.llm, self.memory)
+        self.improver = SelfImprover(self.llm, self.memory)  # scheduler wired after creation
 
         # Revenue channels
         self.trader = TraderBridge(self.llm, self.memory)
@@ -210,6 +210,7 @@ class Orchestrator:
             self.config.buffer_api_key, self.config.linkedin_token,
         )
         self.scheduler = TaskScheduler(self.memory)
+        self.improver.scheduler = self.scheduler  # Wire scheduler so automations get registered
         self.analytics = Analytics(self.llm, self.memory, db=self.db)
         self.revenue = RevenueEngine(self.memory, self.payments_engine, self.trader)
 
@@ -547,7 +548,7 @@ class Orchestrator:
 
             if reply:
                 mention_id = next(
-                    (m["id"] for m in mentions if m.get("author_id") == lead["handle"]),
+                    (m["id"] for m in mentions if m.get("author_handle") == lead["handle"] or m.get("author_id") == lead.get("author_id")),
                     None,
                 )
                 if mention_id:
@@ -557,7 +558,7 @@ class Orchestrator:
         replied_ids: set[str] = set()
         for lead in lead_results.get("qualified", []):
             mid = next(
-                (m["id"] for m in mentions if m.get("author_id") == lead["handle"]),
+                (m["id"] for m in mentions if m.get("author_handle") == lead["handle"] or m.get("author_id") == lead.get("author_id")),
                 None,
             )
             if mid:

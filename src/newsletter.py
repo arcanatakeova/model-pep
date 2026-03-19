@@ -224,8 +224,11 @@ class Newsletter:
 
         # Assemble HTML
         html_parts = []
+        import html as _html
         for section in result.get("sections", []):
-            html_parts.append(f"<h2>{section['title']}</h2>\n{section['content_html']}")
+            title = _html.escape(section.get('title', ''))
+            content_html = section.get('content_html', '')
+            html_parts.append(f"<h2>{title}</h2>\n{content_html}")
 
         if result.get("cta_text"):
             html_parts.append(

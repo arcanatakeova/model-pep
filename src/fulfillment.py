@@ -265,6 +265,7 @@ class FulfillmentEngine:
 
         try:
             http = await self._get_http()
+            any_success = False
             for profile_id in profile_ids:
                 resp = await http.post(
                     "https://api.bufferapp.com/1/updates/create.json",
@@ -275,11 +276,11 @@ class FulfillmentEngine:
                     },
                 )
                 if resp.status_code in (200, 201):
-                    return True
+                    any_success = True
                 else:
                     logger.warning("Buffer post failed for profile %s: %s",
                                    profile_id, resp.status_code)
-            return False
+            return any_success
         except Exception as exc:
             logger.error("Buffer schedule error: %s", exc)
             return False

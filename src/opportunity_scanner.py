@@ -1531,7 +1531,7 @@ class OpportunityScanner:
             f"{self.metrics['escalated_to_humans']} escalated, "
             f"{self.metrics['proposals_sent']} proposals\n"
             f"Active sources: {active_sources}/12 | Query library: {total_queries} queries\n"
-            f"Sources: X({self.metrics['by_source'].get('x_ugc', 0) + self.metrics['by_source'].get('x_chatbot', 0) + self.metrics['by_source'].get('x_social', 0) + self.metrics['by_source'].get('x_pain', 0)}) "
+            f"Sources: X({sum(v for k, v in self.metrics['by_source'].items() if k.startswith('x_'))}) "
             f"Reddit({self.metrics['by_source'].get('reddit', 0)}) "
             f"Freelance({self.metrics['by_source'].get('freelance', 0)}) "
             f"HN({self.metrics['by_source'].get('hn', 0)}) "

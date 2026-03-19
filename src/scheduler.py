@@ -175,7 +175,11 @@ class TaskScheduler:
 
         import json as _json
         # save_tacit wraps content with "# schedule\n\n...", strip header
-        json_start = data.find("[")
+        # Look for JSON array or object start
+        json_start_arr = data.find("[")
+        json_start_obj = data.find("{")
+        candidates = [i for i in (json_start_arr, json_start_obj) if i >= 0]
+        json_start = min(candidates) if candidates else -1
         json_data = data[json_start:] if json_start >= 0 else data
         try:
             task_list = _json.loads(json_data)

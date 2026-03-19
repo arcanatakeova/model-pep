@@ -106,7 +106,9 @@ def retry(
                     raise
 
             # All retries exhausted
-            raise last_exc  # type: ignore[misc]
+            if last_exc is not None:
+                raise last_exc
+            raise RuntimeError(f"retry exhausted for {fn.__qualname__} with no recorded exception")
 
         return wrapper  # type: ignore[return-value]
 

@@ -162,8 +162,11 @@ class LeadPipeline:
         return self.memory.list_knowledge("projects")
 
     def get_lead_details(self, handle: str) -> str:
-        """Get details for a specific lead."""
-        return self.memory.get_knowledge("projects", f"lead-{handle}")
+        """Get details for a specific lead (checks both projects and resources)."""
+        result = self.memory.get_knowledge("projects", f"lead-{handle}")
+        if not result:
+            result = self.memory.get_knowledge("resources", f"lead-{handle}")
+        return result
 
     async def auto_nurture_lead(
         self, handle: str, context: str, qualification: dict[str, Any],
