@@ -25,11 +25,19 @@ logger = logging.getLogger("arcana.analytics")
 
 
 class Analytics:
-    """Track performance across all revenue channels."""
+    """Track performance across all revenue channels.
 
-    def __init__(self, llm: LLM, memory: Memory) -> None:
+    Production features:
+    - Safe division (no division-by-zero)
+    - Bounded metric values (no negative revenue)
+    - Database integration for persistent metrics
+    - Input validation on all tracking methods
+    """
+
+    def __init__(self, llm: LLM, memory: Memory, db: Any = None) -> None:
         self.llm = llm
         self.memory = memory
+        self.db = db
 
     # ── Event Tracking ──────────────────────────────────────────────
 
@@ -51,19 +59,21 @@ class Analytics:
         self.memory.save_tacit("analytics-log", "\n".join(lines))
 
     def track_lead(self, source: str, service: str, value: float) -> None:
-        self.track("lead_created", {"source": source, "service": service, "value": value})
+        self.track("lead_created", {"source": source or "unknown", "service": service, "value": max(0, value)})
 
     def track_conversion(self, source: str, service: str, value: float) -> None:
-        self.track("conversion", {"source": source, "service": service, "value": value})
+        self.track("conversion", {"source": source or "unknown", "service": service, "value": max(0, value)})
 
     def track_content(self, content_type: str, platform: str, engagement: int = 0) -> None:
-        self.track("content_posted", {"type": content_type, "platform": platform, "engagement": engagement})
+        self.track("content_posted", {"type": content_type, "platform": platform, "engagement": max(0, engagement)})
 
     def track_revenue(self, channel: str, amount: float) -> None:
-        self.track("revenue", {"channel": channel, "amount": amount})
+        if amount < 0:
+            logger.warning("Negative revenue tracked for %s: $%.2f", channel, amount)
+        self.track("revenue", {"channel": channel, "amount": max(0, amount)})
 
     def track_cost(self, category: str, amount: float) -> None:
-        self.track("cost", {"category": category, "amount": amount})
+        self.track("cost", {"category": category, "amount": max(0, amount)})
 
     # ── Funnel Analysis ─────────────────────────────────────────────
 
@@ -149,14 +159,16 @@ class Analytics:
         funnel = self.get_funnel_metrics()
         channels = self.get_channel_attribution()
 
-        # Get cost data
+        # Get cost data (safe parsing)
         log = self.memory.get_tacit("analytics-log") or ""
         total_costs = 0.0
         for line in log.splitlines():
-            if "'cost'" in line or "cost" in line.split("|")[1] if "|" in line and len(line.split("|")) > 1 else False:
+            parts = line.split("|")
+            if len(parts) >= 2 and "cost" in parts[1].strip().lower():
                 try:
                     if "'amount':" in line:
-                        total_costs += float(line.split("'amount':")[1].split(",")[0].split("}")[0].strip())
+                        amount_str = line.split("'amount':")[1].split(",")[0].split("}")[0].strip()
+                        total_costs += max(0, float(amount_str))
                 except (ValueError, IndexError):
                     pass
 

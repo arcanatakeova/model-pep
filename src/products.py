@@ -28,7 +28,7 @@ class ProductManager:
         self._client = httpx.AsyncClient(timeout=30.0)
 
     async def check_stripe_revenue(self) -> dict[str, Any]:
-        """Check recent Stripe charges and calculate revenue."""
+        """Check recent Stripe charges and calculate revenue (safe parsing)."""
         if not self.config.stripe_secret_key:
             return {"revenue": 0, "charges": 0, "status": "no_key"}
 
@@ -39,9 +39,12 @@ class ProductManager:
                 headers={"Authorization": f"Bearer {self.config.stripe_secret_key}"},
             )
             resp.raise_for_status()
-            charges = resp.json().get("data", [])
+            data = resp.json()
+            charges = data.get("data", [])
+            if not isinstance(charges, list):
+                return {"revenue": 0, "charges": 0, "error": "unexpected_response"}
             paid = [c for c in charges if c.get("paid") and not c.get("refunded")]
-            revenue = sum(c.get("amount", 0) / 100 for c in paid)
+            revenue = sum(max(0, c.get("amount", 0)) / 100 for c in paid)
 
             return {
                 "revenue": revenue,
@@ -60,7 +63,7 @@ class ProductManager:
             return {"revenue": 0, "charges": 0, "error": str(exc)}
 
     async def check_gumroad_revenue(self) -> dict[str, Any]:
-        """Check Gumroad sales."""
+        """Check Gumroad sales (safe price parsing)."""
         if not self.config.gumroad_access_token:
             return {"revenue": 0, "sales": 0, "status": "no_key"}
 
@@ -70,8 +73,17 @@ class ProductManager:
                 params={"access_token": self.config.gumroad_access_token},
             )
             resp.raise_for_status()
-            sales = resp.json().get("sales", [])
-            revenue = sum(float(s.get("price", 0)) / 100 for s in sales)
+            data = resp.json()
+            sales = data.get("sales", [])
+            if not isinstance(sales, list):
+                return {"revenue": 0, "sales": 0, "error": "unexpected_response"}
+            revenue = 0.0
+            for s in sales:
+                try:
+                    price = float(s.get("price", 0))
+                    revenue += max(0, price) / 100
+                except (ValueError, TypeError):
+                    pass
 
             return {"revenue": revenue, "sales": len(sales)}
         except Exception as exc:
@@ -102,9 +114,15 @@ class ProductManager:
     async def create_gumroad_product(
         self, name: str, price_cents: int, description: str
     ) -> dict[str, Any]:
-        """Create a new product on Gumroad."""
+        """Create a new product on Gumroad (with validation)."""
         if not self.config.gumroad_access_token:
             return {"error": "No Gumroad token"}
+        if not name or not name.strip():
+            return {"error": "Product name is required"}
+        if price_cents < 0:
+            return {"error": f"Price must be non-negative, got {price_cents}"}
+        if price_cents > 100_000_00:  # $100K max
+            return {"error": "Price exceeds maximum"}
 
         try:
             resp = await self._client.post(

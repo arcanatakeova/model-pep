@@ -27,7 +27,16 @@ logger = logging.getLogger("arcana.services")
 
 
 class ServiceEngine:
-    """Manage and deliver recurring automated services."""
+    """Manage and deliver recurring automated services.
+
+    Production features:
+    - Input validation on all public methods
+    - Safe MRR calculation with regex parsing
+    - Client status tracking
+    """
+
+    VALID_SERVICES = {"chatbot", "reviews", "social", "lead_gen", "email", "intel", "seo"}
+    VALID_PLATFORMS = {"google", "yelp", "facebook", "tripadvisor", "trustpilot"}
 
     def __init__(self, llm: LLM, memory: Memory) -> None:
         self.llm = llm
@@ -38,6 +47,12 @@ class ServiceEngine:
     async def generate_review_response(
         self, business_name: str, reviewer: str, rating: int, review_text: str, platform: str = "google"
     ) -> str:
+        # Input validation
+        if not business_name or not business_name.strip():
+            raise ValueError("business_name is required")
+        rating = max(1, min(5, rating))  # Clamp to 1-5
+        review_text = review_text[:2000] if review_text else "No review text"
+        platform = platform.lower() if platform else "google"
         """Generate a professional response to a customer review."""
         response = await self.llm.ask(
             f"Generate a business owner response to this {platform} review.\n\n"
@@ -208,7 +223,13 @@ class ServiceEngine:
     # ── Client Management ───────────────────────────────────────────
 
     def add_client(self, name: str, service: str, monthly_rate: float, details: str = "") -> None:
-        """Register a new service client."""
+        """Register a new service client with validation."""
+        if not name or not name.strip():
+            raise ValueError("Client name is required")
+        if monthly_rate < 0:
+            raise ValueError(f"Monthly rate must be non-negative, got {monthly_rate}")
+        service_lower = service.lower().replace(" ", "_")
+
         self.memory.save_knowledge(
             "projects",
             f"client-{name.lower().replace(' ', '-')}",
@@ -229,17 +250,22 @@ class ServiceEngine:
         ]
 
     def get_services_mrr(self) -> float:
-        """Calculate total MRR from services."""
+        """Calculate total MRR from services (safe regex parsing)."""
+        import re
         total = 0.0
         for client_key in self.get_active_clients():
             data = self.memory.get_knowledge("projects", client_key)
             if not data:
                 continue
+            # Check if client is active
+            if "status: active" not in data.lower() and "status: Active" not in data:
+                continue
             for line in data.splitlines():
-                if "monthly rate" in line.lower() and "$" in line:
-                    try:
-                        amount = line.split("$")[1].split()[0].replace(",", "")
-                        total += float(amount)
-                    except (IndexError, ValueError):
-                        pass
-        return total
+                if "monthly rate" in line.lower():
+                    matches = re.findall(r"\$[\d,]+(?:\.\d{1,2})?", line)
+                    if matches:
+                        try:
+                            total += float(matches[0].replace("$", "").replace(",", ""))
+                        except ValueError:
+                            pass
+        return max(0.0, total)

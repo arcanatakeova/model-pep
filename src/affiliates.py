@@ -108,12 +108,22 @@ class AffiliateManager:
         self.memory.save_knowledge("areas", "affiliate-codes", "\n".join(lines))
 
     def get_link(self, program: str) -> str | None:
-        """Get full affiliate link for a program."""
+        """Get full affiliate link for a program (validated)."""
         prog = program.lower()
         if prog not in AFFILIATE_PROGRAMS or prog not in self._codes:
             return None
+        code = self._codes[prog]
+        # Validate code doesn't contain injection characters
+        if not code or any(c in code for c in [" ", "<", ">", '"', "'"]):
+            logger.warning("Invalid affiliate code for %s: %s", prog, code[:20])
+            return None
         template = AFFILIATE_PROGRAMS[prog]["link_template"]
-        return template.format(code=self._codes[prog])
+        link = template.format(code=code)
+        # Validate resulting URL
+        if not link.startswith("https://"):
+            logger.warning("Non-HTTPS affiliate link generated: %s", link[:50])
+            return None
+        return link
 
     async def find_relevant_affiliate(self, content: str) -> dict[str, Any] | None:
         """Given tweet content, find the best affiliate link to add in reply."""
@@ -161,14 +171,16 @@ class AffiliateManager:
         self.memory.log(f"Affiliate click: {program}", "Affiliate")
 
     def get_revenue_estimate(self) -> float:
-        """Estimate monthly affiliate revenue from memory logs."""
+        """Estimate monthly affiliate revenue from memory logs (safe parsing)."""
+        import re
         data = self.memory.get_knowledge("areas", "revenue-affiliate")
         if not data:
             return 0.0
-        for line in reversed(data.splitlines()):
-            if "$" in line:
-                try:
-                    return float(line.split("$")[1].split()[0].replace(",", ""))
-                except (IndexError, ValueError):
-                    pass
+        # Find all dollar amounts, take the last one
+        matches = re.findall(r"\$[\d,]+(?:\.\d{1,2})?", data)
+        if matches:
+            try:
+                return max(0.0, float(matches[-1].replace("$", "").replace(",", "")))
+            except ValueError:
+                pass
         return 0.0
