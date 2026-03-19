@@ -701,6 +701,16 @@ class OpportunityScanner:
         except Exception as exc:
             logger.debug("X hunt [%s] failed: %s", category, exc)
 
+        # Track query performance in the database
+        if self.db:
+            self.db.track_query_use(
+                query_text=query,
+                platform="x",
+                category=category,
+                found=found,
+                responded=responded,
+            )
+
         return {"found": found, "responded": responded, "escalated": escalated}
 
     async def _hunt_pain_signals(self) -> dict[str, Any]:

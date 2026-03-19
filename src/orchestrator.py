@@ -97,6 +97,7 @@ class Orchestrator:
         self.scheduler: TaskScheduler | None = None
         self.analytics: Analytics | None = None
         self.db: Database | None = None
+        self.webhook_server: WebhookServer | None = None
         # State
         self._running = True
         self._last_mention_id: str | None = None
