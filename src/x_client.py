@@ -45,6 +45,7 @@ class XClient:
             )
         return self._client
 
+    @retry()
     async def post_tweet(self, text: str, reply_to: str | None = None) -> dict[str, Any]:
         """Post a tweet. Returns {"id": str, "text": str} or {"error": str}."""
         if self.config.dry_run:
@@ -52,16 +53,12 @@ class XClient:
             self.memory.log(f"[DRY RUN] Tweet: {text[:200]}", "X Post")
             return {"id": "dry_run", "text": text}
 
-        try:
-            client = self._get_client()
-            resp = client.create_tweet(text=text, in_reply_to_tweet_id=reply_to)
-            tweet_id = str(resp.data["id"])
-            logger.info("Posted tweet %s: %s", tweet_id, text[:60])
-            self.memory.log(f"Posted tweet {tweet_id}: {text[:200]}", "X Post")
-            return {"id": tweet_id, "text": text}
-        except Exception as exc:
-            logger.error("Tweet failed: %s", exc)
-            return {"error": str(exc)}
+        client = self._get_client()
+        resp = client.create_tweet(text=text, in_reply_to_tweet_id=reply_to)
+        tweet_id = str(resp.data["id"])
+        logger.info("Posted tweet %s: %s", tweet_id, text[:60])
+        self.memory.log(f"Posted tweet {tweet_id}: {text[:200]}", "X Post")
+        return {"id": tweet_id, "text": text}
 
     async def post_with_self_reply(self, text: str, follow_up: str | None = None) -> dict[str, Any]:
         """Post a tweet and self-reply for 150x algorithm boost."""
@@ -126,18 +123,16 @@ class XClient:
             logger.error("Get mentions failed: %s", exc)
             return []
 
+    @retry()
     async def reply_to(self, tweet_id: str, text: str) -> dict[str, Any]:
         """Reply to a specific tweet."""
         return await self.post_tweet(text, reply_to=tweet_id)
 
+    @retry()
     async def search_recent(self, query: str, max_results: int = 10) -> list[dict[str, Any]]:
         """Search recent tweets."""
-        try:
-            client = self._get_client()
-            results = client.search_recent_tweets(query=query, max_results=max_results)
-            if not results or not results.data:
-                return []
-            return [{"id": str(t.id), "text": t.text} for t in results.data]
-        except Exception as exc:
-            logger.error("Search failed: %s", exc)
+        client = self._get_client()
+        results = client.search_recent_tweets(query=query, max_results=max_results)
+        if not results or not results.data:
             return []
+        return [{"id": str(t.id), "text": t.text} for t in results.data]

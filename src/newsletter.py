@@ -8,7 +8,6 @@ Revenue: $200-2K per sponsor placement. At 10K subs, $2-5K/placement.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -17,6 +16,7 @@ import httpx
 
 from src.llm import LLM, Tier
 from src.memory import Memory
+from src.retry import retry
 
 logger = logging.getLogger("arcana.newsletter")
 
@@ -45,94 +45,55 @@ class Newsletter:
             await self._client.aclose()
             self._client = None
 
-    async def _request_with_retry(
-        self,
-        method: str,
-        url: str,
-        *,
-        retries: int = 3,
-        **kwargs: Any,
-    ) -> httpx.Response:
-        """Make an HTTP request with exponential backoff retry.
-
-        Retries on 5xx errors, 429 rate limits, and connection errors.
-        """
-        client = await self._get_client()
-        last_exc: Exception | None = None
-        for attempt in range(retries):
-            try:
-                resp = getattr(client, method)(url, **kwargs)
-                resp = await resp
-                if resp.status_code < 500 and resp.status_code != 429:
-                    return resp
-                logger.warning(
-                    "Beehiiv %s %s returned %s (attempt %d/%d)",
-                    method.upper(), url, resp.status_code, attempt + 1, retries,
-                )
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
-                logger.warning(
-                    "Beehiiv %s %s network error: %s (attempt %d/%d)",
-                    method.upper(), url, exc, attempt + 1, retries,
-                )
-                last_exc = exc
-            if attempt < retries - 1:
-                backoff = 2 ** attempt  # 1s, 2s
-                await asyncio.sleep(backoff)
-        # If we exhausted retries due to HTTP errors, return last response
-        if "resp" in locals():
-            return resp  # type: ignore[possibly-undefined]
-        raise last_exc  # type: ignore[misc]
-
+    @retry()
     async def get_stats(self) -> dict[str, Any]:
         """Get newsletter subscriber stats."""
         if not self.api_key or not self.publication_id:
             return {"subscribers": 0, "active": False}
-        try:
-            resp = await self._request_with_retry(
-                "get",
-                f"{self.base_url}/publications/{self.publication_id}",
-            )
-            if resp.status_code == 200:
-                data = resp.json().get("data", {})
-                stats = data.get("stats", {})
-                return {
-                    "subscribers": stats.get("active_subscriptions", 0),
-                    "total": stats.get("total_subscriptions", 0),
-                    "open_rate": stats.get("average_open_rate", 0),
-                    "click_rate": stats.get("average_click_rate", 0),
-                    "active": True,
-                }
-        except Exception as exc:
-            logger.error("Beehiiv stats error: %s", exc)
+        client = await self._get_client()
+        resp = await client.get(
+            f"{self.base_url}/publications/{self.publication_id}",
+        )
+        resp.raise_for_status()
+        if resp.status_code == 200:
+            data = resp.json().get("data", {})
+            stats = data.get("stats", {})
+            return {
+                "subscribers": stats.get("active_subscriptions", 0),
+                "total": stats.get("total_subscriptions", 0),
+                "open_rate": stats.get("average_open_rate", 0),
+                "click_rate": stats.get("average_click_rate", 0),
+                "active": True,
+            }
         return {"subscribers": 0, "active": False}
 
+    @retry()
     async def create_post(self, subject: str, content_html: str, status: str = "draft") -> dict[str, Any] | None:
         """Create a newsletter post."""
         if not self.api_key or not self.publication_id:
             logger.warning("Beehiiv not configured, skipping post creation")
             return None
-        try:
-            resp = await self._request_with_retry(
-                "post",
-                f"{self.base_url}/publications/{self.publication_id}/posts",
-                json={
-                    "post": {
-                        "title": subject,
-                        "subtitle": "",
-                        "status": status,  # draft, confirmed, archived
-                        "content_html": content_html,
-                    }
-                },
-            )
-            if resp.status_code in (200, 201):
-                post = resp.json().get("data", {})
-                self.memory.log(f"Newsletter post created: {subject} ({status})", "Newsletter")
-                return post
-            logger.error("Beehiiv create post failed: %s %s", resp.status_code, resp.text[:200])
-        except Exception as exc:
-            logger.error("Beehiiv create post error: %s", exc)
+        client = await self._get_client()
+        resp = await client.post(
+            f"{self.base_url}/publications/{self.publication_id}/posts",
+            json={
+                "post": {
+                    "title": subject,
+                    "subtitle": "",
+                    "status": status,  # draft, confirmed, archived
+                    "content_html": content_html,
+                }
+            },
+        )
+        resp.raise_for_status()
+        if resp.status_code in (200, 201):
+            post = resp.json().get("data", {})
+            self.memory.log(f"Newsletter post created: {subject} ({status})", "Newsletter")
+            return post
+        logger.error("Beehiiv create post failed: %s %s", resp.status_code, resp.text[:200])
         return None
 
+    @retry()
     async def publish_post(self, post_id: str) -> dict[str, Any] | None:
         """Publish a draft post by transitioning its status to 'confirmed'.
 
@@ -141,23 +102,22 @@ class Newsletter:
         if not self.api_key or not self.publication_id:
             logger.warning("Beehiiv not configured, skipping publish")
             return None
-        try:
-            resp = await self._request_with_retry(
-                "put",
-                f"{self.base_url}/publications/{self.publication_id}/posts/{post_id}",
-                json={"post": {"status": "confirmed"}},
-            )
-            if resp.status_code == 200:
-                post = resp.json().get("data", {})
-                self.memory.log(f"Newsletter published: {post_id}", "Newsletter")
-                return post
-            logger.error(
-                "Beehiiv publish failed: %s %s", resp.status_code, resp.text[:200]
-            )
-        except Exception as exc:
-            logger.error("Beehiiv publish error: %s", exc)
+        client = await self._get_client()
+        resp = await client.put(
+            f"{self.base_url}/publications/{self.publication_id}/posts/{post_id}",
+            json={"post": {"status": "confirmed"}},
+        )
+        resp.raise_for_status()
+        if resp.status_code == 200:
+            post = resp.json().get("data", {})
+            self.memory.log(f"Newsletter published: {post_id}", "Newsletter")
+            return post
+        logger.error(
+            "Beehiiv publish failed: %s %s", resp.status_code, resp.text[:200]
+        )
         return None
 
+    @retry()
     async def schedule_send(self, post_id: str, send_at: datetime) -> dict[str, Any] | None:
         """Schedule a draft post to be sent at a specific time.
 
@@ -168,30 +128,28 @@ class Newsletter:
         if not self.api_key or not self.publication_id:
             logger.warning("Beehiiv not configured, skipping schedule")
             return None
-        try:
-            # Beehiiv expects ISO 8601 UTC timestamp for scheduled sends
-            scheduled_at = send_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            resp = await self._request_with_retry(
-                "put",
-                f"{self.base_url}/publications/{self.publication_id}/posts/{post_id}",
-                json={
-                    "post": {
-                        "status": "confirmed",
-                        "scheduled_at": scheduled_at,
-                    }
-                },
+        # Beehiiv expects ISO 8601 UTC timestamp for scheduled sends
+        scheduled_at = send_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        client = await self._get_client()
+        resp = await client.put(
+            f"{self.base_url}/publications/{self.publication_id}/posts/{post_id}",
+            json={
+                "post": {
+                    "status": "confirmed",
+                    "scheduled_at": scheduled_at,
+                }
+            },
+        )
+        resp.raise_for_status()
+        if resp.status_code == 200:
+            post = resp.json().get("data", {})
+            self.memory.log(
+                f"Newsletter scheduled: {post_id} for {scheduled_at}", "Newsletter"
             )
-            if resp.status_code == 200:
-                post = resp.json().get("data", {})
-                self.memory.log(
-                    f"Newsletter scheduled: {post_id} for {scheduled_at}", "Newsletter"
-                )
-                return post
-            logger.error(
-                "Beehiiv schedule failed: %s %s", resp.status_code, resp.text[:200]
-            )
-        except Exception as exc:
-            logger.error("Beehiiv schedule error: %s", exc)
+            return post
+        logger.error(
+            "Beehiiv schedule failed: %s %s", resp.status_code, resp.text[:200]
+        )
         return None
 
     async def send_newsletter(self, subject: str, content_html: str) -> dict[str, Any]:
@@ -304,6 +262,7 @@ class Newsletter:
             "published": published,
         }
 
+    @retry()
     async def get_subscriber_growth(self, days: int = 30) -> list[dict[str, Any]]:
         """Track subscriber count over time.
 
@@ -315,36 +274,34 @@ class Newsletter:
         """
         if not self.api_key or not self.publication_id:
             return []
-        try:
-            # Fetch current subscription stats
-            resp = await self._request_with_retry(
-                "get",
-                f"{self.base_url}/publications/{self.publication_id}/subscriptions",
-                params={"limit": 100, "status": "active"},
-            )
-            if resp.status_code != 200:
-                logger.error("Beehiiv subscriber growth fetch failed: %s", resp.status_code)
-                return []
-
-            # Get current stats as a snapshot
-            stats = await self.get_stats()
-            snapshot = {
-                "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                "active_subscribers": stats.get("subscribers", 0),
-                "total_subscribers": stats.get("total", 0),
-            }
-
-            # Log to memory for historical tracking
-            self.memory.log(
-                f"Subscriber snapshot: {snapshot['active_subscribers']} active, "
-                f"{snapshot['total_subscribers']} total",
-                "Newsletter",
-            )
-            return [snapshot]
-        except Exception as exc:
-            logger.error("Beehiiv subscriber growth error: %s", exc)
+        # Fetch current subscription stats
+        client = await self._get_client()
+        resp = await client.get(
+            f"{self.base_url}/publications/{self.publication_id}/subscriptions",
+            params={"limit": 100, "status": "active"},
+        )
+        resp.raise_for_status()
+        if resp.status_code != 200:
+            logger.error("Beehiiv subscriber growth fetch failed: %s", resp.status_code)
             return []
 
+        # Get current stats as a snapshot
+        stats = await self.get_stats()
+        snapshot = {
+            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "active_subscribers": stats.get("subscribers", 0),
+            "total_subscribers": stats.get("total", 0),
+        }
+
+        # Log to memory for historical tracking
+        self.memory.log(
+            f"Subscriber snapshot: {snapshot['active_subscribers']} active, "
+            f"{snapshot['total_subscribers']} total",
+            "Newsletter",
+        )
+        return [snapshot]
+
+    @retry()
     async def get_newsletter_performance(self, limit: int = 10) -> dict[str, Any]:
         """Get performance metrics for recent newsletters.
 
@@ -356,64 +313,61 @@ class Newsletter:
         """
         if not self.api_key or not self.publication_id:
             return {"issues": [], "aggregate": {}}
-        try:
-            resp = await self._request_with_retry(
-                "get",
-                f"{self.base_url}/publications/{self.publication_id}/posts",
-                params={"limit": limit, "status": "confirmed"},
-            )
-            if resp.status_code != 200:
-                logger.error("Beehiiv performance fetch failed: %s", resp.status_code)
-                return {"issues": [], "aggregate": {}}
-
-            posts = resp.json().get("data", [])
-            issues: list[dict[str, Any]] = []
-            total_opens = 0
-            total_clicks = 0
-            total_delivered = 0
-
-            for post in posts:
-                post_stats = post.get("stats", {})
-                delivered = post_stats.get("email_total_delivered", 0)
-                opens = post_stats.get("email_total_unique_opened", 0)
-                clicks = post_stats.get("email_total_unique_clicked", 0)
-                open_rate = (opens / delivered * 100) if delivered > 0 else 0
-                click_rate = (clicks / delivered * 100) if delivered > 0 else 0
-
-                issues.append({
-                    "id": post.get("id"),
-                    "title": post.get("title", ""),
-                    "published_at": post.get("published_at"),
-                    "delivered": delivered,
-                    "opens": opens,
-                    "clicks": clicks,
-                    "open_rate": round(open_rate, 1),
-                    "click_rate": round(click_rate, 1),
-                })
-
-                total_opens += opens
-                total_clicks += clicks
-                total_delivered += delivered
-
-            avg_open_rate = (total_opens / total_delivered * 100) if total_delivered > 0 else 0
-            avg_click_rate = (total_clicks / total_delivered * 100) if total_delivered > 0 else 0
-
-            aggregate = {
-                "total_issues": len(issues),
-                "total_delivered": total_delivered,
-                "avg_open_rate": round(avg_open_rate, 1),
-                "avg_click_rate": round(avg_click_rate, 1),
-            }
-
-            self.memory.log(
-                f"Newsletter performance: {len(issues)} issues, "
-                f"{avg_open_rate:.1f}% open rate, {avg_click_rate:.1f}% click rate",
-                "Newsletter",
-            )
-            return {"issues": issues, "aggregate": aggregate}
-        except Exception as exc:
-            logger.error("Beehiiv performance error: %s", exc)
+        client = await self._get_client()
+        resp = await client.get(
+            f"{self.base_url}/publications/{self.publication_id}/posts",
+            params={"limit": limit, "status": "confirmed"},
+        )
+        resp.raise_for_status()
+        if resp.status_code != 200:
+            logger.error("Beehiiv performance fetch failed: %s", resp.status_code)
             return {"issues": [], "aggregate": {}}
+
+        posts = resp.json().get("data", [])
+        issues: list[dict[str, Any]] = []
+        total_opens = 0
+        total_clicks = 0
+        total_delivered = 0
+
+        for post in posts:
+            post_stats = post.get("stats", {})
+            delivered = post_stats.get("email_total_delivered", 0)
+            opens = post_stats.get("email_total_unique_opened", 0)
+            clicks = post_stats.get("email_total_unique_clicked", 0)
+            open_rate = (opens / delivered * 100) if delivered > 0 else 0
+            click_rate = (clicks / delivered * 100) if delivered > 0 else 0
+
+            issues.append({
+                "id": post.get("id"),
+                "title": post.get("title", ""),
+                "published_at": post.get("published_at"),
+                "delivered": delivered,
+                "opens": opens,
+                "clicks": clicks,
+                "open_rate": round(open_rate, 1),
+                "click_rate": round(click_rate, 1),
+            })
+
+            total_opens += opens
+            total_clicks += clicks
+            total_delivered += delivered
+
+        avg_open_rate = (total_opens / total_delivered * 100) if total_delivered > 0 else 0
+        avg_click_rate = (total_clicks / total_delivered * 100) if total_delivered > 0 else 0
+
+        aggregate = {
+            "total_issues": len(issues),
+            "total_delivered": total_delivered,
+            "avg_open_rate": round(avg_open_rate, 1),
+            "avg_click_rate": round(avg_click_rate, 1),
+        }
+
+        self.memory.log(
+            f"Newsletter performance: {len(issues)} issues, "
+            f"{avg_open_rate:.1f}% open rate, {avg_click_rate:.1f}% click rate",
+            "Newsletter",
+        )
+        return {"issues": issues, "aggregate": aggregate}
 
     async def generate_x_to_newsletter_cta(self) -> str:
         """Generate a tweet promoting newsletter signup."""
