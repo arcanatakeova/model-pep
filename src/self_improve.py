@@ -541,6 +541,14 @@ class SelfImprover:
         # Step 6: Learn from any newly won deals
         success_patterns = await self.learn_from_success()
 
+        # Step 6b: Learn from failures too
+        failure_patterns = await self.learn_from_failure()
+
+        # Step 6c: Cross-channel analysis (weekly on Wednesdays)
+        cross_channel = {}
+        if datetime.now(timezone.utc).weekday() == 2:
+            cross_channel = await self.cross_channel_analysis()
+
         # Step 7: Update query performance
         query_perf = await self.update_query_performance()
 
@@ -578,11 +586,164 @@ class SelfImprover:
         analysis["automations_built"] = automations_built
         analysis["interventions"] = intervention_data
         analysis["success_patterns"] = success_patterns
+        analysis["failure_patterns"] = failure_patterns
+        analysis["cross_channel"] = cross_channel
         analysis["query_performance"] = query_perf
         if weekly_report:
             analysis["weekly_report"] = weekly_report
 
         return analysis
+
+    # ── Learn from Failure ────────────────────────────────────────
+
+    async def learn_from_failure(self) -> dict[str, Any]:
+        """When a deal is lost or a skill fails, trace the failure pattern.
+
+        Identifies:
+        - What went wrong (timing, messaging, targeting, pricing)
+        - Which queries/channels produced bad leads
+        - What to avoid next time
+        Saves as anti-patterns to prevent repeating mistakes.
+        """
+        # Find lost deals
+        lost_deals: list[str] = []
+        for key in self.memory.list_knowledge("projects"):
+            if not key.startswith("deal-"):
+                continue
+            data = self.memory.get_knowledge("projects", key)
+            if data and ("lost" in data.lower() or "churned" in data.lower()
+                         or "rejected" in data.lower() or "ghosted" in data.lower()):
+                lost_deals.append(data[:800])
+
+        # Get skill execution failures
+        skill_history = self.memory.get_tacit("skill-execution-history") or ""
+        failures = [
+            line for line in skill_history.splitlines()
+            if "FAILED" in line
+        ]
+
+        if not lost_deals and not failures:
+            logger.info("No failures to learn from yet.")
+            return {"patterns_extracted": 0, "message": "No failures found."}
+
+        existing_anti = self.memory.get_tacit("anti-patterns")
+
+        result = await self.llm.ask_json(
+            f"You are ARCANA AI learning from failures to avoid repeating them.\n\n"
+            f"Lost/churned deals:\n{'---'.join(lost_deals[-5:]) if lost_deals else 'None'}\n\n"
+            f"Failed skill executions:\n{'chr(10)'.join(failures[-10:]) if failures else 'None'}\n\n"
+            f"Existing anti-patterns (avoid duplicates):\n{(existing_anti or 'None yet.')[-1500:]}\n\n"
+            f"For each failure, trace the failure path and extract anti-patterns.\n"
+            f"Return JSON: {{\n"
+            f'  "anti_patterns": [\n'
+            f"    {{\n"
+            f'      "source": str (deal-X or skill-Y),\n'
+            f'      "failure_type": "timing"|"messaging"|"targeting"|"pricing"|"execution"|"technical",\n'
+            f'      "what_went_wrong": str (specific description),\n'
+            f'      "root_cause": str (why it really failed),\n'
+            f'      "avoidance_rule": str (concrete rule to prevent this),\n'
+            f'      "queries_to_deprioritize": [str] (scanner queries that led here),\n'
+            f'      "channels_to_avoid": [str] (channels that dont work for this case)\n'
+            f"    }}\n"
+            f"  ],\n"
+            f'  "strategic_adjustments": [str] (high-level changes to make)\n'
+            f"}}",
+            tier=Tier.OPUS,
+        )
+
+        patterns = result.get("anti_patterns", [])
+        if not patterns:
+            return {"patterns_extracted": 0, "message": "No new anti-patterns found."}
+
+        # Save anti-patterns
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        new_content = f"\n\n## Anti-Patterns Extracted — {ts}\n\n"
+        for p in patterns:
+            new_content += (
+                f"### {p.get('source', 'Unknown')}\n"
+                f"- **Type**: {p.get('failure_type', 'N/A')}\n"
+                f"- **What went wrong**: {p.get('what_went_wrong', 'N/A')}\n"
+                f"- **Root cause**: {p.get('root_cause', 'N/A')}\n"
+                f"- **RULE**: {p.get('avoidance_rule', 'N/A')}\n"
+                f"- **Deprioritize queries**: {', '.join(p.get('queries_to_deprioritize', []))}\n"
+                f"- **Avoid channels**: {', '.join(p.get('channels_to_avoid', []))}\n\n"
+            )
+
+        updated = (existing_anti or "# Anti-Patterns (Failure Learning)\n") + new_content
+        self.memory.save_tacit("anti-patterns", updated)
+
+        # Save strategic adjustments
+        adjustments = result.get("strategic_adjustments", [])
+        if adjustments:
+            lessons = self.memory.get_tacit("lessons-learned") or ""
+            adj_content = f"\n\n## Failure-Driven Adjustments — {ts}\n"
+            adj_content += "\n".join(f"- {adj}" for adj in adjustments)
+            self.memory.save_tacit("lessons-learned", lessons + adj_content)
+
+        self.memory.log(
+            f"Learned from {len(patterns)} failure(s). "
+            f"Anti-patterns: {', '.join(p.get('avoidance_rule', '?')[:40] for p in patterns)}",
+            "Self-Improvement",
+        )
+
+        return {
+            "patterns_extracted": len(patterns),
+            "anti_patterns": patterns,
+            "strategic_adjustments": adjustments,
+        }
+
+    # ── Cross-Channel Pattern Learning ─────────────────────────────
+
+    async def cross_channel_analysis(self) -> dict[str, Any]:
+        """Find patterns that span multiple channels.
+
+        Example: "Leads from Reddit that engage on X → 2x higher close rate"
+        """
+        winning = self.memory.get_tacit("winning-patterns") or ""
+        anti = self.memory.get_tacit("anti-patterns") or ""
+        scan_perf = self.memory.get_tacit("scan-performance") or ""
+
+        result = await self.llm.ask_json(
+            f"You are ARCANA AI analyzing cross-channel patterns.\n\n"
+            f"Winning patterns:\n{winning[-2000:]}\n\n"
+            f"Anti-patterns:\n{anti[-1500:]}\n\n"
+            f"Scanner performance:\n{scan_perf[-1500:]}\n\n"
+            f"Find patterns that SPAN channels. Examples:\n"
+            f"- 'Leads discovered on Reddit who also engage on X convert 2x better'\n"
+            f"- 'Email outreach works best for leads originally from Upwork'\n"
+            f"- 'Newsletter subscribers who came from SEO have 3x higher LTV'\n\n"
+            f"Return JSON: {{\n"
+            f'  "cross_channel_patterns": [\n'
+            f"    {{\n"
+            f'      "pattern": str (clear description),\n'
+            f'      "channels_involved": [str],\n'
+            f'      "confidence": float (0-1),\n'
+            f'      "actionable_insight": str (what to do differently),\n'
+            f'      "estimated_impact": str\n'
+            f"    }}\n"
+            f"  ],\n"
+            f'  "recommended_channel_combinations": [str],\n'
+            f'  "channels_to_connect_better": [str]\n'
+            f"}}",
+            tier=Tier.OPUS,
+        )
+
+        # Save cross-channel insights
+        patterns = result.get("cross_channel_patterns", [])
+        if patterns:
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            content = f"\n\n## Cross-Channel Insights — {ts}\n\n"
+            for p in patterns:
+                content += (
+                    f"- **{p.get('pattern', 'N/A')}** "
+                    f"(channels: {', '.join(p.get('channels_involved', []))}, "
+                    f"confidence: {p.get('confidence', 0):.0%})\n"
+                    f"  → {p.get('actionable_insight', 'N/A')}\n"
+                )
+            existing = self.memory.get_tacit("cross-channel-insights") or "# Cross-Channel Insights\n"
+            self.memory.save_tacit("cross-channel-insights", existing + content)
+
+        return result
 
     async def propose_automations(self) -> list[dict[str, str]]:
         """Based on accumulated bottlenecks, propose new automations to build."""

@@ -24,12 +24,14 @@ from src.affiliates import AffiliateManager
 from src.agents.iris import Iris
 from src.agents.remy import Remy
 from src.analytics import Analytics
+from src.api_evolver import APIEvolver
 from src.config import STOP_FILE, Config, get_config
 from src.content_engine import ContentEngine
 from src.crm import CRM
 from src.database import Database
 from src.distribution import ContentDistributor
 from src.email_engine import EmailEngine
+from src.evolution_tracker import EvolutionTracker
 from src.fulfillment import FulfillmentEngine
 from src.heartbeat import Heartbeat
 from src.leads import LeadPipeline
@@ -41,11 +43,13 @@ from src.opportunity_scanner import OpportunityScanner
 from src.outreach import OutreachEngine
 from src.payments import PaymentsEngine
 from src.product_factory import ProductFactory
+from src.prompt_evolver import PromptEvolver
 from src.revenue_engine import RevenueEngine
 from src.scheduler import TaskScheduler
 from src.self_improve import SelfImprover
 from src.seo_engine import SEOEngine
 from src.services import ServiceEngine
+from src.skill_executor import SkillExecutor
 from src.trader_bridge import TraderBridge
 from src.ugc_engine import UGCEngine
 from src.webhook_server import WebhookServer
@@ -98,6 +102,11 @@ class Orchestrator:
         self.analytics: Analytics | None = None
         self.db: Database | None = None
         self.webhook_server: WebhookServer | None = None
+        # Evolution engine
+        self.skill_executor: SkillExecutor | None = None
+        self.evolution_tracker: EvolutionTracker | None = None
+        self.prompt_evolver: PromptEvolver | None = None
+        self.api_evolver: APIEvolver | None = None
         # State
         self._running = True
         self._last_mention_id: str | None = None
@@ -164,6 +173,12 @@ class Orchestrator:
         self.analytics = Analytics(self.llm, self.memory, db=self.db)
         self.revenue = RevenueEngine(self.memory, self.payments_engine, self.trader)
 
+        # Evolution engine — ARCANA gets smarter every cycle
+        self.skill_executor = SkillExecutor(self.llm, self.memory)
+        self.evolution_tracker = EvolutionTracker(self.llm, self.memory)
+        self.prompt_evolver = PromptEvolver(self.llm, self.memory)
+        self.api_evolver = APIEvolver(self.llm, self.memory)
+
         # Register scheduler handlers
         self._register_scheduler_handlers()
 
@@ -192,6 +207,10 @@ class Orchestrator:
         self.scheduler.register_handler("weekly_pipeline_nurture", self.scanner.nurture_pipeline)
         self.scheduler.register_handler("monthly_product_creation", self.product_factory.create_and_list_product)
         self.scheduler.register_handler("monthly_analytics", self.analytics.generate_roi_report)
+        # Evolution engine handlers
+        self.scheduler.register_handler("run_skills", self.skill_executor.run_due_skills)
+        self.scheduler.register_handler("api_evolution", self.api_evolver.hourly_cycle)
+        self.scheduler.register_handler("prompt_evolution", self.prompt_evolver.evaluate_and_promote)
 
     def _kill_switch_active(self) -> bool:
         if STOP_FILE.exists():
@@ -254,6 +273,13 @@ class Orchestrator:
         # Stripe MRR
         stripe_mrr = self.payments_engine.get_mrr()
 
+        # API ecosystem
+        api_ecosystem_report = self.api_evolver.format_api_report()
+
+        # Evolution stats
+        prompt_stats = self.prompt_evolver.get_evolution_stats()
+        active_skills = len(self.skill_executor.list_skills("active"))
+
         # Generate priorities with full context
         result = await self.llm.ask_json(
             f"Generate ARCANA AI's morning report. Target: $100K/month.\n\n"
@@ -265,6 +291,8 @@ class Orchestrator:
             f"SCANNER PIPELINE: {pipeline_summary['total_opportunities']} opportunities, "
             f"${pipeline_summary['estimated_pipeline_value_monthly']:,.0f}/mo est. value\n"
             f"STRIPE MRR: ${stripe_mrr:,.2f}\n"
+            f"ACTIVE SKILLS: {active_skills}\n"
+            f"API ECOSYSTEM:\n{api_ecosystem_report}\n"
             f"DATABASE DASHBOARD:\n{db_dashboard}\n"
             f"OPEN LEADS: {', '.join(open_leads) or 'None'}\n\n"
             f"Yesterday:\n{yesterday[:800]}\n\n"
@@ -383,7 +411,31 @@ class Orchestrator:
         except Exception as exc:
             logger.error("Scheduler failed: %s", exc)
 
-        # 7. Update heartbeat
+        # 7. Execute learned skills
+        try:
+            skill_results = await self.skill_executor.run_due_skills()
+            if skill_results.get("executed", 0) > 0:
+                self._completed_today.append(
+                    f"Skills: {skill_results['executed']} executed, "
+                    f"{skill_results['succeeded']} succeeded"
+                )
+        except Exception as exc:
+            logger.error("Skill execution failed: %s", exc)
+
+        # 8. Hourly API evolution (discover, test, integrate new APIs)
+        try:
+            now = datetime.now(timezone.utc)
+            if now.minute < 15:  # Run once per hour (first 15-min window)
+                api_results = await self.api_evolver.hourly_cycle()
+                discovered = api_results.get("discovery", {}).get("discovered", 0)
+                if discovered > 0:
+                    self._completed_today.append(
+                        f"API Evolution: {discovered} new APIs discovered"
+                    )
+        except Exception as exc:
+            logger.error("API evolution failed: %s", exc)
+
+        # 9. Update heartbeat
         self.heartbeat.update(
             "Active",
             "Monitoring all channels",
@@ -654,11 +706,51 @@ class Orchestrator:
         # Run self-improvement analysis
         analysis = await self.improver.run_nightly_review()
 
+        # Evolution engine — measure autonomy + evolve prompts
+        try:
+            autonomy = await self.evolution_tracker.calculate_autonomy_score()
+            analysis["autonomy_score"] = autonomy.get("overall_score", 0)
+            analysis["autonomy_trend"] = autonomy.get("trend", "unknown")
+        except Exception as exc:
+            logger.error("Autonomy scoring failed: %s", exc)
+
+        # Prompt evolution — promote winners, retire losers
+        try:
+            prompt_evolution = await self.prompt_evolver.evaluate_and_promote()
+            analysis["prompt_evolution"] = prompt_evolution
+        except Exception as exc:
+            logger.error("Prompt evolution failed: %s", exc)
+
+        # Disable failing skills
+        try:
+            disabled_skills = await self.skill_executor.disable_failing_skills()
+            if disabled_skills:
+                analysis["disabled_skills"] = disabled_skills
+        except Exception as exc:
+            logger.error("Skill evaluation failed: %s", exc)
+
+        # Weekly evolution report (Fridays)
+        evolution_report = None
+        if datetime.now(timezone.utc).weekday() == 4:
+            try:
+                evolution_report = await self.evolution_tracker.generate_evolution_report()
+            except Exception as exc:
+                logger.error("Evolution report failed: %s", exc)
+
+        # API ecosystem report
+        api_report = self.api_evolver.format_api_report()
+
         # Send comprehensive summary
+        autonomy_line = (
+            f"Autonomy: {analysis.get('autonomy_score', '?')}/100 "
+            f"({analysis.get('autonomy_trend', '?')})\n"
+        )
         summary = (
             f"**Nightly Review Complete**\n\n"
             f"{rev_report}\n\n"
             f"{scanner_report}\n\n"
+            f"{api_report}\n\n"
+            f"{autonomy_line}"
             f"{analysis.get('summary', 'N/A')}\n"
             f"Wins: {len(analysis.get('wins', []))}\n"
             f"Bottlenecks: {len(analysis.get('bottlenecks', []))}\n"
@@ -778,6 +870,8 @@ class Orchestrator:
             await self.distributor.close()
         if self.webhook_server:
             await self.webhook_server.stop()
+        if self.api_evolver:
+            await self.api_evolver.close()
         if self.db:
             self.db.close()
 
