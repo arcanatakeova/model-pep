@@ -20,8 +20,10 @@ Target: 100+ videos/month × $75 avg = $7,500/mo minimum. Scale to $20K+.
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import logging
 import random
+import urllib.parse
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -310,7 +312,8 @@ class UGCEngine:
         try:
             client = await self._get_client()
             resp = await client.get(
-                f"https://api.heygen.com/v1/video_status.get?video_id={video_id}",
+                "https://api.heygen.com/v1/video_status.get",
+                params={"video_id": video_id},
                 headers={"X-Api-Key": self.heygen_key},
             )
             if resp.status_code == 200:
@@ -652,23 +655,33 @@ class UGCEngine:
         script_hook = video_data.get("script", {}).get("hook", "")
         quality_score = video_data.get("quality", {}).get("score", "N/A")
 
+        # HTML-escape user-controlled values to prevent injection
+        safe_client_name = _html.escape(str(client_name))
+        safe_script_hook = _html.escape(str(script_hook)[:120])
+        safe_quality_score = _html.escape(str(quality_score))
+        safe_duration = _html.escape(str(duration))
+
+        # Validate URLs start with https://
+        safe_thumbnail_url = thumbnail_url if thumbnail_url.startswith("https://") else ""
+        safe_video_url = video_url if video_url.startswith("https://") else ""
+
         thumbnail_html = (
-            f'<img src="{thumbnail_url}" alt="Video thumbnail" '
+            f'<img src="{_html.escape(safe_thumbnail_url)}" alt="Video thumbnail" '
             f'style="max-width:100%;border-radius:8px;margin:16px 0" />'
-            if thumbnail_url else ""
+            if safe_thumbnail_url else ""
         )
 
         html_body = (
             f"<h2>Your UGC Video is Ready!</h2>"
-            f"<p>Hi {client_name},</p>"
+            f"<p>Hi {safe_client_name},</p>"
             f"<p>Your latest UGC video has been produced and passed our quality review "
-            f"(score: {quality_score}/10).</p>"
+            f"(score: {safe_quality_score}/10).</p>"
             f"{thumbnail_html}"
             f"<table style='border-collapse:collapse;width:100%;margin:16px 0'>"
-            f"<tr><td><strong>Duration</strong></td><td>{duration}s</td></tr>"
-            f"<tr><td><strong>Hook</strong></td><td>{script_hook[:120]}</td></tr>"
+            f"<tr><td><strong>Duration</strong></td><td>{safe_duration}s</td></tr>"
+            f"<tr><td><strong>Hook</strong></td><td>{safe_script_hook}</td></tr>"
             f"</table>"
-            f"<p><a href='{video_url}' style='background:#000;color:#fff;"
+            f"<p><a href='{_html.escape(safe_video_url)}' style='background:#000;color:#fff;"
             f"padding:12px 24px;text-decoration:none;display:inline-block;"
             f"border-radius:6px;margin:16px 0'>Download Video &rarr;</a></p>"
             f"<h3>Need Revisions?</h3>"
