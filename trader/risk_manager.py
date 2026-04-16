@@ -250,26 +250,30 @@ class RiskManager:
 
     def dex_position_size_usd(self, token_score: float, safety_score: float,
                                liquidity_usd: float, price_change_h1: float,
-                               price_change_h6: float) -> float:
+                               price_change_h6: float,
+                               wallet_usd: float = 0.0) -> float:
         """
         Volatility-adjusted position sizing for DEX/memecoin trades.
         Higher volatility = smaller size. Lower safety = smaller size.
+        wallet_usd: the Solana wallet balance — used as the cash basis so that
+        other platform balances (Polymarket, CEX) don't dilute sizing.
         """
-        equity = self.portfolio.equity()
-        if equity <= 0:
+        # Each trading type has its own balance; use wallet_usd if provided.
+        available = wallet_usd if wallet_usd > 0 else self.portfolio.cash
+        if available <= 0:
             return 0.0
 
         base_size = config.DEX_BASE_POSITION_USD
 
-        # 1. Volatility adjustment — HIGH vol = big opportunity, size UP (not down)
+        # 1. Volatility adjustment — HIGH vol = REDUCE size (not increase)
         vol_proxy = (abs(price_change_h1) + abs(price_change_h6 / 6)) / 2
         vol_proxy = max(vol_proxy, 1.0)
-        vol_boost = min(1.0 + (vol_proxy - 1.0) * 0.18, 2.5)  # 1.0x–2.5x (was 2.0x)
-        vol_adjusted = base_size * vol_boost
+        vol_boost = min(1.0 + (vol_proxy - 1.0) * 0.18, 2.5)
+        vol_mult = max(0.3, 1.0 / vol_boost)  # Invert: high vol = smaller positions
+        vol_adjusted = base_size * vol_mult
 
-        # 2. Safety scaling: riskier tokens get smaller positions
-        # Floor raised to 0.5 — even risky tokens deserve half the base size
-        safety_multiplier = max(0.5, safety_score)
+        # 2. Safety scaling: riskier tokens get smaller positions (no floor)
+        safety_multiplier = safety_score
 
         # 3. Score scaling: higher score = closer to full size
         # Raised floor from 0.4 to 0.5 — don't half-size the entry
@@ -277,16 +281,28 @@ class RiskManager:
 
         size = vol_adjusted * safety_multiplier * score_multiplier
 
-        # 4. Equity-scaled floor: ensure base position is meaningful relative to equity
-        # On small wallets, scale base_size proportionally so % exposure is consistent
-        equity_floor = equity * 0.04  # At least 4% of equity (up from ~2%)
-        size = max(size, equity_floor)
+        # 4. Liquidity cap: never more than 2% of pool liquidity
+        size = min(size, liquidity_usd * 0.02)
 
-        # 5. Caps
+        # 5. Wallet-scaled floor: minimal (1% of wallet)
+        wallet_floor = available * 0.01
+        size = max(size, wallet_floor)
+
+        # 6. Caps
         size = min(size, config.DEX_MAX_POSITION_USD)
         size = min(size, liquidity_usd * config.MIN_LIQUIDITY_RATIO)
-        # Cash cap: use up to 90% of available cash — leave room for tx fees
-        size = min(size, self.portfolio.cash * 0.90)
+        # Cash cap: divide usable wallet balance across open slots.
+        # 90% of wallet is allocated to memecoins; split across remaining slots.
+        open_dex = len([p for p in self.portfolio.open_positions.values()
+                        if p.get("market") == "dex"])
+        free_slots = max(1, config.MAX_DEX_POSITIONS - open_dex)
+        usable_cash = available * config.MAX_MEMECOIN_ALLOCATION_PCT
+        # Don't split into more slots than cash can support at minimum position size
+        min_pos = config.DEX_MIN_POSITION_USD
+        max_affordable_slots = max(1, int(usable_cash / min_pos)) if min_pos > 0 else free_slots
+        effective_slots = min(free_slots, max_affordable_slots)
+        per_slot_cash = usable_cash / effective_slots
+        size = min(size, per_slot_cash)
 
         if size < config.DEX_MIN_POSITION_USD:
             return 0.0
@@ -329,19 +345,18 @@ class RiskManager:
         h24_vol = abs(price_change_h24 or 0) / 100
 
         # Use the largest observed timeframe as the volatility anchor
-        # Tightened: 2.0× (was 2.5×) and 15% floor (was 20%) to cut losses faster
-        base = max(h1_vol * 2.0, h6_vol * 0.5, h24_vol * 0.20, 0.15)
-        base = min(base, 0.40)  # Hard cap 40% (was 45%)
+        base = max(h1_vol * 2.0, h6_vol * 0.5, h24_vol * 0.20, 0.10)
+        base = min(base, 0.40)
 
-        # Safety-adjusted multiplier: less trusted = more volatile = wider stop needed
+        # Safety-adjusted multiplier: risky tokens get TIGHTER stops (not wider)
         if safety_score >= 0.80:
-            mult = 0.85    # well-audited token, slightly tighter
+            mult = 1.0     # well-audited token, full stop width
         elif safety_score >= 0.60:
-            mult = 1.00    # average
+            mult = 0.80    # moderate risk — tighter
         else:
-            mult = 1.30    # unknown/risky — expect big swings
+            mult = 0.60    # unknown/risky — tightest stops, cut losses fast
 
-        stop = round(min(base * mult, 0.50), 3)
+        stop = round(min(base * mult, 0.15), 3)  # Cap at 15%: sell retries on failed routes can bleed 40%+
         logger.debug("Dynamic stop: h1=%.1f%% h6=%.1f%% h24=%.1f%% safety=%.2f → stop=%.1f%%",
                      h1_vol*100, h6_vol*100, h24_vol*100, safety_score, stop*100)
         return stop
@@ -371,8 +386,12 @@ class RiskManager:
         return target
 
     def check_dex_concentration(self, dex_positions: dict,
-                                 token_dex_id: str = "") -> tuple[bool, str]:
-        """Check memecoin concentration limits before opening new position."""
+                                 token_dex_id: str = "",
+                                 wallet_usd: float = 0.0) -> tuple[bool, str]:
+        """Check memecoin concentration limits before opening new position.
+        wallet_usd: Solana wallet balance — cap is applied against this, not overall equity,
+        since each trading platform manages its own separate balance.
+        """
         if len(dex_positions) >= config.MAX_DEX_POSITIONS:
             return False, f"Max DEX positions reached ({config.MAX_DEX_POSITIONS})"
 
@@ -381,7 +400,17 @@ class RiskManager:
             p.get("size_usd", 0) * p.get("remaining_fraction", 1.0)
             for p in dex_positions.values()
         )
-        # No memecoin allocation cap — 100% of capital can be deployed in DEX positions
+        # Each platform has its own balance; cap memecoins against the Solana wallet.
+        basis = wallet_usd if wallet_usd > 0 else self.portfolio.equity()
+        if basis > 0:
+            cap_usd = basis * config.MAX_MEMECOIN_ALLOCATION_PCT
+            free_slots = max(1, config.MAX_DEX_POSITIONS - len(dex_positions))
+            available = wallet_usd if wallet_usd > 0 else self.portfolio.cash
+            next_trade_size = (available * config.MAX_MEMECOIN_ALLOCATION_PCT) / free_slots
+            # Only block if we'd exceed 120% of the cap after adding the new trade
+            # (20% buffer prevents thrashing near the boundary)
+            if total_dex_usd + next_trade_size > cap_usd * 1.20:
+                return False, f"Memecoin allocation cap ({config.MAX_MEMECOIN_ALLOCATION_PCT:.0%} of wallet)"
 
         if token_dex_id:
             same_dex = sum(1 for p in dex_positions.values()

@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+import threading
+
 import requests
 from requests.adapters import HTTPAdapter as _HTTPAdapter
 
@@ -60,6 +62,7 @@ class BirdeyeSecurity:
     creator_address: Optional[str] = None
     creator_balance_pct: float = 0.0        # % creator holds
     top10_holder_pct: float = 0.0           # % top 10 holders own
+    holder_count: Optional[int] = None      # total unique holders
     # Supply / lock
     total_supply: float = 0.0
     circulating_supply: float = 0.0
@@ -94,6 +97,12 @@ class BirdeyeClient:
     _SECURITY_TTL  = 600   # 10 minutes
     _OHLCV_TTL     = 30
     _TRENDING_TTL  = 60
+    _OVERVIEW_TTL  = 120   # 2 minutes — holder count doesn't change rapidly
+
+    # Global rate limiter shared across ALL instances and threads (free tier = 1 req/s)
+    _global_lock = threading.Lock()
+    _global_last_request_ts: float = 0.0
+    _global_backoff_until: float = 0.0  # circuit breaker: skip requests until this time
 
     def __init__(self, api_key: str = ""):
         self._api_key = api_key or config.BIRDEYE_API_KEY
@@ -107,6 +116,7 @@ class BirdeyeClient:
         self._security_cache: dict[str, tuple[BirdeyeSecurity, float]] = {}
         self._ohlcv_cache:    dict[str, tuple[list[BirdeyeOHLCV], float]] = {}
         self._trending_cache: tuple[list[dict], float] = ([], 0.0)
+        self._overview_cache: dict[str, tuple[dict, float]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -124,7 +134,7 @@ class BirdeyeClient:
             if now - ts < self._PRICE_TTL:
                 return p
 
-        data = self._get("/defi/price", {"address": mint_address})
+        data = self._get("/defi/price", {"address": mint_address, "include_liquidity": "true"})
         if not data or not data.get("success"):
             return None
 
@@ -132,9 +142,9 @@ class BirdeyeClient:
         price = BirdeyePrice(
             address=mint_address,
             price_usd=float(d.get("value", 0) or 0),
-            price_change_24h_pct=float(d.get("priceChange24H", 0) or 0),
-            volume_24h_usd=float(d.get("volume24H", 0) or 0),
-            liquidity_usd=float(d.get("liquidity", 0) or 0),
+            price_change_24h_pct=float(d.get("priceChange24h", 0) or 0),  # lowercase h per API docs
+            volume_24h_usd=0.0,  # not returned by /defi/price — use token_overview for volume
+            liquidity_usd=float(d.get("liquidity", 0) or 0),  # requires include_liquidity=true
             fetched_at=now,
         )
         self._price_cache[mint_address] = (price, now)
@@ -163,8 +173,10 @@ class BirdeyeClient:
             _BATCH = 100
             for i in range(0, len(stale), _BATCH):
                 batch = stale[i:i + _BATCH]
-                data = self._get("/defi/multi_price",
-                                 {"list_address": ",".join(batch)})
+                data = self._get("/defi/multi_price", {
+                    "list_address": ",".join(batch),
+                    "include_liquidity": "true",  # required to get liquidity field
+                })
                 if data and data.get("success"):
                     for addr, d in (data.get("data") or {}).items():
                         if not d:
@@ -172,8 +184,8 @@ class BirdeyeClient:
                         p = BirdeyePrice(
                             address=addr,
                             price_usd=float(d.get("value", 0) or 0),
-                            price_change_24h_pct=float(d.get("priceChange24H", 0) or 0),
-                            volume_24h_usd=float(d.get("volume24H", 0) or 0),
+                            price_change_24h_pct=float(d.get("priceChange24h", 0) or 0),  # lowercase h
+                            volume_24h_usd=0.0,  # not in /defi/price responses
                             liquidity_usd=float(d.get("liquidity", 0) or 0),
                             fetched_at=now,
                         )
@@ -187,15 +199,24 @@ class BirdeyeClient:
 
     def get_token_overview(self, mint_address: str) -> Optional[dict]:
         """
-        Full token overview: price, volume, liquidity, market cap, holder count.
-        Richer than /defi/price — use for entry-point analysis.
+        Full token overview: price, volume, liquidity, market cap, holder count,
+        unique wallets 24h. Richer than /defi/price — use for entry-point analysis.
+        Results cached for 2 minutes (holder count doesn't change rapidly).
         """
         if not self.enabled:
             return None
+        now = time.time()
+        if mint_address in self._overview_cache:
+            d, ts = self._overview_cache[mint_address]
+            if now - ts < self._OVERVIEW_TTL:
+                return d
         data = self._get("/defi/token_overview", {"address": mint_address})
         if not data or not data.get("success"):
             return None
-        return data.get("data")
+        d = data.get("data") or {}
+        self._overview_cache[mint_address] = (d, now)
+        self._evict_cache(self._overview_cache, self._OVERVIEW_TTL)
+        return d
 
     # ─── Security ──────────────────────────────────────────────────────────────
 
@@ -236,6 +257,9 @@ class BirdeyeClient:
         if top10_pct > 0.70:
             flags.append(f"Top 10 holders own {top10_pct:.0%} (concentrated)")
 
+        raw_holders = d.get("holderCount") or d.get("holder")
+        holder_count = int(raw_holders) if raw_holders is not None else None
+
         sec = BirdeyeSecurity(
             address=mint_address,
             mint_authority=mint_auth,
@@ -243,6 +267,7 @@ class BirdeyeClient:
             creator_address=d.get("creatorAddress"),
             creator_balance_pct=creator_pct,
             top10_holder_pct=top10_pct,
+            holder_count=holder_count,
             total_supply=float(d.get("totalSupply", 0) or 0),
             circulating_supply=float(d.get("circulatingSupply", 0) or 0),
             is_token_2022=bool(d.get("isToken2022", False)),
@@ -378,33 +403,53 @@ class BirdeyeClient:
 
     # ─── HTTP ──────────────────────────────────────────────────────────────────
 
+    @classmethod
+    def _rate_limit(cls):
+        """Enforce 1 request per second globally across all instances/threads."""
+        with cls._global_lock:
+            now = time.time()
+            # Circuit breaker: skip if in backoff period
+            if now < cls._global_backoff_until:
+                return False  # caller should skip
+            elapsed = now - cls._global_last_request_ts
+            if elapsed < 1.0:
+                time.sleep(1.0 - elapsed)
+            cls._global_last_request_ts = time.time()
+            return True  # OK to proceed
+
     def _get(self, path: str, params: dict = None,
              timeout: int = 8) -> Optional[dict]:
         """Make a GET request to the Birdeye API."""
         if not self.enabled:
             return None
+        # Circuit breaker check (don't even wait if backed off)
+        if time.time() < self._global_backoff_until:
+            return None
+        if not self._rate_limit():
+            return None
         url = f"{BIRDEYE_BASE}{path}"
-        for attempt in range(3):
-            try:
-                resp = self._session.get(url, params=params, timeout=timeout)
-                if resp.status_code == 429:
-                    wait = 2 ** attempt
-                    logger.warning("Birdeye rate limit — waiting %ds", wait)
-                    time.sleep(wait)
-                    continue
-                if resp.status_code == 401:
-                    logger.error("Birdeye: invalid API key")
-                    return None
-                if not resp.ok:
-                    logger.debug("Birdeye %s → %d: %s",
-                                 path, resp.status_code, resp.text[:100])
-                    return None
-                return resp.json()
-            except Exception as e:
-                logger.debug("Birdeye request error (%s): %s", path, e)
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
-        return None
+        try:
+            resp = self._session.get(url, params=params, timeout=timeout)
+            if resp.status_code == 429:
+                # Back off for 30s on rate limit
+                logger.warning("Birdeye rate limited — backing off 30s")
+                with self._global_lock:
+                    self.__class__._global_backoff_until = time.time() + 30
+                return None
+            if resp.status_code == 401:
+                # Back off for 60s on auth failure (free tier overloaded)
+                logger.error("Birdeye: API key rejected — backing off 60s")
+                with self._global_lock:
+                    self.__class__._global_backoff_until = time.time() + 60
+                return None
+            if not resp.ok:
+                logger.debug("Birdeye %s → %d: %s",
+                             path, resp.status_code, resp.text[:100])
+                return None
+            return resp.json()
+        except Exception as e:
+            logger.debug("Birdeye request error (%s): %s", path, e)
+            return None
 
     # ─── Cache helpers ─────────────────────────────────────────────────────────
 

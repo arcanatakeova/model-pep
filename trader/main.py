@@ -30,6 +30,7 @@ Usage:
   python main.py --growth         # Show projected compound growth table
 """
 import argparse
+import collections
 import concurrent.futures
 import json
 import logging
@@ -93,6 +94,12 @@ from strategies.funding_arb import FundingArbScanner
 from strategies.grid_trader import GridTrader
 from dex_screener import DexScreener
 from polymarket import PolymarketEngine
+import importlib.util as _ilu, sys as _sys
+_spec = _ilu.spec_from_file_location("polymarket_legacy", str(_pathlib.Path(__file__).resolve().parent / "polymarket.py"))
+_polymarket_legacy = _ilu.module_from_spec(_spec)
+_sys.modules["polymarket_legacy"] = _polymarket_legacy
+_spec.loader.exec_module(_polymarket_legacy)
+PolymarketTrader = _polymarket_legacy.PolymarketTrader
 from solana_wallet import SolanaWallet, SOL_MINT, USDC_MINT, USDT_MINT
 from token_safety import TokenSafetyChecker
 import data_fetcher as df_mod
@@ -173,9 +180,12 @@ class AITrader:
         self._last_wallet_sync = 0.0   # Live wallet position sync every 30s
         self._day_start_eq   = self.portfolio.equity()
         self._last_day       = datetime.now(timezone.utc).date()
-        self._equity_curve   = self._load_equity_curve()  # Persist chart history across restarts
+        self._equity_curve   = collections.deque(
+            self._load_equity_curve(), maxlen=17_280)  # 24h at 5s cadence; bounded automatically
         self._dex_positions: dict = {}  # addr → {buy_price, qty, chain, symbol}
         self._dex_lock = threading.Lock()  # Protects _dex_positions cross-thread (fast monitor + main)
+        # Tokens whose buy failed (e.g., PumpSwap overflow) → don't retry until TTL expires
+        self._buy_failed_cache: dict[str, float] = {}  # base_address → expiry timestamp
         self._dex_closed_count = 0         # Counts DEX closes; drives audit cadence
         self._cex_signals_cache = []    # Shared between CEX scan + futures swing scan
         self._cex_cache_lock = threading.Lock()  # Protects _cex_signals_cache cross-thread
@@ -199,12 +209,15 @@ class AITrader:
                     os.unlink(fname)
                 except FileNotFoundError:
                     pass
-            self._equity_curve = []
+            self._equity_curve = collections.deque(maxlen=17_280)
 
         self.portfolio.load()
         self._load_dex_positions()
         self._reconcile_wallet_positions()
         self.risk_mgr.reset_daily_loss_tracker()
+
+        # ── Startup configuration health check ───────────────────────────
+        self._log_startup_health(live)
 
         # Initialise settings.json if missing
         if not os.path.exists("settings.json"):
@@ -341,8 +354,6 @@ class AITrader:
             "equity": round(equity, 2),
             "cycle": self._cycle,
         })
-        if len(self._equity_curve) > 17_280:
-            self._equity_curve = self._equity_curve[-17_280:]
 
         # ── 14. Risk report ───────────────────────────────────────────────
         risk = self.risk_mgr.risk_report()
@@ -364,8 +375,8 @@ class AITrader:
             self._save_strategy_states()
             self._last_save = time.time()
 
-        # ── 17. Wallet sync handled by _live_dashboard_writer (5s thread) ───
-        # SOL balance + position reconciliation run every 5s/30s in the background.
+        # ── 17. Live wallet sync every cycle ─────────────────────────────
+        self._sync_wallet_positions()
 
         logger.info("Cycle #%d done in %.0fms", self._cycle, elapsed_ms)
 
@@ -661,6 +672,20 @@ class AITrader:
         try:
             # Circuit breakers removed — bot always scans and trades
 
+            # Snapshot Solana wallet balance — each trading platform has its own
+            # balance; memecoin sizing is based purely on what's in this wallet.
+            _sol, _usdc, _sol_usd, _cache_ts = self._wallet_balance_cache
+            if self.solana.is_connected and (time.time() - _cache_ts > 5):
+                try:
+                    _sol_usd = self.solana.get_portfolio_value_usd()
+                    self._wallet_balance_cache = (
+                        self.solana.get_sol_balance(),
+                        self.solana.get_usdc_balance(),
+                        _sol_usd, time.time())
+                except Exception:
+                    pass
+            sol_wallet_usd = _sol_usd  # Used for sizing and allocation cap
+
             tokens = self.dex_screener.get_multi_chain_opportunities()
             if not tokens:
                 logger.info("DEX scan: no opportunities found")
@@ -696,7 +721,7 @@ class AITrader:
             n_blocked_conc = n_blocked_safety = n_blocked_size = 0
             for token in candidates:
                 allowed, reason = self.risk_mgr.check_dex_concentration(
-                    self._dex_positions, token.dex_id)
+                    self._dex_positions, token.dex_id, wallet_usd=sol_wallet_usd)
                 if not allowed:
                     logger.info("Concentration block %s: %s", token.base_symbol, reason)
                     n_blocked_conc += 1
@@ -708,13 +733,14 @@ class AITrader:
                                    ", ".join(safety.risk_flags[:2]))
                     n_blocked_safety += 1
                     continue
-                safety_score = safety.safety_score if safety else 0.5
+                safety_score = safety.safety_score if safety else 0.0  # Unknown = don't trade
                 size_usd = self.risk_mgr.dex_position_size_usd(
                     token_score=token.score,
                     safety_score=safety_score,
                     liquidity_usd=token.liquidity_usd,
                     price_change_h1=token.price_change_h1,
                     price_change_h6=token.price_change_h6,
+                    wallet_usd=sol_wallet_usd,
                 )
                 size_usd = min(size_usd, config.DEX_MAX_POSITION_USD)
                 if size_usd < config.DEX_MIN_POSITION_USD:
@@ -741,7 +767,7 @@ class AITrader:
                 tok, sz, sfty = args
 
                 # Holder count hard block — use data already fetched by safety checker
-                if sfty and getattr(sfty, "holder_count", None) and 0 < sfty.holder_count < 20:
+                if sfty and getattr(sfty, "holder_count", None) and 0 < sfty.holder_count < 100:
                     logger.warning("SKIP %s: only %d holders (rug risk)",
                                    tok.base_symbol, sfty.holder_count)
                     return None
@@ -799,6 +825,13 @@ class AITrader:
     def _open_dex_position(self, token, size_usd: float, safety=None):
         """Open a DEX position with safety verification and MEV protection."""
         try:
+            # ── Skip tokens that recently failed to buy (routing / overflow) ──
+            expiry = self._buy_failed_cache.get(token.base_address, 0)
+            if expiry and time.time() < expiry:
+                logger.debug("SKIP %s: in buy-fail cache (%.0fm remaining)",
+                             token.base_symbol, (expiry - time.time()) / 60)
+                return
+
             # ── Require a valid pair address as position key ─────────────────
             if not token.pair_address:
                 logger.warning("SKIP %s: missing pair_address — cannot track position",
@@ -826,7 +859,35 @@ class AITrader:
                                    sol_bal_usd, size_usd)
                     return
 
-            safety_score = safety.safety_score if safety else 0.5
+            # ── Pre-entry Birdeye price cross-validation ─────────────────────
+            # If DexScreener and Birdeye disagree >25%, the DexScreener quote is
+            # likely stale or manipulated — skip to avoid entering at wrong price.
+            if token.chain_id == "solana" and not getattr(token, "birdeye_price_confirmed", False):
+                try:
+                    from dex_screener import _get_birdeye as _dex_be
+                    _be = _dex_be()
+                    if _be and _be.enabled:
+                        bp = _be.get_price(token.base_address)
+                        if bp and bp.price_usd > 0:
+                            divergence = abs(bp.price_usd - token.price_usd) / token.price_usd
+                            if divergence > 0.25:
+                                logger.warning(
+                                    "SKIP %s: price divergence %.0f%% "
+                                    "(DS=$%.8f BE=$%.8f) — stale quote",
+                                    token.base_symbol, divergence * 100,
+                                    token.price_usd, bp.price_usd)
+                                return
+                            token.price_usd = bp.price_usd  # use fresh Birdeye price
+                        # If Birdeye has no price at all, allow entry (very new token)
+                        # but log it so we can monitor these trades
+                        else:
+                            logger.info(
+                                "ENTRY NOTE %s: no Birdeye price — very new or illiquid token",
+                                token.base_symbol)
+                except Exception:
+                    pass  # Birdeye check failed — proceed with existing price
+
+            safety_score = safety.safety_score if safety else 0.0  # Unknown = don't trade
             # AI-computed stop and target per trade based on token's own volatility
             stop_pct   = self.risk_mgr.dynamic_dex_stop_pct(
                 price_change_h1  = getattr(token, "price_change_h1",  0) or 0,
@@ -871,6 +932,9 @@ class AITrader:
                     logger.warning("BUY skipped %s: safe_buy_token returned None "
                                    "(check BUY FAILED / BLOCKED logs above)",
                                    token.base_symbol)
+                    # Cache buy failure so scanner skips this token for 30 min.
+                    # Prevents wasting time on PumpSwap overflow / no-route tokens.
+                    self._buy_failed_cache[token.base_address] = time.time() + 1800
                 elif tx.startswith("paper_"):
                     logger.warning("BUY skipped %s: got paper tx in live mode — "
                                    "solana.is_connected may have flipped", token.base_symbol)
@@ -944,17 +1008,28 @@ class AITrader:
                 time.sleep(3)
                 if not self._dex_positions:
                     continue
+                mints_and_pairs = [(pos["address"], pair_addr, pos)
+                                   for pair_addr, pos in self._dex_positions.items()
+                                   if pos.get("chain") == "solana"]
+                if not mints_and_pairs:
+                    continue
+                mints = [m for m, _, _ in mints_and_pairs]
+
+                # Try Birdeye first; fall back to Jupiter price API if unavailable
                 be = _get_birdeye()
-                if not be or not be.enabled:
-                    continue
+                prices = {}
+                if be and be.enabled:
+                    prices = be.get_multi_price(mints) or {}
 
-                # Batch-fetch all held Solana token prices in one API call
-                mints = [pos["address"] for pos in self._dex_positions.values()
-                         if pos.get("chain") == "solana"]
-                if not mints:
-                    continue
-
-                prices = be.get_multi_price(mints)
+                # Jupiter fallback for any mints Birdeye didn't return
+                missing = [m for m in mints if m not in prices or not prices[m]]
+                if missing:
+                    for mint in missing:
+                        jp = self._get_jupiter_price(mint)
+                        if jp and jp > 0:
+                            from types import SimpleNamespace
+                            prices[mint] = SimpleNamespace(
+                                price_usd=jp, volume_24h_usd=0)
 
                 to_close = []
                 for pair_addr, pos in list(self._dex_positions.items()):
@@ -976,6 +1051,37 @@ class AITrader:
                     if prev > 0:
                         pos["price_change_m5"] = (current - prev) / prev * 100
 
+                    # Accumulate tick buffer for TA-based exit signals
+                    if config.TA_EXIT_ENABLED:
+                        vol_tick = getattr(bp, "volume_24h_usd", 0) or 0
+                        pos.setdefault("candle_buffer", []).append(
+                            (time.time(), current, vol_tick))
+                        buf = pos["candle_buffer"]
+                        if len(buf) > config.TA_CANDLE_BUFFER_SIZE:
+                            pos["candle_buffer"] = buf[-config.TA_CANDLE_BUFFER_SIZE:]
+                        # Recompute TA every TA_EXIT_COMPUTE_INTERVAL seconds
+                        if time.time() - pos.get("last_ta_compute", 0) > config.TA_EXIT_COMPUTE_INTERVAL:
+                            if len(pos["candle_buffer"]) >= 20:
+                                try:
+                                    from ta_layer import ticks_to_df, compute_ta_signals
+                                    df_buf = ticks_to_df(pos["candle_buffer"], resample="15s")
+                                    ta_sigs = compute_ta_signals(df_buf)
+                                    pos["ta_exit_signal"] = ta_sigs.get("composite", 0.0)
+                                except Exception:
+                                    pass
+                            pos["last_ta_compute"] = time.time()
+
+                    # ── 0. PARTIAL PROFIT-TAKING (runs on 3s fast loop) ─────
+                    # Must run BEFORE any full-close logic so partials fire first.
+                    sell_frac, partial_reason, partial_threshold = \
+                        self.risk_mgr.get_partial_profit_action(pos)
+                    if sell_frac is not None:
+                        logger.info("FAST PARTIAL %s: %s", pos.get("symbol", "?"), partial_reason)
+                        self._execute_partial_profit(
+                            pair_addr, pos, sell_frac, partial_reason, partial_threshold)
+                        # Don't full-close on the same tick — let the runner ride
+                        continue
+
                     # ── 1. Spike capture: only sell the spike if already well in profit
                     # Don't sell early runners — only take spikes when you've already
                     # captured a solid gain (>25%). Otherwise you sell the start of a moon.
@@ -987,13 +1093,24 @@ class AITrader:
                                 f"FastMonitor spike: +{surge:.0%} in 3s (PnL +{pnl_pct:.0%})"))
                             continue
 
+                    # ── 1b. TA-driven trend reversal exit ─────────────────────
+                    if config.TA_EXIT_ENABLED:
+                        ta_sig = pos.get("ta_exit_signal", 0.0)
+                        if ta_sig <= config.TA_EXIT_BEARISH_THRESHOLD and pnl_pct > 0.03:
+                            to_close.append((
+                                pair_addr, pos, current,
+                                f"TA exit: composite={ta_sig:.2f} (PnL +{pnl_pct:.0%})"))
+                            continue
+
                     # ── 2. Reversal after peak: price dropped fast from ATH ───
                     peak = pos.get("peak_price", entry)
                     if peak > entry and pnl_pct > 0:
                         reversal = (peak - current) / peak
                         # Tighter for small profits, widens as gains increase.
                         # At +8% profit sell if -12% reversal; at +100% allow -28%.
-                        reversal_threshold = min(0.12 + pnl_pct * 0.08, 0.28)
+                        # TA: when trend is bullish, allow 5% more reversal before exit.
+                        ta_adj = max(pos.get("ta_exit_signal", 0.0), 0) * 0.05
+                        reversal_threshold = min(0.12 + pnl_pct * 0.08 + ta_adj, 0.32)
                         if reversal >= reversal_threshold and pnl_pct > 0.05:
                             to_close.append((
                                 pair_addr, pos, current,
@@ -1038,6 +1155,26 @@ class AITrader:
                         to_close.append((
                             pair_addr, pos, current,
                             f"FastMonitor stop-loss {pnl_pct:.0%}"))
+                        continue
+
+                    # ── 5. Liquidity decay detection ──────────────────────────
+                    # Rapidly draining liquidity = rug or coordinated mass exit.
+                    # Exit before slippage becomes catastrophic.
+                    cur_liq = getattr(bp, "liquidity_usd", 0) or 0
+                    entry_liq = pos.get("entry_liquidity_usd", 0)
+                    if entry_liq <= 0 and cur_liq > 0:
+                        pos["entry_liquidity_usd"] = cur_liq
+                    elif entry_liq > 0 and cur_liq > 0:
+                        liq_drop = (entry_liq - cur_liq) / entry_liq
+                        prev_liq_drop = pos.get("prev_liq_drop", 0.0)
+                        pos["prev_liq_drop"] = liq_drop
+                        # Two consecutive ticks showing >50% liquidity drain
+                        if liq_drop > 0.50 and prev_liq_drop > 0.50:
+                            to_close.append((
+                                pair_addr, pos, current,
+                                f"FastMonitor liquidity drain: -{liq_drop:.0%} from entry "
+                                f"(${entry_liq:.0f}→${cur_liq:.0f})"))
+                            continue
 
                 for pair_addr, pos, current, reason in to_close:
                     logger.info("FAST EXIT %s @ $%.8f | %s",
@@ -1136,8 +1273,6 @@ class AITrader:
                     "ts":     datetime.now(timezone.utc).isoformat(),
                     "equity": round(equity, 2),
                 })
-                if len(self._equity_curve) > 17_280:   # 24h at 5s cadence
-                    self._equity_curve = self._equity_curve[-17_280:]
 
                 # ── 4. Write live bot_state.json + Supabase persistence ──────
                 self._write_bot_state(equity, 0.0)
@@ -1177,7 +1312,11 @@ class AITrader:
                 pos["_price_miss"] = 0  # reset on successful fetch
 
                 entry   = pos["entry_price"]
-                current = token.price_usd
+                # Prefer Birdeye price (updated every 3s by fast monitor) over
+                # DexScreener — DexScreener can return stale/inflated quotes for
+                # illiquid tokens, causing false spike exits at the wrong price.
+                birdeye_price = pos.get("current_price", 0)
+                current = birdeye_price if birdeye_price > 0 else token.price_usd
                 pnl_pct = (current - entry) / entry if entry > 0 else 0
                 pos["current_price"]  = current
                 pos["current_pnl_pct"] = pnl_pct
@@ -1236,7 +1375,13 @@ class AITrader:
                     pos["stop_pct"] = min(pos.get("stop_pct", 0.20),
                                          max(0.08, pnl_pct * 0.30))  # protect 70% of gains
 
-                # 0. VOLATILITY SPIKE EXIT — sell at the top of a sudden pump
+                # 0. PARTIAL PROFIT-TAKING — must run before any full-close logic
+                # so we lock in gains tier by tier instead of closing everything at once
+                sell_frac, partial_reason, partial_threshold = self.risk_mgr.get_partial_profit_action(pos)
+                if sell_frac is not None:
+                    self._execute_partial_profit(pair_addr, pos, sell_frac, partial_reason, partial_threshold)
+
+                # 0b. VOLATILITY SPIKE EXIT — sell at the top of a sudden pump
                 # If price surged ≥15% since the last cycle, we're likely at or near
                 # the peak; sell immediately before the dump reversal.
                 prev_price = pos.get("prev_price", entry)
@@ -1263,11 +1408,6 @@ class AITrader:
                     self._try_close_dex_position(
                         pair_addr, pos, current, "Dust cleanup (<2% remaining)")
                     continue
-
-                # 3. PARTIAL PROFIT-TAKING
-                sell_frac, partial_reason, partial_threshold = self.risk_mgr.get_partial_profit_action(pos)
-                if sell_frac is not None:
-                    self._execute_partial_profit(pair_addr, pos, sell_frac, partial_reason, partial_threshold)
 
                 # 4. FULL EXIT conditions
                 remaining = pos.get("remaining_fraction", 1.0)
@@ -1344,11 +1484,45 @@ class AITrader:
         result = self._close_dex_position(pair_addr, pos, current_price, reason)
         if result is False:
             # On-chain sell failed — re-insert so the next cycle can retry.
-            # Only re-insert if nothing else has taken that slot (shouldn't happen,
-            # but guard anyway to avoid overwriting a re-opened position).
+            # Track retry count so slippage widens on each attempt.
+            retries = pos.get("_sell_retries", 0) + 1
+            pos["_sell_retries"] = retries
             with self._dex_lock:
                 if pair_addr not in self._dex_positions:
                     self._dex_positions[pair_addr] = pos
+
+            # ── Force-close after 5 consecutive sell failures ─────────────────
+            # If Jupiter/Raydium/PumpSwap all fail repeatedly, the tokens are
+            # effectively stuck (overflow pool, no route, etc.).  Accept the loss
+            # now rather than letting the position bleed further while retrying.
+            if retries >= 5:
+                logger.error(
+                    "FORCE-CLOSE %s after %d failed sell attempts — writing off "
+                    "at $%.8f. Tokens remain in wallet; reconciliation will re-add "
+                    "if still held.",
+                    pos.get("symbol", "?"), retries, current_price)
+                with self._dex_lock:
+                    self._dex_positions.pop(pair_addr, None)
+                # Record the loss so equity/PnL accounting is correct.
+                # Cash is NOT credited — we still hold the tokens.
+                entry = pos.get("entry_price", 0) or current_price
+                remaining = pos.get("remaining_fraction", 1.0)
+                size = pos["size_usd"] * remaining
+                loss_pct = (current_price - entry) / entry if entry > 0 else -1.0
+                loss_usd = size * loss_pct
+                pos["_forced_close"] = True
+                self.portfolio.closed_trades.append({
+                    "asset_id": pair_addr, "symbol": pos["symbol"],
+                    "market": "dex", "side": "buy",
+                    "entry_price": entry, "exit_price": current_price,
+                    "qty": pos.get("qty", 0), "pnl_usd": loss_usd,
+                    "pnl_pct": round(loss_pct * 100, 2),
+                    "reason": f"Force-close ({retries} sell failures)",
+                    "opened_at": pos.get("opened_at", ""),
+                    "closed_at": datetime.now(timezone.utc).isoformat(),
+                })
+                self.portfolio.save()
+                return False
         return result
 
     def _close_dex_position(self, pair_addr: str, pos: dict, current_price: float, reason: str) -> bool:
@@ -1365,8 +1539,17 @@ class AITrader:
 
         liq_usd = pos.get("liquidity_usd", 0.0)
         if pos["chain"] == "solana" and self.solana.is_connected and "paper" not in pos.get("tx", ""):
+            # Widen slippage on sell retries — each failed attempt adds 200bps (2%)
+            # so emergency sells go through even on volatile tokens
+            retry_n = pos.get("_sell_retries", 0)
+            emergency_slippage = None
+            if retry_n > 0:
+                emergency_slippage = min(300 + retry_n * 200, 2000)  # up to 20%
+                logger.info("Sell retry #%d for %s — slippage widened to %dbps",
+                            retry_n, pos.get("symbol", "?"), emergency_slippage)
             sell_result = self.solana.sell_token(pos["address"], proceeds,
                                                 liquidity_usd=liq_usd,
+                                                slippage_bps=emergency_slippage,
                                                 pair_address=pair_addr if pos.get("dex_id") == "pumpswap" else None)
             if sell_result:
                 _sig, actual_usd = sell_result
@@ -1436,6 +1619,16 @@ class AITrader:
         if len(self.portfolio.closed_trades) > _MAX_CLOSED_TRADES_MEMORY:
             self.portfolio._archive_old_trades()
 
+        # ── Feed outcome to market intelligence ────────────────────────
+        try:
+            from market_intelligence import get_engine as _mi_engine
+            _mi_engine().record_trade_outcome(
+                pnl_pct=trade_record.get("pnl_pct", 0),
+                pnl_usd=trade_record.get("pnl_usd", 0),
+            )
+        except Exception:
+            pass
+
         # ── Trigger per-trade review + periodic repivot on every close ────
         self._dex_closed_count += 1
         try:
@@ -1480,6 +1673,10 @@ class AITrader:
             # Append the TIER threshold (not current pnl_pct) so the check
             # `threshold_pct not in already_taken` correctly marks it as done.
             pos["partial_profits_taken"].append(threshold_pct)
+
+            # Persist immediately — partial profits update remaining_fraction and
+            # partial_profits_taken, which must survive a crash or restart.
+            self._save_dex_positions()
 
             logger.info("PARTIAL TP %s: sold %.0f%% ($%.2f) | %s",
                          pos["symbol"], fraction * 100, proceeds, reason)
@@ -1895,6 +2092,50 @@ class AITrader:
         except Exception as e:
             logger.debug("Live wallet sync error: %s", e)
 
+    def _log_startup_health(self, live: bool):
+        """Print a clear checklist of which keys/services are present at startup."""
+        ok  = "\u2713"
+        bad = "\u2717"
+
+        checks = []
+        # Birdeye — required for prices, safety data, trending
+        be_ok = bool(config.BIRDEYE_API_KEY)
+        checks.append((be_ok, "Birdeye API key",
+                       "Set BIRDEYE_API_KEY in .env (get one at birdeye.so — free tier available)"))
+
+        # Phantom wallet — required for real trades
+        wallet_ok = self.solana.is_connected
+        checks.append((wallet_ok, "Phantom wallet",
+                       "Set PHANTOM_PRIVATE_KEY in .env (Phantom → Settings → Export Private Key)"))
+
+        # Solana RPC — warn if using slow public endpoint
+        rpc = config.SOLANA_RPC_URL
+        rpc_ok = "mainnet-beta.solana.com" not in rpc
+        checks.append((rpc_ok, f"Solana RPC ({rpc.split('/')[2][:30]})",
+                       "Public RPC is heavily throttled — use Helius/QuickNode free tier: "
+                       "helius.dev → set SOLANA_RPC_URL in .env"))
+
+        # Supabase — optional but useful for persistence
+        sb_ok = bool(config.SUPABASE_URL and config.SUPABASE_SERVICE_KEY)
+        checks.append((sb_ok, "Supabase (persistence)",
+                       "Optional — set SUPABASE_URL + SUPABASE_SERVICE_KEY in .env for trade history"))
+
+        lines = [f"  {'LIVE' if live else 'PAPER'} MODE — startup health check"]
+        for is_ok, name, fix in checks:
+            icon = ok if is_ok else bad
+            lines.append(f"  {icon} {name}")
+            if not is_ok:
+                lines.append(f"      FIX: {fix}")
+
+        # Critical: can't trade without Birdeye + wallet in live mode
+        critical_missing = live and (not be_ok or not wallet_ok)
+        if critical_missing:
+            lines.append("  ! DEX trading disabled until BIRDEYE_API_KEY and "
+                         "PHANTOM_PRIVATE_KEY are configured")
+
+        level = logging.WARNING if (not be_ok or (live and not wallet_ok)) else logging.INFO
+        logger.log(level, "\n".join(lines))
+
     def _save_dex_positions(self):
         """Persist open DEX positions so they survive restarts."""
         try:
@@ -1952,7 +2193,9 @@ class AITrader:
 
     def _save_equity_curve(self):
         try:
-            self._atomic_json("equity_curve.json", self._equity_curve[-10_000:], indent=2)
+            # Convert deque to list before slicing (deque doesn't support slices)
+            curve_list = list(self._equity_curve)
+            self._atomic_json("equity_curve.json", curve_list[-10_000:], indent=2)
         except Exception:
             pass
 

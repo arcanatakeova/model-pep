@@ -6,7 +6,7 @@ import os
 
 # ─── Trading Mode ─────────────────────────────────────────────────────────────
 PAPER_TRADING = False         # Live mode by default — real Solana DEX trades via Phantom
-INITIAL_CAPITAL = 100_000.0   # Starting capital in USD (overridden by wallet balance)
+INITIAL_CAPITAL = 15.0        # Starting capital in USD (overridden by wallet balance)
 
 # ─── Risk Management ──────────────────────────────────────────────────────────
 MAX_POSITION_PCT = 0.18       # Max 18% of portfolio per position (up from 15%)
@@ -142,7 +142,7 @@ TRADE_LOG_FILE = "trades.json"
 PORTFOLIO_SNAPSHOT_INTERVAL = 300   # Save portfolio snapshot every 5 minutes
 
 # ─── DEX / On-Chain Settings ──────────────────────────────────────────────────
-DEX_MIN_SCORE = 0.33               # Quality gate — 0.36 yielded 0 opportunities; 0.33 filters bottom tier
+DEX_MIN_SCORE = 0.50               # Quality gate — higher bar to enter positions
 DEX_MAX_POSITION_USD = 750.0       # Max per DEX token (raised from $500)
 DEX_PREFERRED_CHAINS = ["solana"]  # Solana only
 DEX_SCAN_INTERVAL_SEC = 4          # Scan DEX every 4s — catch entries faster
@@ -150,35 +150,33 @@ NEW_PAIR_MAX_AGE_HOURS = 24        # Only tokens < 24h old (memecoins die after 
 NEW_PAIR_MIN_LIQUIDITY = 5_000     # $5k minimum liquidity (catch very early pumps)
 
 # ─── Token Safety / Rug Protection (Balanced Mode) ──────────────────────────
-MIN_SAFETY_SCORE = 0.28            # Lowered: high-conviction overrides, more trades
-SAFETY_SCORE_WEIGHT = 0.12         # Reduced weight (was 0.15): momentum > safety for memecoins
+MIN_SAFETY_SCORE = 0.55            # Block HIGH-risk tokens — capital preservation first
+SAFETY_SCORE_WEIGHT = 0.35         # Safety matters more than momentum in scoring
 ENABLE_SELL_SIMULATION = True      # Honeypot check via Jupiter round-trip quote
 SELL_SIM_AMOUNT_USD = 1.0          # Dollar amount for sell simulation
-MAX_ROUND_TRIP_TAX_PCT = 0.45      # Max acceptable round-trip tax (memecoins have high fees)
+MAX_ROUND_TRIP_TAX_PCT = 0.15      # Max acceptable round-trip tax (block high-tax tokens)
 RUGCHECK_CACHE_TTL = 300           # Cache safety results for 5 minutes
 SAFETY_CHECK_TIMEOUT = 10          # Seconds before safety check times out
 BLOCK_HONEYPOTS = True             # Hard block if sell simulation fails completely
 MAX_TOP10_HOLDER_PCT = 0.85        # Penalize if top 10 holders own > 85% (loosened from 80%)
 
 # ─── Volatility-Adjusted Position Sizing ────────────────────────────────────
-DEX_BASE_POSITION_USD = 100.0      # Base position for memecoin trades (raised from $75)
+DEX_BASE_POSITION_USD = 50.0       # Base position for memecoin trades (reduced for safety)
 DEX_MIN_POSITION_USD = 1.0         # Minimum position size (covers Solana fees ~$0.50)
 POSITION_VOL_SCALAR = 1.0          # Multiplier for vol-adjusted sizing
-MAX_MEMECOIN_ALLOCATION_PCT = 0.65 # Max 65% of equity in memecoins (raised from 50%)
+MAX_MEMECOIN_ALLOCATION_PCT = 0.90 # 90% of Solana wallet dedicated to memecoins
 
 # ─── Time-Based Exit Rules ──────────────────────────────────────────────────
-DEX_MAX_HOLD_HOURS = 10            # Force exit after 10h (raised from 6h — let winners run)
-DEX_STALE_EXIT_HOURS = 2.0         # Exit if no momentum after 2.0h (tightened from 2.5h)
-DEX_STALE_MIN_GAIN_PCT = 0.03      # Need +3% gain to justify holding past stale threshold
+DEX_MAX_HOLD_HOURS = 4             # Force exit after 4h — exit faster
+DEX_STALE_EXIT_HOURS = 1.0         # Exit stale positions after 1h
+DEX_STALE_MIN_GAIN_PCT = 0.05      # Need +5% gain to justify holding past stale threshold
 
 # ─── Partial Profit Taking ──────────────────────────────────────────────────
 PARTIAL_PROFIT_ENABLED = True
 PARTIAL_PROFIT_TIERS = [
-    (0.15, 0.20),   # At +15% gain, sell 20% — lock first profit faster (was +25%/15%)
-    (0.40, 0.20),   # At +40% gain, sell another 20%
-    (0.90, 0.20),   # At +90% gain (near 2x), sell another 20%
-    (2.00, 0.20),   # At +200% gain (3x), sell another 20%
-    # Remaining 20% rides with trailing stop — moonshot runner
+    (0.20, 0.30),   # At +20%, sell 30%
+    (0.50, 0.30),   # At +50%, sell 30%
+    (1.00, 0.30),   # At +100%, sell 30%
 ]
 
 # ─── MEV / Sandwich Protection ──────────────────────────────────────────────
@@ -187,7 +185,7 @@ MEV_MAX_SLIPPAGE_BPS = 100         # Tighter slippage (1%) for MEV protection
 MEV_PRIORITY_FEE_LAMPORTS = 50000  # Higher priority fee to front-run sandwich
 
 # ─── Concentration Limits ───────────────────────────────────────────────────
-MAX_DEX_POSITIONS = 250            # Max concurrent DEX/memecoin positions
+MAX_DEX_POSITIONS = 5              # Max concurrent DEX/memecoin positions (strict cap)
 MAX_SAME_DEX_POSITIONS = 100       # Max positions on same DEX
 MIN_LIQUIDITY_RATIO = 0.15         # Position must be < 15% of pool liquidity (up from 8%)
 
@@ -233,6 +231,39 @@ POLYMARKET_NEWS_ENABLED = True
 POLYMARKET_CROSS_PLATFORM_ENABLED = True
 POLYMARKET_SMART_MONEY_ENABLED = True
 POLYMARKET_SMART_MONEY_MIN_RANK = 20   # Track top 20 traders
+
+# ─── Technical Indicators (DEX Enhancement Layer) ────────────────────────────
+TA_ENABLED = True                    # Master switch for TA enhancement
+TA_MIN_SCORE_THRESHOLD = 0.35        # Only fetch OHLCV for tokens scoring above this
+TA_MAX_ADJUSTMENT = 0.15             # Max score adjustment from TA (+/-)
+TA_OHLCV_INTERVAL = "5m"             # Candle interval for entry scoring
+TA_OHLCV_LIMIT = 50                  # Number of candles to fetch (50 * 5m = ~4h)
+TA_MIN_CANDLES = 10                  # Minimum candles for any indicator
+TA_EXIT_ENABLED = True               # Use TA in fast price monitor exits
+TA_EXIT_COMPUTE_INTERVAL = 30        # Seconds between TA recomputation for held positions
+TA_EXIT_BEARISH_THRESHOLD = -0.6     # TA score below this triggers profit-taking exit
+TA_CANDLE_BUFFER_SIZE = 300          # Max ticks to buffer per position
+
+# Supertrend parameters
+SUPERTREND_PERIOD = 10
+SUPERTREND_MULTIPLIER = 3.0
+
+# Stochastic RSI parameters
+STOCH_RSI_PERIOD = 14
+STOCH_K_SMOOTH = 3
+STOCH_D_SMOOTH = 3
+
+# Memecoin TA weights (tuned for short-timeframe momentum patterns)
+MEMECOIN_TA_WEIGHTS = {
+    "rsi":        0.10,
+    "stoch_rsi":  0.15,
+    "momentum":   0.20,
+    "roc_accel":  0.10,
+    "supertrend": 0.15,
+    "vwap":       0.10,
+    "obv":        0.10,
+    "volume":     0.10,
+}
 
 # ─── Compounding ──────────────────────────────────────────────────────────────
 COMPOUND_ALL_PROFITS = True        # Always reinvest — never withdraw

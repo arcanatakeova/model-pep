@@ -306,6 +306,241 @@ def atr_stop(close: pd.Series, high: pd.Series, low: pd.Series,
 
 # ─── Composite Score ──────────────────────────────────────────────────────────
 
+# ─── Supertrend ───────────────────────────────────────────────────────────────
+
+def supertrend(high: pd.Series, low: pd.Series, close: pd.Series,
+               period: int = config.SUPERTREND_PERIOD,
+               multiplier: float = config.SUPERTREND_MULTIPLIER) -> pd.Series:
+    """
+    Returns a Series of +1 (uptrend) or -1 (downtrend) values.
+    Uses ATR-based upper/lower bands; direction flips on price crossover.
+    """
+    a = atr(high, low, close, period)
+    hl_mid = (high + low) / 2
+    upper = hl_mid + multiplier * a
+    lower = hl_mid - multiplier * a
+
+    trend = pd.Series(index=close.index, dtype=float)
+    final_upper = upper.copy()
+    final_lower = lower.copy()
+
+    for i in range(1, len(close)):
+        # Upper band: only tighten when in downtrend
+        final_upper.iloc[i] = (
+            upper.iloc[i] if upper.iloc[i] < final_upper.iloc[i - 1]
+            or close.iloc[i - 1] > final_upper.iloc[i - 1]
+            else final_upper.iloc[i - 1]
+        )
+        # Lower band: only widen when in uptrend
+        final_lower.iloc[i] = (
+            lower.iloc[i] if lower.iloc[i] > final_lower.iloc[i - 1]
+            or close.iloc[i - 1] < final_lower.iloc[i - 1]
+            else final_lower.iloc[i - 1]
+        )
+
+        prev_trend = trend.iloc[i - 1] if i > 1 and not pd.isna(trend.iloc[i - 1]) else 1.0
+        if prev_trend == -1.0 and close.iloc[i] > final_upper.iloc[i]:
+            trend.iloc[i] = 1.0   # Crossed above upper → flip to uptrend
+        elif prev_trend == 1.0 and close.iloc[i] < final_lower.iloc[i]:
+            trend.iloc[i] = -1.0  # Crossed below lower → flip to downtrend
+        else:
+            trend.iloc[i] = prev_trend
+
+    return trend
+
+
+def supertrend_signal(high: pd.Series, low: pd.Series, close: pd.Series) -> float:
+    """
+    Returns [-1, +1]. Adds a recency bonus when the trend just flipped.
+    """
+    min_len = config.SUPERTREND_PERIOD + 5
+    if not _validate(close, min_len):
+        return 0.0
+    st = supertrend(high, low, close)
+    valid = st.dropna()
+    if len(valid) < 2:
+        return 0.0
+    current = valid.iloc[-1]
+    prev = valid.iloc[-2]
+    base = float(current)
+    # Recency bonus: +0.3 magnitude boost on a fresh crossover
+    if current != prev:
+        base = float(np.clip(current * 1.3, -1, 1))
+    return float(np.clip(base, -1, 1))
+
+
+# ─── Stochastic RSI ───────────────────────────────────────────────────────────
+
+def stoch_rsi(close: pd.Series,
+              rsi_period: int = config.STOCH_RSI_PERIOD,
+              stoch_period: int = config.STOCH_RSI_PERIOD,
+              k_smooth: int = config.STOCH_K_SMOOTH,
+              d_smooth: int = config.STOCH_D_SMOOTH) -> tuple[pd.Series, pd.Series]:
+    """
+    Returns (%K, %D) Stochastic RSI series (0-100 range).
+    Applies the stochastic formula to RSI values.
+    """
+    r = rsi(close, rsi_period)
+    rsi_low  = r.rolling(stoch_period).min()
+    rsi_high = r.rolling(stoch_period).max()
+    rsi_range = rsi_high - rsi_low
+    k_raw = (r - rsi_low) / rsi_range.replace(0, np.nan) * 100
+    k = k_raw.rolling(k_smooth).mean()
+    d = k.rolling(d_smooth).mean()
+    return k, d
+
+
+def stoch_rsi_signal(close: pd.Series) -> float:
+    """
+    Returns [-1, +1] based on %K/%D crossover and overbought/oversold zones (80/20).
+    """
+    min_len = config.STOCH_RSI_PERIOD * 2 + config.STOCH_K_SMOOTH + 5
+    if not _validate(close, min_len):
+        return 0.0
+    k, d = stoch_rsi(close)
+    k_valid = k.dropna()
+    d_valid = d.dropna()
+    if len(k_valid) < 2 or len(d_valid) < 2:
+        return 0.0
+    kv  = k_valid.iloc[-1]
+    kp  = k_valid.iloc[-2]
+    dv  = d_valid.iloc[-1]
+
+    score = 0.0
+    # Oversold / overbought zone
+    if kv < 20:
+        score += 0.5
+    elif kv > 80:
+        score -= 0.5
+
+    # %K/%D crossover
+    if kv > dv and kp <= d_valid.iloc[-2] if len(d_valid) > 1 else kp <= dv:
+        score += 0.5   # bullish crossover
+    elif kv < dv and kp >= d_valid.iloc[-2] if len(d_valid) > 1 else kp >= dv:
+        score -= 0.5   # bearish crossover
+
+    return float(np.clip(score, -1, 1))
+
+
+# ─── VWAP ─────────────────────────────────────────────────────────────────────
+
+def vwap(high: pd.Series, low: pd.Series, close: pd.Series,
+         volume: pd.Series) -> pd.Series:
+    """Volume-Weighted Average Price (cumulative, intraday-style from start of window)."""
+    typical = (high + low + close) / 3
+    cum_vol = volume.cumsum()
+    cum_tp_vol = (typical * volume).cumsum()
+    return cum_tp_vol / cum_vol.replace(0, np.nan)
+
+
+def vwap_signal(high: pd.Series, low: pd.Series, close: pd.Series,
+                volume: pd.Series) -> float:
+    """
+    Returns [-1, +1] based on price position relative to VWAP and distance magnitude.
+    """
+    if not _validate(close, 5) or not _validate(volume, 5) or volume.sum() == 0:
+        return 0.0
+    vw = vwap(high, low, close, volume)
+    latest_vwap = vw.dropna().iloc[-1] if not vw.dropna().empty else None
+    if latest_vwap is None or latest_vwap == 0 or pd.isna(latest_vwap):
+        return 0.0
+    price = close.iloc[-1]
+    deviation = (price - latest_vwap) / latest_vwap
+    # Positive deviation = price above VWAP = bullish; scale and clip
+    return float(np.clip(deviation * 10, -1, 1))
+
+
+# ─── ADX ──────────────────────────────────────────────────────────────────────
+
+def adx(high: pd.Series, low: pd.Series, close: pd.Series,
+        period: int = 14) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    Returns (ADX, +DI, -DI).
+    ADX > 25 indicates a trending market.
+    """
+    up_move   = high.diff()
+    down_move = -(low.diff())
+    plus_dm   = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm  = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm_s  = pd.Series(plus_dm,  index=high.index).ewm(com=period - 1, adjust=False).mean()
+    minus_dm_s = pd.Series(minus_dm, index=high.index).ewm(com=period - 1, adjust=False).mean()
+    atr_s = atr(high, low, close, period)
+    plus_di  = 100 * plus_dm_s  / atr_s.replace(0, np.nan)
+    minus_di = 100 * minus_dm_s / atr_s.replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx_s = dx.ewm(com=period - 1, adjust=False).mean()
+    return adx_s, plus_di, minus_di
+
+
+def adx_signal(high: pd.Series, low: pd.Series, close: pd.Series) -> float:
+    """
+    Returns [-1, +1].  Magnitude scales with ADX value (>25 = trending).
+    Below ADX 20, returns 0.0 (no clear trend — indicator abstains).
+    """
+    if not _validate(close, 30):
+        return 0.0
+    adx_s, plus_di, minus_di = adx(high, low, close)
+    adx_val  = adx_s.dropna().iloc[-1]  if not adx_s.dropna().empty  else 0.0
+    pdi_val  = plus_di.dropna().iloc[-1]  if not plus_di.dropna().empty  else 0.0
+    mdi_val  = minus_di.dropna().iloc[-1] if not minus_di.dropna().empty else 0.0
+    if pd.isna(adx_val) or adx_val < 20:
+        return 0.0
+    direction = np.sign(pdi_val - mdi_val)
+    strength  = min(adx_val / 50, 1.0)   # 50+ ADX = full conviction
+    return float(np.clip(direction * strength, -1, 1))
+
+
+# ─── OBV ──────────────────────────────────────────────────────────────────────
+
+def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    """On-Balance Volume: cumulative volume with sign from price direction."""
+    direction = np.sign(close.diff()).fillna(0)
+    return (direction * volume).cumsum()
+
+
+def obv_signal(close: pd.Series, volume: pd.Series, period: int = 20) -> float:
+    """
+    Returns [-1, +1] based on OBV vs price divergence.
+    OBV rising while price flat = accumulation (+).
+    OBV falling while price flat = distribution (-).
+    """
+    if not _validate(close, period + 5) or not _validate(volume, period + 5):
+        return 0.0
+    obv_s = obv(close, volume)
+    if len(obv_s) < period:
+        return 0.0
+    obv_roc  = (obv_s.iloc[-1] - obv_s.iloc[-period]) / (abs(obv_s.iloc[-period]) + 1e-10)
+    price_roc = (close.iloc[-1] - close.iloc[-period]) / (close.iloc[-period] + 1e-10)
+    divergence = obv_roc - price_roc
+    return float(np.clip(divergence * 5, -1, 1))
+
+
+# ─── ROC Acceleration ─────────────────────────────────────────────────────────
+
+def roc_acceleration_signal(close: pd.Series, period: int = config.MOMENTUM_PERIOD) -> float:
+    """
+    Returns [-1, +1] based on whether momentum (ROC) is accelerating or decelerating.
+    Positive = momentum picking up speed (good for entry); Negative = momentum fading.
+    """
+    if not _validate(close, period * 2 + 5):
+        return 0.0
+    roc_series = close.pct_change(periods=period)
+    if len(roc_series.dropna()) < 3:
+        return 0.0
+    r = roc_series.dropna()
+    current = r.iloc[-1]
+    prev    = r.iloc[-2]
+    prev2   = r.iloc[-3]
+    acceleration = current - prev
+    prev_accel   = prev - prev2
+    score = 0.0
+    score += 0.5 * np.sign(current)           # Momentum direction
+    score += 0.3 * np.sign(acceleration)      # Acceleration direction
+    if np.sign(acceleration) == np.sign(prev_accel):
+        score += 0.2 * np.sign(acceleration)  # Consistent acceleration
+    return float(np.clip(score, -1, 1))
+
+
 def compute_composite_score(df: pd.DataFrame, weights: dict = None) -> float:
     """
     Compute the ensemble signal score for a given OHLCV DataFrame.
