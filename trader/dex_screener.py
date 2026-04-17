@@ -284,11 +284,21 @@ class DexScreener:
         except Exception:
             pass
 
-        # ── Remove recently-evaluated tokens ─────────────────────────────────
+        # ── Remove recently-evaluated tokens (with breakout override) ────────
+        # Tokens in the blacklist can re-enter early if they show a strong breakout:
+        # +20% in 5m or +50% in 1h since being evaluated — means price action has
+        # dramatically changed and we should re-score immediately.
+        breakout_readmitted = 0
+        for t in unique:
+            if t.pair_address in self._evaluated:
+                if abs(t.price_change_m5) >= 20.0 or abs(t.price_change_h1) >= 50.0:
+                    del self._evaluated[t.pair_address]
+                    breakout_readmitted += 1
         fresh = [t for t in unique if t.pair_address not in self._evaluated]
         filtered_count = len(unique) - len(fresh)
-        if filtered_count:
-            logger.debug("Blacklist filtered %d already-evaluated tokens", filtered_count)
+        if filtered_count or breakout_readmitted:
+            logger.debug("Blacklist: filtered=%d readmitted=%d (breakout)",
+                         filtered_count, breakout_readmitted)
 
         # ── Safety checks for high-potential candidates ───────────────────────
         pre_scored = []
